@@ -1,0 +1,36 @@
+{
+  "name": "@mapconductor/core",
+  "version": "0.1.0",
+  "description": "Core abstractions and types for MapConductor React SDK",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./tile-sw.js": "./dist/tile-sw.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts && cp src/tileserver/tile-sw.js dist/tile-sw.js",
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
+    "clean": "rm -rf dist",
+    "test": "echo 'No tests yet'"
+  },
+  "keywords": [
+    "maps",
+    "typescript",
+    "react"
+  ],
+  "author": "MapConductor",
+  "license": "MIT",
+  "devDependencies": {
+    "tsup": "^8.0.1",
+    "typescript": "^5.3.3"
+  }
+}
