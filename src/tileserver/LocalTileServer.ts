@@ -12,7 +12,7 @@ import type { TileRenderRequest, TileRenderResponse } from "./WorkerProtocol";
  *
  * For CPU-intensive tile rendering, attach a Web Worker via `attachRenderer()` so that
  * `renderTile()` executes off the main thread. The worker should call
- * `createTileWorkerHandler()` from `@mapconductor/core`.
+ * `createTileWorkerHandler()` from `@mapconductor/js-sdk-core`.
  */
 export class LocalTileServer {
     private readonly providers = new Map<string, TileProvider>();

@@ -1,7 +1,7 @@
 {
-  "name": "@mapconductor/core",
+  "name": "@mapconductor/js-sdk-core",
   "version": "0.1.0",
-  "description": "Core abstractions and types for MapConductor React SDK",
+  "description": "Core abstractions and types for MapConductor JS SDKs",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",

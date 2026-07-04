@@ -6,7 +6,7 @@ import type { TileRenderRequest, TileRenderResponse } from './WorkerProtocol';
  *
  * Usage in your worker file:
  * ```ts
- * import { createTileWorkerHandler } from '@mapconductor/core';
+ * import { createTileWorkerHandler } from '@mapconductor/js-sdk-core';
  *
  * createTileWorkerHandler({
  *   'my-layer': {
