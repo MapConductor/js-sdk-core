@@ -2,6 +2,7 @@ import { GeoPoint } from "../features";
 import { ColorDefaultIcon, MarkerFingerPrint, MarkerManager, MarkerRenderingStrategy, MarkerState } from "../marker";
 import { createMarkerEntity, MarkerEntity } from "../marker";
 import { AddParams, BitmapIcon, ChangeParams, MarkerOverlayRenderer } from "../marker";
+import { MarkerAnimationOverlayHost } from "../marker";
 import { OnMarkerEventHandler } from "../marker";
 import { MapCameraPosition } from "../types";
 import { OverlayController } from "./OverlayController";
@@ -363,6 +364,10 @@ export abstract class AbstractMarkerController<ActualMarker>
                 }, 100);
             });
         }
+    }
+
+    setMarkerAnimationOverlayHost(host: MarkerAnimationOverlayHost | null): void {
+        this.renderer.animationOverlayHost = host;
     }
 
     destroy(): void {

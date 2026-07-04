@@ -4,8 +4,9 @@ import { Earth } from "../projection";
 import { Settings } from "../settings";
 import { createOffset, Offset } from "../types";
 import { MarkerAnimation } from "./MarkerAnimation";
+import { bounceInterpolation, MarkerAnimationOverlayHost } from "./MarkerAnimationOverlay";
 import { MarkerEntity } from "./MarkerEntity";
-import { AddParams, ChangeParams, MarkerOverlayRenderer } from "./MarkerOverlayRenderer";
+import { AddParams, BitmapIcon, ChangeParams, MarkerOverlayRenderer } from "./MarkerOverlayRenderer";
 import { OnMarkerEventHandler } from "./OnMarkerEventHandler";
 
 const nextAnimationFrame = (): Promise<void> =>
@@ -24,14 +25,15 @@ const now = (): number =>
 
 const clamp01 = (value: number): number => Math.max(0, Math.min(1, value));
 
-const androidBounce = (time: number): number => time * time * 8.0;
-
-const bounceInterpolation = (time: number): number => {
-    const t = time * 1.1226;
-    if (t < 0.3535) return androidBounce(t);
-    if (t < 0.7408) return androidBounce(t - 0.54719) + 0.7;
-    if (t < 0.9644) return androidBounce(t - 0.8526) + 0.9;
-    return androidBounce(t - 1.0435) + 0.95;
+const FALLBACK_BITMAP_ICON: BitmapIcon = {
+    url:
+        "data:image/svg+xml;charset=UTF-8," +
+        encodeURIComponent(
+            '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24">' +
+                '<circle cx="12" cy="12" r="10" fill="#FF0000" stroke="#FFFFFF" stroke-width="2"/></svg>',
+        ),
+    anchor: { x: 0.5, y: 0.5 },
+    size: { width: 24, height: 24 },
 };
 
 export abstract class AbstractMarkerOverlayRenderer<
@@ -46,6 +48,15 @@ export abstract class AbstractMarkerOverlayRenderer<
 
     animateStartListener: OnMarkerEventHandler | null = null
     animateEndListener: OnMarkerEventHandler | null = null
+    animationOverlayHost: MarkerAnimationOverlayHost | null = null
+
+    /**
+     * Set to `true` by a subclass constructor when the provider can hide its
+     * native marker (see `setMarkerVisible`) so animation can be delegated to
+     * a screen-space overlay instead of interpolating geo coordinates.
+     * Mirrors Android's `AbstractMarkerOverlayRenderer.supportsAnimationOverlay`.
+     */
+    protected supportsAnimationOverlay = false;
 
     public readonly holder: MapViewHolderType;
     public readonly dropAnimateDuration: number;
@@ -70,8 +81,21 @@ export abstract class AbstractMarkerOverlayRenderer<
         position: GeoPoint,
     ): void
 
+    /** Toggle native marker visibility. Overridden by providers that support the animation overlay. */
+    setMarkerVisible(_markerEntity: MarkerEntity<ActualMarker>, _visible: boolean): void {
+        // no-op by default: providers without overlay support never hide the native marker
+    }
+
     onAnimate(entity: MarkerEntity<ActualMarker>): Promise<void> {
         const animation = entity.state.getAnimation();
+        if (animation == null) {
+            throw new Error(`No animation is available: ${animation}`);
+        }
+
+        const host = this.animationOverlayHost;
+        if (this.supportsAnimationOverlay && host != null) {
+            return this.animateOnOverlay(entity, animation, host);
+        }
 
         switch (animation) {
             case MarkerAnimation.Drop: {
@@ -84,6 +108,42 @@ export abstract class AbstractMarkerOverlayRenderer<
                 throw new Error(`No animation is available: ${animation}`);
             }
         }
+    }
+
+    /**
+     * Instead of interpolating geographic coordinates (which produces wrong
+     * directions when the map is tilted, rotated, or rendered as a globe/3D
+     * scene), hand the animation to a screen-space overlay: hide the native
+     * marker, let the host animate a bitmap of its icon in screen space
+     * above the map (re-projecting every frame), then restore the marker.
+     * Mirrors Android's `AbstractMarkerOverlayRenderer.animateOnOverlay`.
+     */
+    private animateOnOverlay(
+        entity: MarkerEntity<ActualMarker>,
+        animation: MarkerAnimation,
+        host: MarkerAnimationOverlayHost,
+    ): Promise<void> {
+        const durationMillis =
+            animation === MarkerAnimation.Drop ? this.dropAnimateDuration : this.bounceAnimateDuration;
+
+        return new Promise((resolve) => {
+            this.setMarkerVisible(entity, false);
+            this.animateStartListener?.(entity.state);
+
+            host({
+                id: entity.state.id,
+                state: entity.state,
+                bitmapIcon: entity.state.icon?.toBitmapIcon() ?? FALLBACK_BITMAP_ICON,
+                animation,
+                durationMillis,
+                onFinished: () => {
+                    this.setMarkerVisible(entity, true);
+                    entity.state.animate(null);
+                    this.animateEndListener?.(entity.state);
+                    resolve();
+                },
+            });
+        });
     }
 
     zoomToMetersPerPixel(

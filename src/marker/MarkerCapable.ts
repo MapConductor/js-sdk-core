@@ -1,4 +1,5 @@
 import { OnMarkerEventHandler } from "./OnMarkerEventHandler"
+import { MarkerAnimationOverlayHost } from "./MarkerAnimationOverlay"
 import { MarkerState } from "./MarkerState"
 
 export interface MarkerCapable {
@@ -17,6 +18,9 @@ export interface MarkerCapable {
     setOnMarkerAnimateEnd(listener: OnMarkerEventHandler | null): void
 
     setOnMarkerClickListener(listener: OnMarkerEventHandler | null): void
+
+    /** Route marker animations (Drop/Bounce) to a screen-space overlay instead of geo-interpolation. */
+    setMarkerAnimationOverlayHost(host: MarkerAnimationOverlayHost | null): void
 
     hasMarker(state: MarkerState): boolean
 }
