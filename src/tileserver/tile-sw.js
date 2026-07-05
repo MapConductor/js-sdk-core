@@ -293,7 +293,7 @@ self.addEventListener('fetch', (event) => {
         event.respondWith(
             renderOffscreen(swProvider, x, y, z, tileSize)
                 .then((blob) => {
-                    console.log('[tile-sw] offscreen result blob:', blob ? blob.size : 'null', 'for z=' + z + ' x=' + x + ' y=' + y);
+                    // console.log('[tile-sw] offscreen result blob:', blob ? blob.size : 'null', 'for z=' + z + ' x=' + x + ' y=' + y);
                     return blob ? pngResponse(blob) : emptyTileResponse();
                 })
                 .catch((err) => {
