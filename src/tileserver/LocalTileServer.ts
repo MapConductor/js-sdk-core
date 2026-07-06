@@ -198,7 +198,12 @@ export class LocalTileServer {
             const [, routeId, z, x, y] = match;
             this.handleFetch(routeId, { x: +x, y: +y, z: +z }).then((result) => {
                 if (result) {
-                    event.ports[0].postMessage({ result }, [result.buffer]);
+                    // Copy before transferring: providers may cache and reuse
+                    // the returned bytes (e.g. HeatmapTileRenderer's LRU and
+                    // its shared transparent tile), so transferring their
+                    // buffer would detach it and break subsequent responses.
+                    const bytes = new Uint8Array(result);
+                    event.ports[0].postMessage({ result: bytes }, [bytes.buffer]);
                 } else {
                     event.ports[0].postMessage({ result: null });
                 }
