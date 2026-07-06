@@ -1,6 +1,7 @@
 import type { TileProvider } from '../tileserver/TileProvider';
 import type { TileRequest } from '../tileserver/TileRequest';
 import type { GeoPoint } from '../features';
+import { MarkerIconSize } from '../settings';
 import type { MarkerIcon } from './MarkerIcon';
 import type { BitmapIcon } from './MarkerOverlayRenderer';
 import { createDefaultIcon } from './DefaultMarkerIcon';
@@ -19,14 +20,6 @@ export interface MarkerTileRenderingOptions<T = never> {
      * only non-1 SDKs need to override the default.
      */
     extraIconScale?: number;
-}
-
-function defaultIconScale(zoom: number): number {
-    if (zoom > 12) return 1.3;
-    if (zoom > 10) return 1.0;
-    if (zoom > 8) return 0.8;
-    if (zoom > 5) return 0.5;
-    return 0.2;
 }
 
 function toWorldPixel(lat: number, lng: number, z: number): { wx: number; wy: number } {
@@ -203,6 +196,16 @@ interface PreparedMarker {
     anchorY: number;
 }
 
+function markerTileDrawSize(bitmapIcon: BitmapIcon, scale: number): { width: number; height: number } {
+    const sourceMaxSize = Math.max(bitmapIcon.size.width, bitmapIcon.size.height, 1);
+    const targetMaxSize = MarkerIconSize.Small * scale;
+    const sizeScale = targetMaxSize / sourceMaxSize;
+    return {
+        width: Math.max(bitmapIcon.size.width * sizeScale, 1),
+        height: Math.max(bitmapIcon.size.height * sizeScale, 1),
+    };
+}
+
 /**
  * Canvas-based tile renderer for large marker datasets.
  *
@@ -232,7 +235,7 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
     ) {
         this.tileSize = options.tileSize ?? 256;
         const cb = options.iconScaleCallback;
-        this.iconScale = cb ?? ((_item, zoom) => defaultIconScale(zoom));
+        this.iconScale = cb ?? ((_item, _zoom) => 1.0);
         this.extraIconScale = options.extraIconScale ?? 1.0;
         this.grid = new GeoGridIndex(items);
     }
@@ -288,11 +291,10 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
             }
 
             const callbackScale = Math.max(this.iconScale(item, z), 0);
-            // bitmapIcon.size already includes MarkerIcon.scale (baked in by
-            // toBitmapIcon()); do not multiply it again here.
             const scale = Math.max(callbackScale * this.extraIconScale, 0);
-            const drawW = Math.max(bitmapIcon.size.width * scale, 1);
-            const drawH = Math.max(bitmapIcon.size.height * scale, 1);
+            const drawSize = markerTileDrawSize(bitmapIcon, scale);
+            const drawW = drawSize.width;
+            const drawH = drawSize.height;
             const anchorX = bitmapIcon.anchor.x;
             const anchorY = bitmapIcon.anchor.y;
 
@@ -454,7 +456,11 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
             }
             const index = icons.length;
             iconIndexByUrl.set(bitmapIcon.url, index);
-            icons.push({ bitmap: decoded, anchor: bitmapIcon.anchor, size: bitmapIcon.size });
+            icons.push({
+                bitmap: decoded,
+                anchor: bitmapIcon.anchor,
+                size: markerTileDrawSize(bitmapIcon, 1.0),
+            });
             return index;
         };
 
@@ -469,7 +475,7 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
 
         const representative = this.items[0];
         const zoomScales = Array.from({ length: 23 }, (_, z) =>
-            representative ? Math.max(this.iconScale(representative, z), 0) : defaultIconScale(z),
+            representative ? Math.max(this.iconScale(representative, z), 0) : 1.0,
         );
 
         if (this.items.length > 0 && items.length === 0) {

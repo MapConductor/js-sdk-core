@@ -31,11 +31,14 @@ export function createTileWorkerHandler(providers: Record<string, TileProvider>)
         const { id, routeId, request } = msg;
         const provider = providers[routeId];
         const result = provider ? await Promise.resolve(provider.renderTile(request)) : null;
-        const response: TileRenderResponse = { type: 'render', id, result };
         if (result) {
-            // Transfer the underlying buffer to avoid copying
-            ctx.postMessage(response, [result.buffer]);
+            // Copy before transferring: providers may cache and reuse the
+            // returned bytes, so transferring their buffer would detach it.
+            const bytes = new Uint8Array(result);
+            const response: TileRenderResponse = { type: 'render', id, result: bytes };
+            ctx.postMessage(response, [bytes.buffer]);
         } else {
+            const response: TileRenderResponse = { type: 'render', id, result: null };
             ctx.postMessage(response);
         }
     });

@@ -22,6 +22,30 @@ export class OverlayCollector<S extends { id: string }> {
         }
     }
 
+    /**
+     * Applies a batch of upserts and removals with a single notification.
+     * Unlike calling add()/remove() in a loop (which notifies subscribers once
+     * per call and can trigger an expensive downstream re-render each time),
+     * subscribers see the final state exactly once.
+     */
+    applyDiff(upserts: S[], removeIds: Iterable<string>): void {
+        let changed = false;
+        for (const id of removeIds) {
+            if (this.map.delete(id)) {
+                this.stopUpdateSub(id);
+                changed = true;
+            }
+        }
+        for (const s of upserts) {
+            const prev = this.map.get(s.id);
+            if (prev && prev !== s) this.stopUpdateSub(s.id);
+            this.map.set(s.id, s);
+            if (!this.updateSubs.has(s.id)) this.startUpdateSub(s);
+            changed = true;
+        }
+        if (changed) this.notify();
+    }
+
     replaceAll(states: S[]): void {
         const nextIds = new Set(states.map(s => s.id));
         const prevIds = new Set(this.map.keys());

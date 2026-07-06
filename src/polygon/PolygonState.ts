@@ -2,6 +2,7 @@ import { GeoPoint } from "../features";
 import { combineHash, hashBool, hashNum, hashObj } from "../features/hash-utils";
 import { createSubject } from "../features/subscribe";
 import { Serializable } from "../marker";
+import { unionHoleRings } from "./PolygonUnion";
 
 export interface PolygonFingerPrint {
     id: number;
@@ -97,7 +98,7 @@ export function createPolygonState(params: {
     onClick?: OnPolygonEventHandler | null;
 }): PolygonState {
     let points = params.points;
-    let holes = params.holes ?? [];
+    let holes = unionHoleRings(params.holes ?? []);
     let strokeColor = params.strokeColor ?? "#000000";
     let strokeWidth = params.strokeWidth ?? 2;
     let fillColor = params.fillColor ?? "transparent";
@@ -151,7 +152,7 @@ export function createPolygonState(params: {
         createPolygonState({
             id: "id" in opts ? opts.id ?? null : id,
             points: opts.points ?? points,
-            holes: opts.holes ?? holes,
+            holes: "holes" in opts ? unionHoleRings(opts.holes ?? []) : holes,
             strokeColor: opts.strokeColor ?? strokeColor,
             strokeWidth: opts.strokeWidth ?? strokeWidth,
             fillColor: opts.fillColor ?? fillColor,
@@ -171,7 +172,7 @@ export function createPolygonState(params: {
         get points() { return points; },
         set points(v: GeoPoint[]) { points = v; emit(); },
         get holes() { return holes; },
-        set holes(v: GeoPoint[][]) { holes = v; emit(); },
+        set holes(v: GeoPoint[][]) { holes = unionHoleRings(v); emit(); },
         get strokeColor() { return strokeColor; },
         set strokeColor(v: string) { strokeColor = v; emit(); },
         get strokeWidth() { return strokeWidth; },
