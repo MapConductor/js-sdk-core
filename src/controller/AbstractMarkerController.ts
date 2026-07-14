@@ -164,11 +164,17 @@ export abstract class AbstractMarkerController<ActualMarker>
                     previous.delete(state.id);
 
                     if (wantsTile) {
+                        if (!wasTiled) {
+                            // Transition: regular → tiled. Keep the entity in the manager,
+                            // but remove its provider marker before replacing it with marker=null.
+                            removed.push(prevEntity);
+                        }
                         // Always re-register tiled markers to keep markerManager current
                         tiledUpdated.push(state);
                     } else if (wasTiled) {
                         // Transition: tiled → regular
                         this.markerManager.removeEntity(state.id);
+                        removed.push(prevEntity);
                         added.push({ state, bitmapIcon: state.icon?.toBitmapIcon() ?? this.defaultIcon });
                     } else {
                         const currentFinger = state.fingerPrint();
@@ -234,6 +240,7 @@ export abstract class AbstractMarkerController<ActualMarker>
                                 visible: true,
                             });
                             this.markerManager.registerEntity(entity);
+                            this.onMarkerAdded(entity);
                             modifiedEntities.push(entity);
                         }
                     });
@@ -272,7 +279,10 @@ export abstract class AbstractMarkerController<ActualMarker>
                 await this.renderer.onPostProcess();
             }
 
-            const tiledChanged = tiledAdded.length > 0 || tiledUpdated.length > 0;
+            const tiledChanged =
+                tiledAdded.length > 0 ||
+                tiledUpdated.length > 0 ||
+                removed.some((entity) => entity.marker === null);
             if (tiledChanged) {
                 await this.onTiledMarkersChanged();
             }
@@ -281,6 +291,11 @@ export abstract class AbstractMarkerController<ActualMarker>
 
     /** Called when tiled markers are added or updated. Override in subclasses to manage tile overlay. */
     protected async onTiledMarkersChanged(): Promise<void> {
+        // no-op by default
+    }
+
+    /** Called after a provider marker is created and registered. */
+    protected onMarkerAdded(_entity: MarkerEntity<ActualMarker>): void {
         // no-op by default
     }
 
@@ -294,37 +309,53 @@ export abstract class AbstractMarkerController<ActualMarker>
         const prevFinger = prevEntity.fingerPrint;
         if (fingerprintsEqual(currentFinger, prevFinger)) return;
 
-        const entity = createMarkerEntity<ActualMarker>({
-            state,
-            marker: prevEntity.marker,
-            isRendered: prevEntity.isRendered,
-            visible: true,
-        });
-        this.markerManager.updateEntity(entity);
-
         await this.semaphore.withLock(async () => {
+            const wantsTile = this.shouldTile(state, this.markerManager.allEntities().length);
+            const wasTiled = prevEntity.marker === null;
+
+            if (wantsTile) {
+                if (!wasTiled) {
+                    await this.renderer.onRemove([prevEntity]);
+                }
+                this.markerManager.updateEntity(createMarkerEntity<ActualMarker>({
+                    state,
+                    marker: null,
+                    isRendered: true,
+                    visible: prevEntity.visible,
+                }));
+                if (!wasTiled) {
+                    await this.renderer.onPostProcess();
+                }
+                await this.onTiledMarkersChanged();
+                return;
+            }
+
             const markerIcon = state.icon?.toBitmapIcon() ?? this.defaultIcon;
             const renderEntity = createMarkerEntity<ActualMarker>({
                 state,
                 marker: prevEntity.marker,
                 isRendered: true,
-                visible: true,
+                visible: prevEntity.visible,
             });
-            const markerParams: ChangeParams<ActualMarker> = {
-                current: renderEntity,
-                bitmapIcon: markerIcon,
-                prev: prevEntity,
-            };
-            const markers = await this.renderer.onChange([markerParams]);
+            const markers = wasTiled
+                ? await this.renderer.onAdd([{ state, bitmapIcon: markerIcon }])
+                : await this.renderer.onChange([{
+                    current: renderEntity,
+                    bitmapIcon: markerIcon,
+                    prev: prevEntity,
+                }]);
 
             if (markers.length === 1 && markers[0] != null) {
                 const finalEntity = createMarkerEntity<ActualMarker>({
                     state,
                     marker: markers[0],
                     isRendered: true,
-                    visible: true,
+                    visible: prevEntity.visible,
                 });
                 this.markerManager.updateEntity(finalEntity);
+                if (wasTiled) {
+                    this.onMarkerAdded(finalEntity);
+                }
 
                 if (prevFinger.animation !== currentFinger.animation && state.getAnimation() != null) {
                     await this.renderer.onAnimate(finalEntity);
@@ -332,13 +363,19 @@ export abstract class AbstractMarkerController<ActualMarker>
             }
 
             await this.renderer.onPostProcess();
+            if (wasTiled) {
+                await this.onTiledMarkersChanged();
+            }
         });
     }
 
     async clear(): Promise<void> {
         await this.semaphore.withLock(async () => {
             const entities = this.markerManager.allEntities();
-            await this.renderer.onRemove(entities);
+            const rendered = entities.filter((entity) => entity.marker !== null);
+            if (rendered.length > 0) {
+                await this.renderer.onRemove(rendered);
+            }
             this.markerManager.clear();
         });
     }
