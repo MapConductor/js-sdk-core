@@ -5,26 +5,7 @@ import { createCircleEntity, CircleEntity } from "./CircleEntity";
 import { CircleManagerInterface } from "./CircleManager";
 import { CircleAddParams, CircleChangeParams, CircleOverlayRenderer } from "./CircleOverlayRenderer";
 import { CircleEvent, CircleState, OnCircleEventHandler } from "./CircleState";
-
-class Mutex {
-    private locked = false;
-    private queue: Array<() => void> = [];
-
-    async withLock<T>(fn: () => Promise<T> | T): Promise<T> {
-        await this.acquire();
-        try { return await fn(); } finally { this.release(); }
-    }
-
-    private acquire(): Promise<void> {
-        if (!this.locked) { this.locked = true; return Promise.resolve(); }
-        return new Promise((r) => this.queue.push(r));
-    }
-
-    private release(): void {
-        const next = this.queue.shift();
-        if (next) next(); else this.locked = false;
-    }
-}
+import { Mutex } from "../base/Mutex";
 
 function fingerPrintsEqual(a: ReturnType<CircleState["fingerPrint"]>, b: ReturnType<CircleState["fingerPrint"]>): boolean {
     return (

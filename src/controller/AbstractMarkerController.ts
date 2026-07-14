@@ -6,39 +6,9 @@ import { MarkerAnimationOverlayHost } from "../marker";
 import { OnMarkerEventHandler } from "../marker";
 import { MapCameraPosition } from "../types";
 import { OverlayController } from "./OverlayController";
+import { Mutex } from "../base/Mutex";
 
 const MARKER_RENDER_BATCH_SIZE = 500;
-
-class Mutex {
-    private locked = false;
-    private queue: Array<() => void> = [];
-
-    async withLock<T>(fn: () => Promise<T> | T): Promise<T> {
-        await this.acquire();
-        try {
-            return await fn();
-        } finally {
-            this.release();
-        }
-    }
-
-    private acquire(): Promise<void> {
-        if (!this.locked) {
-            this.locked = true;
-            return Promise.resolve();
-        }
-        return new Promise((resolve) => this.queue.push(resolve));
-    }
-
-    private release(): void {
-        const next = this.queue.shift();
-        if (next) {
-            next();
-        } else {
-            this.locked = false;
-        }
-    }
-}
 
 function fingerprintsEqual(a: MarkerFingerPrint, b: MarkerFingerPrint): boolean {
     return (

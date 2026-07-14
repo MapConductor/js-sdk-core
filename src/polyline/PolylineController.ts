@@ -5,23 +5,7 @@ import { createPolylineEntity, PolylineEntity } from "./PolylineEntity";
 import { PolylineHitResult, PolylineManagerInterface } from "./PolylineManager";
 import { PolylineAddParams, PolylineChangeParams, PolylineOverlayRenderer } from "./PolylineOverlayRenderer";
 import { OnPolylineEventHandler, PolylineEvent, PolylineState } from "./PolylineState";
-
-class Mutex {
-    private locked = false;
-    private queue: Array<() => void> = [];
-    async withLock<T>(fn: () => Promise<T> | T): Promise<T> {
-        await this.acquire();
-        try { return await fn(); } finally { this.release(); }
-    }
-    private acquire(): Promise<void> {
-        if (!this.locked) { this.locked = true; return Promise.resolve(); }
-        return new Promise((r) => this.queue.push(r));
-    }
-    private release(): void {
-        const next = this.queue.shift();
-        if (next) next(); else this.locked = false;
-    }
-}
+import { Mutex } from "../base/Mutex";
 
 function fingerPrintsEqual(
     a: ReturnType<PolylineState["fingerPrint"]>,
