@@ -6,6 +6,7 @@ export class OverlayCollector<S extends { id: string }> {
     private readonly subs = new Set<(map: ReadonlyMap<string, S>) => void>();
     private updateHandler: ((state: S) => void) | null = null;
     private readonly updateSubs = new Map<string, () => void>();
+    private batchDepth = 0;
 
     add(state: S): void {
         const prev = this.map.get(state.id);
@@ -44,6 +45,21 @@ export class OverlayCollector<S extends { id: string }> {
             changed = true;
         }
         if (changed) this.notify();
+    }
+
+    /**
+     * Applies a group of collection and state mutations as one composition.
+     * Per-state update handlers are suppressed while the batch is active;
+     * composition subscribers receive the final collection exactly once.
+     */
+    batchChanges(action: () => void): void {
+        this.batchDepth++;
+        try {
+            action();
+        } finally {
+            this.batchDepth--;
+            if (this.batchDepth === 0) this.notifySubscribers();
+        }
     }
 
     replaceAll(states: S[]): void {
@@ -113,6 +129,7 @@ export class OverlayCollector<S extends { id: string }> {
         const observable = (state as unknown as WithObservable).asObservable?.();
         if (!observable) return;
         const unsub = observable.subscribe(() => {
+            if (this.batchDepth > 0) return;
             this.updateHandler?.(state);
         });
         this.updateSubs.set(state.id, unsub);
@@ -127,6 +144,11 @@ export class OverlayCollector<S extends { id: string }> {
     }
 
     private notify(): void {
+        if (this.batchDepth > 0) return;
+        this.notifySubscribers();
+    }
+
+    private notifySubscribers(): void {
         this.subs.forEach(fn => fn(this.map));
     }
 }

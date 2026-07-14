@@ -231,6 +231,13 @@ export abstract class AbstractMarkerController<ActualMarker>
                                 visible: true,
                             });
                             this.markerManager.registerEntity(entity);
+                            const change = batch[index];
+                            if (
+                                change.prev.fingerPrint.animation !== change.current.fingerPrint.animation &&
+                                entity.state.getAnimation() != null
+                            ) {
+                                modifiedEntities.push(entity);
+                            }
                         }
                     });
                     await new Promise<void>((r) => setTimeout(r, 0));
