@@ -98,6 +98,10 @@ export class OverlayCollector<S extends { id: string }> {
         return Array.from(this.map.values());
     }
 
+    get(id: string): S | undefined {
+        return this.map.get(id);
+    }
+
     subscribe(fn: (map: ReadonlyMap<string, S>) => void): () => void {
         this.subs.add(fn);
         fn(this.map);
