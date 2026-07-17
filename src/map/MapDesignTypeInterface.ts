@@ -1,3 +1,5 @@
+import type { AttributionRule } from './AttributionRule';
+
 /**
  * Base interface for map design types (style / map type).
  * Mirrors Android MapDesignTypeInterface<T> / iOS MapDesignTypeProtocol.
@@ -8,5 +10,6 @@
  */
 export interface MapDesignTypeInterface<T> {
   readonly id: T;
+  readonly attributionRules?: readonly AttributionRule[];
   getValue(): T;
 }

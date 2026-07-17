@@ -277,16 +277,19 @@ export abstract class AbstractMarkerController<ActualMarker>
     }
 
     async update(state: MarkerState): Promise<void> {
-        if (!this.markerManager.hasEntity(state.id)) return;
-
-        const prevEntity = this.markerManager.getEntity(state.id);
-        if (!prevEntity) return;
-
-        const currentFinger = state.fingerPrint();
-        const prevFinger = prevEntity.fingerPrint;
-        if (fingerprintsEqual(currentFinger, prevFinger)) return;
-
         await this.semaphore.withLock(async () => {
+            // A composition may remove and recreate this marker while update()
+            // is waiting for the lock (for example, when an animation finishes
+            // during React StrictMode's effect replay). Always resolve the
+            // entity after acquiring the lock so a stale provider marker cannot
+            // be written back into MarkerManager.
+            const prevEntity = this.markerManager.getEntity(state.id);
+            if (!prevEntity) return;
+
+            const currentFinger = state.fingerPrint();
+            const prevFinger = prevEntity.fingerPrint;
+            if (fingerprintsEqual(currentFinger, prevFinger)) return;
+
             const wantsTile = this.shouldTile(state, this.markerManager.allEntities().length);
             const wasTiled = prevEntity.marker === null;
 

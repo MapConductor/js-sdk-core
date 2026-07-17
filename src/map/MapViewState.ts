@@ -1,5 +1,6 @@
 import type { GeoPoint } from '../features/GeoPoint';
 import type { MapCameraPosition } from '../types/MapCamera';
+import type { MapViewControllerInterface } from '../controller/MapViewControllerInterface';
 import type { MapDesignTypeInterface } from './MapDesignTypeInterface';
 import type { MapViewHolder } from './MapViewHolder';
 
@@ -12,6 +13,16 @@ export interface MapViewStateInterface<ActualMapDesignType extends MapDesignType
   moveCameraTo(position: GeoPoint, durationMillis?: number): void;
 
   getMapViewHolder(): MapViewHolder<unknown, unknown> | null;
+
+  // Called by the provider's own view component once its controller is ready
+  // (and with null on unmount) — the shared attach point every MapConductor
+  // React component (LeafletMapView, GoogleMapView, ...) already uses internally.
+  setController(controller: MapViewControllerInterface | null): void;
+
+  // Called by the provider's own view component on every camera move/start/end.
+  updateCameraPosition(camera: MapCameraPosition): void;
+
+  setCameraPositionChangeListener(listener: ((camera: MapCameraPosition) => void) | null): void;
 }
 
 export abstract class MapViewState<ActualMapDesignType extends MapDesignTypeInterface<unknown>>
@@ -29,4 +40,10 @@ export abstract class MapViewState<ActualMapDesignType extends MapDesignTypeInte
   abstract moveCameraTo(position: GeoPoint, durationMillis?: number): void;
 
   abstract getMapViewHolder(): MapViewHolder<unknown, unknown> | null;
+
+  abstract setController(controller: MapViewControllerInterface | null): void;
+
+  abstract updateCameraPosition(camera: MapCameraPosition): void;
+
+  abstract setCameraPositionChangeListener(listener: ((camera: MapCameraPosition) => void) | null): void;
 }

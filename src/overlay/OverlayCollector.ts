@@ -7,6 +7,7 @@ export class OverlayCollector<S extends { id: string }> {
     private updateHandler: ((state: S) => void) | null = null;
     private readonly updateSubs = new Map<string, () => void>();
     private batchDepth = 0;
+    private batchDirty = false;
 
     add(state: S): void {
         const prev = this.map.get(state.id);
@@ -58,7 +59,10 @@ export class OverlayCollector<S extends { id: string }> {
             action();
         } finally {
             this.batchDepth--;
-            if (this.batchDepth === 0) this.notifySubscribers();
+            if (this.batchDepth === 0 && this.batchDirty) {
+                this.batchDirty = false;
+                this.notifySubscribers();
+            }
         }
     }
 
@@ -129,7 +133,10 @@ export class OverlayCollector<S extends { id: string }> {
         const observable = (state as unknown as WithObservable).asObservable?.();
         if (!observable) return;
         const unsub = observable.subscribe(() => {
-            if (this.batchDepth > 0) return;
+            if (this.batchDepth > 0) {
+                this.batchDirty = true;
+                return;
+            }
             this.updateHandler?.(state);
         });
         this.updateSubs.set(state.id, unsub);
@@ -144,7 +151,10 @@ export class OverlayCollector<S extends { id: string }> {
     }
 
     private notify(): void {
-        if (this.batchDepth > 0) return;
+        if (this.batchDepth > 0) {
+            this.batchDirty = true;
+            return;
+        }
         this.notifySubscribers();
     }
 
