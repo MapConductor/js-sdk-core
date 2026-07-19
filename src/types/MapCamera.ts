@@ -35,7 +35,6 @@ export interface MapCameraPositionCopyParams {
   zoom?: number | null;
   bearing?: number | null;
   tilt?: number | null;
-  pitch?: number | null;
   visibleRegion?: VisibleRegion | null;
   paddings?: MapPaddings | null;
 }
@@ -54,8 +53,6 @@ export interface MapCameraPosition {
   bearing: number;
   /** Kotlin-compatible tilt in degrees. */
   tilt: number;
-  /** Backward-compatible alias for tilt. */
-  pitch: number;
   visibleRegion: VisibleRegion | null;
   paddings: MapPaddings | null;
   equals(other: MapCameraPosition | null, tolerance?: number): boolean;
@@ -123,9 +120,6 @@ export function createMapCameraPosition({
     get tilt() {
       return tilt;
     },
-    get pitch() {
-      return tilt;
-    },
     get visibleRegion() {
       return visibleRegion;
     },
@@ -136,7 +130,7 @@ export function createMapCameraPosition({
         pointEquals(normalizedPosition, other.position ?? other.center, tolerance) &&
         numberEquals(zoom, other.zoom, tolerance) &&
         numberEquals(bearing, other.bearing, tolerance) &&
-        numberEquals(tilt, other.tilt ?? other.pitch, tolerance)
+        numberEquals(tilt, other.tilt, tolerance)
       );
     },
     copy(partial: MapCameraPositionCopyParams = {}): MapCameraPosition {
@@ -144,7 +138,7 @@ export function createMapCameraPosition({
         position: partial.position ?? partial.center ?? normalizedPosition,
         zoom: partial.zoom ?? zoom,
         bearing: partial.bearing ?? bearing,
-        tilt: partial.tilt ?? partial.pitch ?? tilt,
+        tilt: partial.tilt ?? tilt,
         paddings: partial.paddings ?? normalizedPaddings,
         visibleRegion: partial.visibleRegion ?? visibleRegion,
       });

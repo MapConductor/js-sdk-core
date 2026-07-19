@@ -8,7 +8,7 @@ export const MarkerIconSize = Object.freeze({
 
 export const Settings = Object.freeze({
     Default : Object.freeze({
-        tapTolerance: 14,
+        tapTolerance: 28,
         markerDropAnimateDuration: 300,
         markerBounceAnimateDuration: 2000,
         iconSize: MarkerIconSize.Regular,

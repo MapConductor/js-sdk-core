@@ -6,6 +6,7 @@ export * from './raster';
 export * from './tileserver';
 export * from './zoom';
 export * from './controller';
+export * from './extension';
 export * from './features';
 export * from './geocell';
 export * from './info';

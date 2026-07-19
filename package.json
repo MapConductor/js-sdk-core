@@ -18,7 +18,7 @@
   ],
   "scripts": {
     "build": "tsup src/index.ts --format cjs,esm --dts && cp src/tileserver/tile-sw.js dist/tile-sw.js",
-    "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
+    "dev": "tsup src/index.ts --format cjs,esm --watch",
     "clean": "rm -rf dist",
     "test": "echo 'No tests yet'"
   },
