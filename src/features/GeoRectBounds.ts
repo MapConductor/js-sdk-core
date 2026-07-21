@@ -29,9 +29,9 @@ export function createGeoRectBounds(params: {
     southWest?: GeoPoint | null,
     northEast?: GeoPoint | null,
 } = {}): GeoRectBounds {
-    var _southWest: GeoPoint | null = params.southWest ?? null;
-    var _northEast: GeoPoint | null = params.northEast ?? null;
-    var _center: GeoPoint | null = null;
+    let _southWest: GeoPoint | null = params.southWest ?? null;
+    let _northEast: GeoPoint | null = params.northEast ?? null;
+    let _center: GeoPoint | null = null;
 
     const updateCenter = (): void => {
         if (isEmpty()) {

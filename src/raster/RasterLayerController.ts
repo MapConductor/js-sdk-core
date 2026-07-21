@@ -78,11 +78,21 @@ export abstract class RasterLayerController<ActualLayer extends object>
                 if (previous.has(state.id)) {
                     const prevEntity = this.rasterLayerManager.getEntity(state.id);
                     if (!prevEntity) continue;
+                    previous.delete(state.id);
+                    if (fingerPrintsEqual(state.fingerPrint(), prevEntity.fingerPrint)) {
+                        // Rendered output is unchanged; adopt the latest state
+                        // object (it may carry newer event handlers) without a
+                        // renderer round-trip. Recreating the actual overlay on
+                        // every composition makes async renderers flicker.
+                        this.rasterLayerManager.registerEntity(
+                            createRasterLayerEntity({ layer: prevEntity.layer, state }),
+                        );
+                        continue;
+                    }
                     updated.push({
                         current: createRasterLayerEntity({ layer: prevEntity.layer, state }),
                         prev: prevEntity,
                     });
-                    previous.delete(state.id);
                 } else {
                     added.push({ state });
                     previous.delete(state.id);

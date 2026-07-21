@@ -93,7 +93,7 @@ class KDTreeNode {
         this.right = params.right;
         this.axis = params.axis;
     }
-};
+}
 
 // ---- KDTree 本体 ---- //
 export class KDTree {

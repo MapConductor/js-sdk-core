@@ -104,7 +104,7 @@ export function createGeoPoint(params: {
      */
     const normalize = (): GeoPoint => {
         const normalizedLatitude = Math.max(-90, Math.min(90, params.latitude));
-        let normalizedLongitude = ((((params.longitude + 180) % 360) + 360) % 360) - 180;
+        const normalizedLongitude = ((((params.longitude + 180) % 360) + 360) % 360) - 180;
         return createGeoPoint({
             latitude: normalizedLatitude,
             longitude :normalizedLongitude,

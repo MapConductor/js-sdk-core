@@ -59,11 +59,21 @@ export abstract class GroundImageController<ActualGroundImage>
             for (const state of data) {
                 if (previous.has(state.id)) {
                     const prevEntity = this.groundImageManager.getEntity(state.id)!;
+                    previous.delete(state.id);
+                    if (fingerPrintsEqual(state.fingerPrint(), prevEntity.fingerPrint)) {
+                        // Rendered output is unchanged; adopt the latest state
+                        // object (it may carry newer event handlers) without a
+                        // renderer round-trip. Recreating the actual overlay on
+                        // every composition makes async renderers flicker.
+                        this.groundImageManager.registerEntity(
+                            createGroundImageEntity({ groundImage: prevEntity.groundImage, state }),
+                        );
+                        continue;
+                    }
                     updated.push({
                         current: createGroundImageEntity({ groundImage: prevEntity.groundImage, state }),
                         prev: prevEntity,
                     });
-                    previous.delete(state.id);
                 } else {
                     added.push({ state });
                     previous.delete(state.id);

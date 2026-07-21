@@ -60,8 +60,18 @@ export abstract class CircleController<ActualCircle>
             for (const state of data) {
                 if (previous.has(state.id)) {
                     const prevEntity = this.circleManager.getEntity(state.id)!;
-                    updated.push({ current: createCircleEntity({ circle: prevEntity.circle, state }), prev: prevEntity });
                     previous.delete(state.id);
+                    if (fingerPrintsEqual(state.fingerPrint(), prevEntity.fingerPrint)) {
+                        // Rendered output is unchanged; adopt the latest state
+                        // object (it may carry newer event handlers) without a
+                        // renderer round-trip. Recreating the actual overlay on
+                        // every composition makes async renderers flicker.
+                        this.circleManager.registerEntity(
+                            createCircleEntity({ circle: prevEntity.circle, state }),
+                        );
+                        continue;
+                    }
+                    updated.push({ current: createCircleEntity({ circle: prevEntity.circle, state }), prev: prevEntity });
                 } else {
                     added.push({ state });
                     previous.delete(state.id);

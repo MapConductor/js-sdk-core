@@ -1,6 +1,6 @@
 {
   "name": "@mapconductor/js-sdk-core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Core abstractions and types for MapConductor JS SDKs",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -14,7 +14,9 @@
     "./tile-sw.js": "./dist/tile-sw.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.ja.md",
+    "README.es-419.md"
   ],
   "scripts": {
     "build": "tsup src/index.ts --format cjs,esm --dts && cp src/tileserver/tile-sw.js dist/tile-sw.js",

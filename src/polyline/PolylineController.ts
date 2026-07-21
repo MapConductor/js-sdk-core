@@ -61,11 +61,21 @@ export abstract class PolylineController<ActualPolyline>
             for (const state of data) {
                 if (previous.has(state.id)) {
                     const prevEntity = this.polylineManager.getEntity(state.id)!;
+                    previous.delete(state.id);
+                    if (fingerPrintsEqual(state.fingerPrint(), prevEntity.fingerPrint)) {
+                        // Rendered output is unchanged; adopt the latest state
+                        // object (it may carry newer event handlers) without a
+                        // renderer round-trip. Recreating the actual overlay on
+                        // every composition makes async renderers flicker.
+                        this.polylineManager.registerEntity(
+                            createPolylineEntity({ polyline: prevEntity.polyline, state }),
+                        );
+                        continue;
+                    }
                     updated.push({
                         current: createPolylineEntity({ polyline: prevEntity.polyline, state }),
                         prev: prevEntity,
                     });
-                    previous.delete(state.id);
                 } else {
                     added.push({ state });
                     previous.delete(state.id);
