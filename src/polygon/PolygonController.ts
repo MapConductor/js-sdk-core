@@ -52,6 +52,18 @@ export abstract class PolygonController<ActualPolygon>
         this.clickListener?.(event);
     }
 
+    async composition(data: PolygonState[]): Promise<void> {
+        await this.add(data);
+    }
+
+    has(state: PolygonState): boolean {
+        return this.polygonManager.hasEntity(state.id);
+    }
+
+    setOnClickListener(listener: OnPolygonEventHandler | null): void {
+        this.clickListener = listener;
+    }
+
     async add(data: PolygonState[]): Promise<void> {
         await this.semaphore.withLock(async () => {
             const previous = new Set(this.polygonManager.allEntities().map((e) => e.state.id));

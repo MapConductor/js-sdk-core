@@ -21,7 +21,13 @@ export abstract class MapViewHolderBase<ActualMapView, ActualMap>
 
     abstract toScreenOffset(position: GeoPointInterface): ScreenOffsetResult;
 
-    abstract fromScreenOffset(offset: Offset): Promise<GeoPoint | null>;
+    /**
+     * Default async wrapper over the synchronous path. Holders whose provider
+     * only offers an asynchronous projection API override this.
+     */
+    async fromScreenOffset(offset: Offset): Promise<GeoPoint | null> {
+        return this.fromScreenOffsetSync(offset);
+    }
 
     fromScreenOffsetSync(_offset: Offset): GeoPoint | null {
         return null;

@@ -49,6 +49,18 @@ export abstract class GroundImageController<ActualGroundImage>
         this.clickListener?.(event);
     }
 
+    async composition(data: GroundImageState[]): Promise<void> {
+        await this.add(data);
+    }
+
+    has(state: GroundImageState): boolean {
+        return this.groundImageManager.hasEntity(state.id);
+    }
+
+    setOnClickListener(listener: OnGroundImageEventHandler | null): void {
+        this.clickListener = listener;
+    }
+
     async add(data: GroundImageState[]): Promise<void> {
         await this.semaphore.withLock(async () => {
             const previous = new Set(this.groundImageManager.allEntities().map((e) => e.state.id));

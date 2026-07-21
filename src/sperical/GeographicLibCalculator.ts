@@ -2,8 +2,8 @@ import { createGeoPoint, GeoPoint } from "../features/GeoPoint";
 import { Earth } from "../projection/Earth";
 import { toDegrees, toRadians } from "./utils";
 
-const FLATTENING = 1.0 / 298.257223563;
-const SEMI_MINOR_AXIS = Earth.RADIUS_METERS * (1.0 - FLATTENING);
+const FLATTENING = Earth.FLATTENING;
+const SEMI_MINOR_AXIS = Earth.SEMI_MINOR_AXIS_METERS;
 
 interface InverseResult {
     distance: number;

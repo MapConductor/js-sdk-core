@@ -1,3 +1,4 @@
+import type { MapViewHolder } from "../map";
 import { MarkerEntity } from "./MarkerEntity";
 import { MarkerAnimationOverlayHost } from "./MarkerAnimationOverlay";
 import { MarkerState } from "./MarkerState";
@@ -29,6 +30,14 @@ export interface ChangeParams<ActualMarker> {
 export interface MarkerOverlayRenderer<ActualMarker> {
     animateStartListener: OnMarkerEventHandler | null;
     animateEndListener: OnMarkerEventHandler | null;
+
+    /**
+     * View holder used for screen-space hit testing (see
+     * `StrategyMarkerController.find`). Mirrors the native
+     * `MarkerOverlayRendererInterface.holder`; optional because the interface
+     * predates it — every `AbstractMarkerOverlayRenderer` subclass provides it.
+     */
+    readonly holder?: MapViewHolder<unknown, unknown>;
 
     /**
      * Set by the view layer to hand animation playback off to a screen-space

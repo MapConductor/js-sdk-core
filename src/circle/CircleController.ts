@@ -50,6 +50,18 @@ export abstract class CircleController<ActualCircle>
         this.clickListener?.(event);
     }
 
+    async composition(data: CircleState[]): Promise<void> {
+        await this.add(data);
+    }
+
+    has(state: CircleState): boolean {
+        return this.circleManager.hasEntity(state.id);
+    }
+
+    setOnClickListener(listener: OnCircleEventHandler | null): void {
+        this.clickListener = listener;
+    }
+
     async add(data: CircleState[]): Promise<void> {
         await this.semaphore.withLock(async () => {
             const previous = new Set(this.circleManager.allEntities().map((e) => e.state.id));

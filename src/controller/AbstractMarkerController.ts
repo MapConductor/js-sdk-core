@@ -66,7 +66,45 @@ export abstract class AbstractMarkerController<ActualMarker>
         this.renderer.animateEndListener = (state) => this.dispatchAnimateEnd(state);
     }
 
-    abstract find(position: GeoPoint): MarkerEntity<ActualMarker> | null;
+    /**
+     * Nearest-entity lookup. Providers with icon-bounds hit testing
+     * (screen-space tolerance) override this.
+     */
+    find(position: GeoPoint): MarkerEntity<ActualMarker> | null {
+        return this.markerManager.findNearest(position);
+    }
+
+    async composition(data: MarkerState[]): Promise<void> {
+        await this.add(data);
+    }
+
+    has(state: MarkerState): boolean {
+        return this.markerManager.hasEntity(state.id);
+    }
+
+    setOnClickListener(listener: OnMarkerEventHandler | null): void {
+        this.clickListener = listener;
+    }
+
+    setOnDragStart(listener: OnMarkerEventHandler | null): void {
+        this.dragStartListener = listener;
+    }
+
+    setOnDrag(listener: OnMarkerEventHandler | null): void {
+        this.dragListener = listener;
+    }
+
+    setOnDragEnd(listener: OnMarkerEventHandler | null): void {
+        this.dragEndListener = listener;
+    }
+
+    setOnAnimateStart(listener: OnMarkerEventHandler | null): void {
+        this.animateStartListener = listener;
+    }
+
+    setOnAnimateEnd(listener: OnMarkerEventHandler | null): void {
+        this.animateEndListener = listener;
+    }
 
     /**
      * Return true if this marker should be rendered as a tile rather than an individual overlay.

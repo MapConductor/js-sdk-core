@@ -51,6 +51,18 @@ export abstract class PolylineController<ActualPolyline>
         this.clickListener?.(event);
     }
 
+    async composition(data: PolylineState[]): Promise<void> {
+        await this.add(data);
+    }
+
+    has(state: PolylineState): boolean {
+        return this.polylineManager.hasEntity(state.id);
+    }
+
+    setOnClickListener(listener: OnPolylineEventHandler | null): void {
+        this.clickListener = listener;
+    }
+
     async add(data: PolylineState[]): Promise<void> {
         await this.semaphore.withLock(async () => {
             const previous = new Set(this.polylineManager.allEntities().map((e) => e.state.id));

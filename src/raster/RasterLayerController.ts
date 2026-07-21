@@ -5,23 +5,7 @@ import { createRasterLayerEntity, RasterLayerEntity } from "./RasterLayerEntity"
 import { RasterLayerManagerInterface } from "./RasterLayerManager";
 import { RasterLayerAddParams, RasterLayerChangeParams, RasterLayerOverlayRenderer } from "./RasterLayerOverlayRenderer";
 import { OnRasterLayerEventHandler, RasterLayerEvent, RasterLayerState } from "./RasterLayerState";
-
-class Mutex {
-    private locked = false;
-    private queue: Array<() => void> = [];
-    async withLock<T>(fn: () => Promise<T> | T): Promise<T> {
-        await this.acquire();
-        try { return await fn(); } finally { this.release(); }
-    }
-    private acquire(): Promise<void> {
-        if (!this.locked) { this.locked = true; return Promise.resolve(); }
-        return new Promise((r) => this.queue.push(r));
-    }
-    private release(): void {
-        const next = this.queue.shift();
-        if (next) next(); else this.locked = false;
-    }
-}
+import { Mutex } from "../base/Mutex";
 
 function fingerPrintsEqual(
     a: ReturnType<RasterLayerState["fingerPrint"]>,
@@ -61,6 +45,18 @@ export abstract class RasterLayerController<ActualLayer extends object>
         this.rasterLayerManager = rasterLayerManager;
         this.renderer = renderer;
         this.clickListener = clickListener;
+    }
+
+    async composition(data: RasterLayerState[]): Promise<void> {
+        await this.add(data);
+    }
+
+    has(state: RasterLayerState): boolean {
+        return this.rasterLayerManager.hasEntity(state.id);
+    }
+
+    setOnClickListener(listener: OnRasterLayerEventHandler | null): void {
+        this.clickListener = listener;
     }
 
     async add(data: RasterLayerState[]): Promise<void> {
