@@ -153,6 +153,8 @@ export abstract class AbstractMarkerController<ActualMarker>
     }
 
     async add(data: MarkerState[]): Promise<void> {
+        // Collected inside the lock, animated after it is released (see below).
+        const entitiesToAnimate: MarkerEntity<ActualMarker>[] = [];
         await this.semaphore.withLock(async () => {
             const modifiedEntities: MarkerEntity<ActualMarker>[] = [];
             const previous = new Set(this.markerManager.allEntities().map((it) => it.state.id));
@@ -284,7 +286,7 @@ export abstract class AbstractMarkerController<ActualMarker>
 
             for (const entity of modifiedEntities) {
                 if (entity.state.getAnimation() != null) {
-                    await this.renderer.onAnimate(entity);
+                    entitiesToAnimate.push(entity);
                 }
             }
 
@@ -302,6 +304,15 @@ export abstract class AbstractMarkerController<ActualMarker>
                 await this.onTiledMarkersChanged();
             }
         });
+
+        // Play animations OUTSIDE the semaphore, all at once. Awaiting onAnimate
+        // under the lock would both block other marker operations and serialize
+        // these animations against each other; the screen-space overlay path
+        // resolves only when each animation ends. Running them concurrently lets
+        // multiple markers drop/bounce simultaneously. See update() for details.
+        if (entitiesToAnimate.length > 0) {
+            await Promise.all(entitiesToAnimate.map((entity) => this.renderer.onAnimate(entity)));
+        }
     }
 
     /** Called when tiled markers are added or updated. Override in subclasses to manage tile overlay. */
@@ -315,6 +326,8 @@ export abstract class AbstractMarkerController<ActualMarker>
     }
 
     async update(state: MarkerState): Promise<void> {
+        // Captured inside the lock, animated after it is released (see below).
+        let entityToAnimate: MarkerEntity<ActualMarker> | null = null;
         await this.semaphore.withLock(async () => {
             // A composition may remove and recreate this marker while update()
             // is waiting for the lock (for example, when an animation finishes
@@ -376,7 +389,7 @@ export abstract class AbstractMarkerController<ActualMarker>
                 }
 
                 if (prevFinger.animation !== currentFinger.animation && state.getAnimation() != null) {
-                    await this.renderer.onAnimate(finalEntity);
+                    entityToAnimate = finalEntity;
                 }
             }
 
@@ -385,6 +398,17 @@ export abstract class AbstractMarkerController<ActualMarker>
                 await this.onTiledMarkersChanged();
             }
         });
+
+        // Play the animation OUTSIDE the semaphore. For the screen-space overlay
+        // path, onAnimate resolves only when the animation finishes (~seconds);
+        // awaiting it while holding the lock would serialize every marker's
+        // animation (a second marker clicked mid-bounce would wait for the first
+        // to end). The overlay animates a bitmap copy of the marker in screen
+        // space and does not touch MarkerManager, so it is safe to run unlocked
+        // and concurrently with other markers' animations.
+        if (entityToAnimate != null) {
+            await this.renderer.onAnimate(entityToAnimate);
+        }
     }
 
     async clear(): Promise<void> {

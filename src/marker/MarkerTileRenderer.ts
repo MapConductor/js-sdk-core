@@ -335,29 +335,60 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
      * for mouse/pen, or supply a custom radius. Returns `null` when nothing is close enough.
      */
     findNearest(click: GeoPoint, hitRadiusPx: number, zoom: number): T | null {
-        const metersPerPx =
-            (156543.03392 * Math.cos((click.latitude * Math.PI) / 180)) / Math.pow(2, zoom);
-        const clickRadiusDeg = (hitRadiusPx * metersPerPx) / 111111;
-        const threshold = clickRadiusDeg * clickRadiusDeg;
+        const cosLat = Math.cos((click.latitude * Math.PI) / 180);
+        const metersPerPx = (156543.03392 * cosLat) / Math.pow(2, zoom);
+        if (!(metersPerPx > 0)) return null;
+        const metersPerLatDeg = 111111;
+        const metersPerLngDeg = 111111 * Math.max(cosLat, 1e-6);
+
+        // A marker is "hit" when the click falls inside its ICON's on-screen
+        // rectangle (anchor-adjusted) plus the tap tolerance — the same rule the
+        // providers' native `find()` uses. Testing only a fixed radius around the
+        // anchor made a large icon clickable only near its center, so taps that
+        // visually landed on the marker missed.
+        const drawSizeOf = (item: T): { drawW: number; drawH: number; bitmapIcon: BitmapIcon } => {
+            const bitmapIcon = this.bitmapIconOf(item);
+            const scale = Math.max(Math.max(this.iconScale(item, zoom), 0) * this.extraIconScale, 0);
+            const { width: drawW, height: drawH } = markerTileDrawSize(bitmapIcon, scale);
+            return { drawW, drawH, bitmapIcon };
+        };
+
+        // Pad the spatial query by the largest icon half-extent so no marker whose
+        // icon covers the click is excluded. Estimated from a representative item
+        // (icons are uniform in practice); the exact per-candidate test still filters.
+        let maxHalfPx = hitRadiusPx;
+        if (this.items.length > 0) {
+            const { drawW, drawH } = drawSizeOf(this.items[0]);
+            maxHalfPx = Math.max(maxHalfPx, drawW, drawH);
+        }
+        const padPx = maxHalfPx + hitRadiusPx;
+        const padLatDeg = (padPx * metersPerPx) / metersPerLatDeg;
+        const padLngDeg = (padPx * metersPerPx) / metersPerLngDeg;
 
         const candidates = this.grid.queryBounds(
-            click.latitude - clickRadiusDeg,
-            click.latitude + clickRadiusDeg,
-            click.longitude - clickRadiusDeg,
-            click.longitude + clickRadiusDeg,
+            click.latitude - padLatDeg,
+            click.latitude + padLatDeg,
+            click.longitude - padLngDeg,
+            click.longitude + padLngDeg,
         );
 
         let nearest: T | null = null;
         let minDist = Infinity;
-
         for (const item of candidates) {
-            const { position } = item;
-            const dlat = position.latitude - click.latitude;
-            const dlng = position.longitude - click.longitude;
-            const d = dlat * dlat + dlng * dlng;
-            if (d < threshold && d < minDist) {
-                minDist = d;
-                nearest = item;
+            const { drawW, drawH, bitmapIcon } = drawSizeOf(item);
+            // Click position relative to the marker's anchor, in screen pixels (y down).
+            const dxPx = ((click.longitude - item.position.longitude) * metersPerLngDeg) / metersPerPx;
+            const dyPx = ((item.position.latitude - click.latitude) * metersPerLatDeg) / metersPerPx;
+            const left = -bitmapIcon.anchor.x * drawW - hitRadiusPx;
+            const right = (1 - bitmapIcon.anchor.x) * drawW + hitRadiusPx;
+            const top = -bitmapIcon.anchor.y * drawH - hitRadiusPx;
+            const bottom = (1 - bitmapIcon.anchor.y) * drawH + hitRadiusPx;
+            if (dxPx >= left && dxPx <= right && dyPx >= top && dyPx <= bottom) {
+                const d = dxPx * dxPx + dyPx * dyPx;
+                if (d < minDist) {
+                    minDist = d;
+                    nearest = item;
+                }
             }
         }
         return nearest;

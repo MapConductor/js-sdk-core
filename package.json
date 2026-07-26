@@ -1,6 +1,6 @@
 {
   "name": "@mapconductor/js-sdk-core",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Core abstractions and types for MapConductor JS SDKs",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -31,9 +31,6 @@
   ],
   "author": "MapConductor",
   "license": "Apache2",
-  "dependencies": {
-    "polygon-clipping": "^0.15.7"
-  },
   "devDependencies": {
     "tsup": "^8.0.1",
     "typescript": "^5.3.3"
