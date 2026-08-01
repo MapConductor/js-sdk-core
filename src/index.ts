@@ -16,5 +16,6 @@ export * from './overlay';
 export * from './projection';
 export * from './provider';
 export * from './settings';
+export * from './geometry';
 export * from './sperical';
 export * from './types';

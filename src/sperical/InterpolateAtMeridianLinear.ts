@@ -22,9 +22,20 @@ export function interpolateAtMeridianLinear(from: GeoPoint, to: GeoPoint): GeoPo
     const toLng = to.longitude;
     const targetMeridian = fromLng >= 0 ? 180.0 : -180.0;
 
-    const totalLngDiff = toLng - fromLng;
+    // The raw difference exceeds 180° for an antimeridian-crossing segment (the
+    // only case this function is called for), so unwrap it to the short-way
+    // signed span; otherwise the fraction comes out negative and the latitude is
+    // extrapolated in the wrong direction.
+    const directDiff = toLng - fromLng;
+    const totalLngDiff =
+        directDiff > 180.0
+            ? directDiff - 360.0
+            : directDiff < -180.0
+              ? directDiff + 360.0
+              : directDiff;
     const meridianDiff = targetMeridian - fromLng;
-    const fraction = meridianDiff / totalLngDiff;
+    const fraction =
+        totalLngDiff === 0 ? 0 : Math.min(1, Math.max(0, meridianDiff / totalLngDiff));
 
     return createGeoPoint({
         latitude: from.latitude + fraction * (to.latitude - from.latitude),
