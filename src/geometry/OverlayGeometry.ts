@@ -1,7 +1,8 @@
 import { createGeoPoint, type GeoPoint } from "../features";
-import { createInterpolatePoints } from "../sperical/CreateInterpolatePoints";
-import { createLinearInterpolatePoints } from "../sperical/CreateLinearInterpolatePoints";
+import { WGS84Geodesic, Planar } from "../sperical";
+import { splitByMeridian } from "../sperical/SplitByMeridian";
 import { normalizeLngDegrees } from "./CircleGeometry";
+import { splitRingByMeridian } from "./SplitRingByMeridian";
 
 /*
  * ポリライン／ポリゴン描画用の共通ジオメトリパイプライン（unwrap 版）。
@@ -26,9 +27,56 @@ export function densifyAndNormalize(
     maxSegmentLength: number = 10000.0,
 ): GeoPoint[] {
     const interpolated = geodesic
-        ? createInterpolatePoints(points, maxSegmentLength)
-        : createLinearInterpolatePoints(points);
+        ? WGS84Geodesic.createInterpolatePoints(points, maxSegmentLength)
+        : Planar.createInterpolatePoints(points);
     return interpolated.map((point) => point.normalize());
+}
+
+// ─── 分割版パイプライン（経度 ±180 に制約のある SDK 向け） ─────────────────────
+//
+// 経度 ±180 を超える座標を受け付けない SDK は、密度化・正規化後に子午線で分割した複数
+// リングとして描画する。GL 系は代わりに buildUnwrappedPolylinePath／buildUnwrappedPolygonRings
+// （unwrap 版）を使うこと。android-sdk / ios-sdk と同一仕様。
+
+/**
+ * ポリライン用パイプライン（分割版）。密度化・正規化後に子午線で分割したセグメント列を返す。
+ * 頂点 2 未満の入力、および分割で 2 点未満になったセグメントは除く（空配列になり得る）。
+ */
+export function buildPolylineSegments(
+    points: GeoPoint[],
+    geodesic: boolean,
+): GeoPoint[][] {
+    if (points.length < 2) return [];
+    return splitByMeridian(densifyAndNormalize(points, geodesic), geodesic).filter(
+        (segment) => segment.length >= 2,
+    );
+}
+
+/**
+ * ポリゴン用パイプライン（分割版）。外周を密度化→分割し、穴も同じ方式で密度化する。
+ *
+ * 外周が子午線で複数リングに分割された場合、穴を分割後の各ピースへ再割当てできないため
+ * 穴を含めない（従来から全 GeoJSON 系ドライバー共通の仕様）。頂点 3 未満の外周入力は
+ * 空の結果を返し、3 点未満に縮退したリングは除外する。
+ */
+export function buildPolygonRings(
+    points: GeoPoint[],
+    holes: GeoPoint[][],
+    geodesic: boolean,
+): PolygonRings {
+    if (points.length < 3) return { outerRings: [], holeRings: [] };
+    const outerRings = splitRingByMeridian(
+        densifyAndNormalize(points, geodesic),
+        geodesic,
+    ).filter((ring) => ring.length >= 3);
+    const includeHoles = holes.length > 0 && outerRings.length === 1;
+    const holeRings = includeHoles
+        ? holes
+              .filter((hole) => hole.length >= 3)
+              .map((hole) => densifyAndNormalize(hole, geodesic))
+              .filter((hole) => hole.length >= 3)
+        : [];
+    return { outerRings, holeRings };
 }
 
 /**

@@ -1,13 +1,15 @@
 import type { TileProvider } from '../tileserver/TileProvider';
 import type { TileRequest } from '../tileserver/TileRequest';
 import type { GeoPoint } from '../features';
-import { MarkerIconSize } from '../settings';
 import type { MarkerIcon } from './MarkerIcon';
 import type { BitmapIcon } from './MarkerOverlayRenderer';
+// android-sdk（LruCache）/ ios-sdk（NSCache.totalCostLimit）相当の上限。1 renderer は
+// 1 sync ごとに作り直されるが、単一 sync でのパンによる無制限蓄積を防ぐ。
+const TILE_CACHE_MAX = 1024;
 import { createDefaultIcon } from './DefaultMarkerIcon';
 import { GeoGridIndex } from './GeoGridIndex';
 import { IconImageCache } from './IconImageCache';
-import type { MarkerTileRenderingOptions, PreparedMarker } from './MarkerTileTypes';
+import type { PreparedMarker } from './MarkerTileTypes';
 
 function toWorldPixel(lat: number, lng: number, z: number): { wx: number; wy: number } {
     const scale = 256 * Math.pow(2, z);
@@ -31,12 +33,12 @@ function tileToGeoBounds(x: number, y: number, z: number, tileSize: number): {
 }
 
 function markerTileDrawSize(bitmapIcon: BitmapIcon, scale: number): { width: number; height: number } {
-    const sourceMaxSize = Math.max(bitmapIcon.size.width, bitmapIcon.size.height, 1);
-    const targetMaxSize = MarkerIconSize.Small * scale;
-    const sizeScale = targetMaxSize / sourceMaxSize;
+    // android-sdk / ios-sdk と一致: baked bitmap のサイズ × scale をそのまま使う
+    // （以前は最大辺を MarkerIconSize.Small(32)*scale に再正規化しており、非 32px
+    //  アイコンのタイル表示サイズが native と食い違っていた）。
     return {
-        width: Math.max(bitmapIcon.size.width * sizeScale, 1),
-        height: Math.max(bitmapIcon.size.height * sizeScale, 1),
+        width: Math.max(bitmapIcon.size.width * scale, 1),
+        height: Math.max(bitmapIcon.size.height * scale, 1),
     };
 }
 
@@ -55,22 +57,28 @@ function markerTileDrawSize(bitmapIcon: BitmapIcon, scale: number): { width: num
 export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIcon | null }>
     implements TileProvider {
     readonly tileSize: number;
+    readonly extraIconScale: number;
     private readonly iconScale: (item: T, zoom: number) => number;
-    private readonly extraIconScale: number;
+    private readonly debugTileOverlay: boolean;
     private readonly grid: GeoGridIndex<T>;
     private readonly icons = new IconImageCache();
     private readonly defaultBitmapIcon: BitmapIcon = createDefaultIcon().toBitmapIcon();
     /** Per-instance tile output cache; each sync creates a fresh renderer instance, so no invalidation is needed. */
     private readonly tileCache = new Map<string, Uint8Array | null>();
 
+    // android-sdk / ios-sdk の MarkerTileRenderer と同じく位置引数で受ける
+    // （名前付きオプション型は持たない）。
     constructor(
         private readonly items: ReadonlyArray<T>,
-        options: MarkerTileRenderingOptions<T> = {},
+        tileSize: number = 256,
+        iconScaleCallback?: (item: T, zoom: number) => number,
+        extraIconScale: number = 1.0,
+        debugTileOverlay: boolean = false,
     ) {
-        this.tileSize = options.tileSize ?? 256;
-        const cb = options.iconScaleCallback;
-        this.iconScale = cb ?? ((_item, _zoom) => 1.0);
-        this.extraIconScale = options.extraIconScale ?? 1.0;
+        this.tileSize = tileSize;
+        this.iconScale = iconScaleCallback ?? ((_item, _zoom) => 1.0);
+        this.extraIconScale = extraIconScale;
+        this.debugTileOverlay = debugTileOverlay;
         this.grid = new GeoGridIndex(items);
     }
 
@@ -87,6 +95,15 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
 
     private tileKey(req: TileRequest): string {
         return `${req.z}/${req.x}/${req.y}`;
+    }
+
+    private cacheTile(key: string, value: Uint8Array | null): void {
+        this.tileCache.set(key, value);
+        while (this.tileCache.size > TILE_CACHE_MAX) {
+            const oldest = this.tileCache.keys().next().value;
+            if (oldest === undefined) break;
+            this.tileCache.delete(oldest);
+        }
     }
 
     private queryCandidates(z: number, x: number, y: number, paddingPx: number): T[] {
@@ -164,7 +181,12 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         return { canvas, ctx };
     }
 
-    private draw(markers: PreparedMarker[], tilePx: number, paddingPx: number): OffscreenCanvas | HTMLCanvasElement {
+    private draw(
+        markers: PreparedMarker[],
+        tilePx: number,
+        paddingPx: number,
+        req: TileRequest,
+    ): OffscreenCanvas | HTMLCanvasElement {
         const offscreenSize = tilePx + paddingPx * 2;
         const { canvas: offscreen, ctx: offCtx } = this.createCanvas(offscreenSize);
         for (const m of markers) {
@@ -175,9 +197,39 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
             offCtx.drawImage(m.image as CanvasImageSource, dx, dy, m.drawW, m.drawH);
         }
 
+        // android-sdk / ios-sdk と同じデバッグオーバーレイ：padding 位置に上/左の枠線と
+        // タイル座標・マーカー数のラベルを赤で描画する。
+        if (this.debugTileOverlay) {
+            this.drawDebugOverlay(offCtx, tilePx, paddingPx, req, markers.length);
+        }
+
         const { canvas: final, ctx: finalCtx } = this.createCanvas(tilePx);
         finalCtx.drawImage(offscreen as CanvasImageSource, -paddingPx, -paddingPx);
         return final;
+    }
+
+    private drawDebugOverlay(
+        ctx: CanvasRenderingContext2D,
+        tilePx: number,
+        paddingPx: number,
+        req: TileRequest,
+        entries: number,
+    ): void {
+        const o = paddingPx;
+        ctx.save();
+        ctx.strokeStyle = '#FF0000';
+        ctx.fillStyle = '#FF0000';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(o, o);
+        ctx.lineTo(o + tilePx, o);
+        ctx.moveTo(o, o);
+        ctx.lineTo(o, o + tilePx);
+        ctx.stroke();
+        ctx.font = '10px sans-serif';
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillText(`x/y/z=${req.x}/${req.y}/${req.z}, entries=${entries}`, o + 20, o + 20);
+        ctx.restore();
     }
 
     private async canvasToBytes(canvas: OffscreenCanvas | HTMLCanvasElement): Promise<Uint8Array | null> {
@@ -203,7 +255,7 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
 
         let candidates = this.queryCandidates(z, x, y, assumedHalfExtentPx);
         if (candidates.length === 0) {
-            this.tileCache.set(key, null);
+            this.cacheTile(key, null);
             return null;
         }
 
@@ -222,14 +274,14 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         }
 
         if (markers.length === 0) {
-            this.tileCache.set(key, null);
+            this.cacheTile(key, null);
             return null;
         }
 
         const paddingPx = Math.max(Math.ceil(maxHalfExtentPx + 2), 2);
-        const finalCanvas = this.draw(markers, tilePx, paddingPx);
+        const finalCanvas = this.draw(markers, tilePx, paddingPx, req);
         const bytes = await this.canvasToBytes(finalCanvas);
-        this.tileCache.set(key, bytes);
+        this.cacheTile(key, bytes);
         return bytes;
     }
 
@@ -255,7 +307,7 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         if (markers.length === 0) return null;
 
         const paddingPx = Math.max(Math.ceil(maxHalfExtentPx + 2), 2);
-        const finalCanvas = this.draw(markers, tilePx, paddingPx);
+        const finalCanvas = this.draw(markers, tilePx, paddingPx, req);
         return finalCanvas instanceof HTMLCanvasElement ? finalCanvas.toDataURL('image/png') : null;
     }
 

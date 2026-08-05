@@ -1,5 +1,5 @@
 import { GeoPoint } from "../features";
-import { combineHash, hashBool, hashNum, hashObj } from "../features/hash-utils";
+import { combineHash, hashBool, hashGeoPoint, hashNum, hashObj } from "../features/hash-utils";
 import { createSubject } from "../features/subscribe";
 
 import { Serializable } from "../marker/MarkerState";
@@ -100,7 +100,7 @@ export function createCircleState(params: {
     const id =
         params.id ??
         circleId([
-            hashNum(center.latitude) ^ hashNum(center.longitude),
+            hashGeoPoint(center),
             hashNum(radiusMeters),
             hashBool(clickable),
             hashBool(geodesic),
@@ -118,7 +118,7 @@ export function createCircleState(params: {
     function fingerPrint(): CircleFingerPrint {
         return {
             id: hashObj(id),
-            center: hashNum(center.latitude) ^ hashNum(center.longitude),
+            center: hashGeoPoint(center),
             radiusMeters: hashNum(radiusMeters),
             clickable: hashBool(clickable),
             geodesic: hashBool(geodesic),

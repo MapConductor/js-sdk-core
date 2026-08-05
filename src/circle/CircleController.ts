@@ -142,6 +142,9 @@ export abstract class CircleController<ActualCircle>
                     createCircleEntity({ circle: circles[0], state }),
                 );
             }
+            // android-sdk / ios-sdk と同じく update() でも onPostProcess を呼んで
+            // 単一更新を確実にコミット/フラッシュする。
+            await this.renderer.onPostProcess();
         });
     }
 

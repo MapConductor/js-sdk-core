@@ -27,7 +27,7 @@ export abstract class AbstractMarkerController<ActualMarker>
     implements OverlayController<MarkerState, MarkerEntity<ActualMarker>, MarkerState>
 {
     readonly zIndex: number = 10;
-    private defaultIcon: BitmapIcon = new ColorDefaultIcon("#FF0000").toBitmapIcon();
+    private defaultIcon: BitmapIcon = new ColorDefaultIcon({ fillColor: "#FF0000" }).toBitmapIcon();
     private readonly draggingStates = new WeakMap<MarkerState, boolean>();
 
     dragStartListener: OnMarkerEventHandler | null = null;

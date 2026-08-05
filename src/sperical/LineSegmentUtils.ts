@@ -1,6 +1,6 @@
 import { GeoPoint } from "../features/GeoPoint";
 import { createGeoRectBounds, GeoRectBounds } from "../features/GeoRectBounds";
-import { sphericalInterpolate } from "./Spherical";
+import { interpolate } from "./Spherical";
 
 export function createSegmentBounds({
     point1,
@@ -26,7 +26,7 @@ export function createSegmentBounds({
     bounds.extend(point1);
     for (let s = 1; s <= samples; s += 1) {
         const f = s / samples;
-        const sp = sphericalInterpolate({ from: point1, to: point2, fraction: f });
+        const sp = interpolate({ from: point1, to: point2, fraction: f });
         bounds.extend(sp);
     }
     return bounds;

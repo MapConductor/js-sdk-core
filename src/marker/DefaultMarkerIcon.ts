@@ -4,17 +4,29 @@ import { Offset } from "../types";
 import { AbstractMarkerIcon } from "./MarkerIcon";
 import { BitmapIcon } from "./MarkerOverlayRenderer";
 
+/**
+ * Android ColorDefaultIcon / iOS DefaultMarkerIcon の名前付きコンストラクタ引数に対応する
+ * オプション群（fillColor を含む全パラメータを 1 つのオブジェクトで受ける）。
+ * `labelTypeFace` は Android の Typeface / iOS の UIFont に対応する Web の font-family 文字列。
+ */
 export interface DefaultMarkerIconOptions {
+    fillColor?: string;
     strokeColor?: string;
     strokeWidth?: number;
     scale?: number;
     label?: string | null;
     labelTextColor?: string | null;
     labelTextSize?: number;
+    labelTypeFace?: string;
     labelStrokeColor?: string;
     infoAnchor?: Offset;
     iconSize?: number;
     debug?: boolean;
+}
+
+/** ImageDefaultIcon のコンストラクタ引数。backgroundImage は必須。 */
+export interface ImageDefaultIconOptions extends DefaultMarkerIconOptions {
+    backgroundImage: string | HTMLImageElement;
 }
 
 interface BaseIconProperties {
@@ -24,11 +36,15 @@ interface BaseIconProperties {
     label: string | null;
     labelTextColor: string | null;
     labelTextSize: number;
+    labelTypeFace: string;
     labelStrokeColor: string;
     infoAnchor: Offset;
     iconSize: number;
     debug: boolean;
 }
+
+const DEFAULT_FILL_COLOR = "#FF0000";
+const DEFAULT_LABEL_TYPE_FACE = "sans-serif";
 
 const DEFAULT_BASE_PROPERTIES: BaseIconProperties = {
     strokeColor: "#FFFFFF",
@@ -37,6 +53,7 @@ const DEFAULT_BASE_PROPERTIES: BaseIconProperties = {
     label: null,
     labelTextColor: "#000000",
     labelTextSize: 18,
+    labelTypeFace: DEFAULT_LABEL_TYPE_FACE,
     labelStrokeColor: "#FFFFFF",
     infoAnchor: { x: 0.5, y: 0 },
     iconSize: Settings.Default.iconSize,
@@ -144,6 +161,56 @@ function createMarkerPathData(
     return parts.join(" ");
 }
 
+// SVG パス文字列用の数値フォーマット（4桁精度、末尾ゼロ除去）
+const fmt = (n: number): string => String(parseFloat(n.toFixed(4)));
+
+// Android/iOS と同じレイアウト計算の結果。すべてピクセル空間。
+interface IconLayout {
+    /** マーカー本体の一辺（= iconSize * scale、Android の canvasSize）。 */
+    markerSize: number;
+    /** ビットマップ幅（ラベルが広い場合はマーカーより横に広がる）。 */
+    bitmapWidth: number;
+    /** ビットマップ高さ（= markerSize）。 */
+    bitmapHeight: number;
+    /** マーカーを中央寄せするための水平オフセット。 */
+    markerOffsetX: number;
+    /** ラベルのアウトライン幅（Android: max(1*scale, 2)）。 */
+    outlineStroke: number;
+}
+
+// ラベル幅測定用の使い回しキャンバス（ブラウザのみ）。
+let measureCanvas: HTMLCanvasElement | null = null;
+
+/** ラベル幅を px で測定する。DOM が無い環境では概算で代替する。 */
+function measureLabelWidth(label: string, fontSizePx: number, fontFamily: string): number {
+    if (typeof document === "undefined") return label.length * fontSizePx * 0.6;
+    measureCanvas ??= document.createElement("canvas");
+    const ctx = measureCanvas.getContext("2d");
+    if (!ctx) return label.length * fontSizePx * 0.6;
+    ctx.font = `${fontSizePx}px ${fontFamily}`;
+    return ctx.measureText(label).width;
+}
+
+/** object-fit: cover 相当で画像を dstRect にセンタークロップ描画する。 */
+function drawImageCover(
+    ctx: CanvasRenderingContext2D,
+    img: HTMLImageElement,
+    dx: number,
+    dy: number,
+    dWidth: number,
+    dHeight: number,
+): void {
+    const iw = img.naturalWidth || img.width;
+    const ih = img.naturalHeight || img.height;
+    if (iw <= 0 || ih <= 0) return;
+    const scale = Math.max(dWidth / iw, dHeight / ih);
+    const sw = dWidth / scale;
+    const sh = dHeight / scale;
+    const sx = (iw - sw) / 2;
+    const sy = (ih - sh) / 2;
+    ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dWidth, dHeight);
+}
+
 const escapeXml = (value: string): string =>
     value
         .replace(/&/g, "&amp;")
@@ -172,6 +239,7 @@ const createBaseProperties = (options: DefaultMarkerIconOptions = {}): BaseIconP
                 ? null
                 : normalizeHexColor(options.labelTextColor),
     labelTextSize: options.labelTextSize ?? DEFAULT_BASE_PROPERTIES.labelTextSize,
+    labelTypeFace: options.labelTypeFace ?? DEFAULT_BASE_PROPERTIES.labelTypeFace,
     labelStrokeColor: normalizeHexColor(options.labelStrokeColor ?? DEFAULT_BASE_PROPERTIES.labelStrokeColor),
     infoAnchor: options.infoAnchor ?? DEFAULT_BASE_PROPERTIES.infoAnchor,
     iconSize: options.iconSize ?? DEFAULT_BASE_PROPERTIES.iconSize,
@@ -209,6 +277,10 @@ abstract class AbstractDefaultIcon extends AbstractMarkerIcon {
         return this.baseProperties.labelTextSize;
     }
 
+    get labelTypeFace(): string {
+        return this.baseProperties.labelTypeFace;
+    }
+
     get labelStrokeColor(): string {
         return this.baseProperties.labelStrokeColor;
     }
@@ -226,13 +298,13 @@ abstract class AbstractDefaultIcon extends AbstractMarkerIcon {
     }
 
     toBitmapIcon(): BitmapIcon {
-        const size = Math.max(1, Math.round(this.iconSize * this.scale));
+        const layout = this.computeLayout();
         return {
-            url: toSvgDataUrl(this.createSvg(size)),
+            url: toSvgDataUrl(this.createSvg(layout)),
             anchor: this.anchor,
             size: {
-                width: size,
-                height: size,
+                width: layout.bitmapWidth,
+                height: layout.bitmapHeight,
             },
         };
     }
@@ -245,38 +317,71 @@ abstract class AbstractDefaultIcon extends AbstractMarkerIcon {
         });
     }
 
-    protected createSvg(size: number): string {
+    /**
+     * Android AbstractDefaultIcon.toBitmapIcon() / iOS makeIcon() と同じレイアウト計算。
+     * すべてピクセル空間で行い、ラベルが広い場合はビットマップを横に広げてマーカーを
+     * 中央寄せする（正方形固定にしない）。ラベルの文字サイズはマーカー scale に追従せず
+     * 絶対値（Android/iOS と同じ）。
+     */
+    protected computeLayout(): IconLayout {
+        const markerSize = Math.max(1, Math.round(this.iconSize * this.scale));
+        // Android: outlineStrokeWidth = max(dpToPx(1 * iconScale), 2)
+        const outlineStroke = Math.max(this.scale, 2);
+        let labelWidth = 0;
+        if (this.label) {
+            labelWidth =
+                measureLabelWidth(this.label, Math.max(1, this.labelTextSize), this.labelTypeFace) +
+                outlineStroke * 2;
+        }
+        const padding = markerSize * 0.1;
+        const bitmapWidth = Math.max(markerSize, Math.round(labelWidth + padding));
+        const bitmapHeight = markerSize;
+        const markerOffsetX = (bitmapWidth - markerSize) / 2;
+        return { markerSize, bitmapWidth, bitmapHeight, markerOffsetX, outlineStroke };
+    }
+
+    protected createSvg(layout: IconLayout): string {
+        const { markerSize, bitmapWidth, bitmapHeight, markerOffsetX } = layout;
         const strokeWidth = Math.max(0, this.strokeWidth * this.scale);
-        const markerPath = createMarkerPathData(48, this.scale, this.strokeWidth);
-        const label = this.createLabelSvg();
+        const markerPath = createMarkerPathData(markerSize, this.scale, this.strokeWidth, markerOffsetX);
+        const label = this.createLabelSvg(layout);
         const debug = this.debug
-            ? `<rect x="0.5" y="0.5" width="47" height="47" fill="none" stroke="#000000" stroke-width="1"/>`
+            ? `<rect x="0.5" y="0.5" width="${fmt(bitmapWidth - 1)}" height="${fmt(bitmapHeight - 1)}" fill="none" stroke="#000000" stroke-width="1"/>`
             : "";
 
         return [
-            `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 48 48">`,
-            this.createFillSvg(markerPath),
-            `<path d="${markerPath}" fill="none" stroke="${escapeXml(this.strokeColor)}" stroke-width="${strokeWidth}" stroke-linejoin="round" stroke-linecap="round"/>`,
+            `<svg xmlns="http://www.w3.org/2000/svg" width="${bitmapWidth}" height="${bitmapHeight}" viewBox="0 0 ${bitmapWidth} ${bitmapHeight}">`,
+            this.createFillSvg(markerPath, markerSize, markerOffsetX),
+            `<path d="${markerPath}" fill="none" stroke="${escapeXml(this.strokeColor)}" stroke-width="${fmt(strokeWidth)}" stroke-linejoin="round" stroke-linecap="round"/>`,
             label,
             debug,
             "</svg>",
         ].join("");
     }
 
-    protected createLabelSvg(): string {
+    /**
+     * ラベル描画。Android drawLabel() と同じく円形部分の中心（markerSize * 0.35）へ
+     * 通常ウェイト・絶対サイズで配置し、アウトライン（stroke）を下に敷いてから塗りを重ねる。
+     */
+    protected createLabelSvg(layout: IconLayout): string {
         if (!this.label) return "";
 
         const text = escapeXml(this.label);
         const fill = escapeXml(this.labelTextColor ?? "#000000");
         const stroke = escapeXml(this.labelStrokeColor);
         const size = Math.max(1, this.labelTextSize);
+        const cx = layout.markerOffsetX + layout.markerSize / 2;
+        const cy = layout.markerSize * 0.35;
+        const attrs =
+            `x="${fmt(cx)}" y="${fmt(cy)}" text-anchor="middle" dominant-baseline="central" ` +
+            `font-family="${escapeXml(this.labelTypeFace)}" font-size="${size}"`;
         return [
-            `<text x="24" y="21" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif" font-size="${size}" font-weight="600" stroke="${stroke}" stroke-width="3" stroke-linejoin="round">${text}</text>`,
-            `<text x="24" y="21" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif" font-size="${size}" font-weight="600" fill="${fill}">${text}</text>`,
+            `<text ${attrs} fill="none" stroke="${stroke}" stroke-width="${fmt(layout.outlineStroke)}" stroke-linejoin="round" stroke-linecap="round">${text}</text>`,
+            `<text ${attrs} fill="${fill}">${text}</text>`,
         ].join("");
     }
 
-    protected abstract createFillSvg(markerPath: string): string;
+    protected abstract createFillSvg(markerPath: string, markerSize: number, markerOffsetX: number): string;
 
     protected abstract getUniqueProperties(): unknown;
 }
@@ -284,19 +389,21 @@ abstract class AbstractDefaultIcon extends AbstractMarkerIcon {
 export class ColorDefaultIcon extends AbstractDefaultIcon {
     readonly fillColor: string;
 
-    constructor(fillColor: string = "#FF0000", options: DefaultMarkerIconOptions = {}) {
+    constructor(options: DefaultMarkerIconOptions = {}) {
         super(createBaseProperties(options));
-        this.fillColor = normalizeHexColor(fillColor);
+        this.fillColor = normalizeHexColor(options.fillColor ?? DEFAULT_FILL_COLOR);
     }
 
-    copy(fillColor: string = this.fillColor, options: DefaultMarkerIconOptions = {}): ColorDefaultIcon {
-        return new ColorDefaultIcon(fillColor, {
+    copy(options: DefaultMarkerIconOptions = {}): ColorDefaultIcon {
+        return new ColorDefaultIcon({
+            fillColor: this.fillColor,
             strokeColor: this.strokeColor,
             strokeWidth: this.strokeWidth,
             scale: this.scale,
             label: this.label,
             labelTextColor: this.labelTextColor,
             labelTextSize: this.labelTextSize,
+            labelTypeFace: this.labelTypeFace,
             labelStrokeColor: this.labelStrokeColor,
             infoAnchor: this.infoAnchor,
             iconSize: this.iconSize,
@@ -314,22 +421,26 @@ export class ColorDefaultIcon extends AbstractDefaultIcon {
     }
 }
 
-export class ImageDefaultIcon extends AbstractDefaultIcon {
-    readonly source: string | HTMLImageElement;
+let imageClipCounter = 0;
 
-    constructor(source: string | HTMLImageElement, options: DefaultMarkerIconOptions = {}) {
+export class ImageDefaultIcon extends AbstractDefaultIcon {
+    readonly backgroundImage: string | HTMLImageElement;
+
+    constructor(options: ImageDefaultIconOptions) {
         super(createBaseProperties(options));
-        this.source = source;
+        this.backgroundImage = options.backgroundImage;
     }
 
-    copy(source: string | HTMLImageElement = this.source, options: DefaultMarkerIconOptions = {}): ImageDefaultIcon {
-        return new ImageDefaultIcon(source, {
+    copy(options: Partial<ImageDefaultIconOptions> = {}): ImageDefaultIcon {
+        return new ImageDefaultIcon({
+            backgroundImage: this.backgroundImage,
             strokeColor: this.strokeColor,
             strokeWidth: this.strokeWidth,
             scale: this.scale,
             label: this.label,
             labelTextColor: this.labelTextColor,
             labelTextSize: this.labelTextSize,
+            labelTypeFace: this.labelTypeFace,
             labelStrokeColor: this.labelStrokeColor,
             infoAnchor: this.infoAnchor,
             iconSize: this.iconSize,
@@ -345,33 +456,33 @@ export class ImageDefaultIcon extends AbstractDefaultIcon {
      */
     override toBitmapIcon(): BitmapIcon {
         if (
-            this.source instanceof HTMLImageElement &&
-            this.source.complete &&
-            this.source.naturalWidth > 0
+            this.backgroundImage instanceof HTMLImageElement &&
+            this.backgroundImage.complete &&
+            this.backgroundImage.naturalWidth > 0
         ) {
-            return this.toCanvasBitmapIcon(this.source);
+            return this.toCanvasBitmapIcon(this.backgroundImage);
         }
         return super.toBitmapIcon();
     }
 
     private toCanvasBitmapIcon(img: HTMLImageElement): BitmapIcon {
-        const size = Math.max(1, Math.round(this.iconSize * this.scale));
+        const layout = this.computeLayout();
+        const { markerSize, bitmapWidth, bitmapHeight, markerOffsetX } = layout;
         const canvas = document.createElement("canvas");
-        canvas.width = size;
-        canvas.height = size;
+        canvas.width = bitmapWidth;
+        canvas.height = bitmapHeight;
         const ctx = canvas.getContext("2d");
         if (!ctx) return super.toBitmapIcon();
 
-        // SVG viewBox (0 0 48 48) と同じ座標系で描画する
-        const s = size / 48;
-        ctx.scale(s, s);
+        // ピクセル空間で描画（createSvg と同じ座標系）
+        const markerPath = new Path2D(
+            createMarkerPathData(markerSize, this.scale, this.strokeWidth, markerOffsetX),
+        );
 
-        const markerPath = new Path2D(createMarkerPathData(48, this.scale, this.strokeWidth));
-
-        // マーカー形状でクリップして画像を描画
+        // マーカー形状でクリップし、正方形領域へ画像をセンタークロップ（cover）
         ctx.save();
         ctx.clip(markerPath);
-        ctx.drawImage(img, 0, 0, 48, 48);
+        drawImageCover(ctx, img, markerOffsetX, 0, markerSize, markerSize);
         ctx.restore();
 
         // ストローク（createSvg と同じ計算式）
@@ -382,22 +493,23 @@ export class ImageDefaultIcon extends AbstractDefaultIcon {
         ctx.lineCap = "round";
         ctx.stroke(markerPath);
 
-        // ラベル（createLabelSvg と同じロジック）
+        // ラベル（createLabelSvg と同じロジック：円形部分の中心・通常ウェイト・絶対サイズ）
         if (this.label) {
             const fontSize = Math.max(1, this.labelTextSize);
-            ctx.font = `600 ${fontSize}px sans-serif`;
+            ctx.font = `${fontSize}px ${this.labelTypeFace}`;
             ctx.textAlign = "center";
             ctx.textBaseline = "middle";
             ctx.lineJoin = "round";
+            ctx.lineCap = "round";
             ctx.strokeStyle = this.labelStrokeColor;
-            ctx.lineWidth = 3;
-            ctx.strokeText(this.label, 24, 21);
+            ctx.lineWidth = layout.outlineStroke;
+            const cx = markerOffsetX + markerSize / 2;
+            const cy = markerSize * 0.35;
+            ctx.strokeText(this.label, cx, cy);
             ctx.fillStyle = this.labelTextColor ?? "#000000";
-            ctx.fillText(this.label, 24, 21);
+            ctx.fillText(this.label, cx, cy);
         }
 
-        // drawDebugFrame はピクセル座標を使うのでトランスフォームをリセット
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
         if (this.debug) {
             this.drawDebugFrame(ctx);
         }
@@ -405,15 +517,16 @@ export class ImageDefaultIcon extends AbstractDefaultIcon {
         return {
             url: canvas.toDataURL(),
             anchor: this.anchor,
-            size: { width: size, height: size },
+            size: { width: bitmapWidth, height: bitmapHeight },
         };
     }
 
-    protected createFillSvg(markerPath: string): string {
+    protected createFillSvg(markerPath: string, markerSize: number, markerOffsetX: number): string {
         const href = escapeXml(this.imageSourceUrl());
+        const clipId = `marker-fill-${(imageClipCounter += 1)}`;
         return [
-            `<defs><clipPath id="marker-fill"><path d="${markerPath}"/></clipPath></defs>`,
-            `<image href="${href}" x="0" y="0" width="48" height="48" preserveAspectRatio="xMidYMid slice" clip-path="url(#marker-fill)"/>`,
+            `<defs><clipPath id="${clipId}"><path d="${markerPath}"/></clipPath></defs>`,
+            `<image href="${href}" x="${fmt(markerOffsetX)}" y="0" width="${markerSize}" height="${markerSize}" preserveAspectRatio="xMidYMid slice" clip-path="url(#${clipId})"/>`,
         ].join("");
     }
 
@@ -422,10 +535,10 @@ export class ImageDefaultIcon extends AbstractDefaultIcon {
     }
 
     private imageSourceUrl(): string {
-        if (typeof this.source === "string") {
-            return this.source;
+        if (typeof this.backgroundImage === "string") {
+            return this.backgroundImage;
         }
-        return this.source.currentSrc || this.source.src;
+        return this.backgroundImage.currentSrc || this.backgroundImage.src;
     }
 }
 

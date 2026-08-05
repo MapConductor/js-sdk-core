@@ -101,7 +101,9 @@ export class OverlayCollector<S extends { id: string }> {
     /**
      * Mirrors Android's ChildCollector.setUpdateHandler.
      * When set, subscribes to each state's asObservable() and calls handler
-     * only when the fingerprint actually changes (distinctUntilChanged).
+     * only when the fingerprint actually changes (distinctUntilChanged) — never
+     * for the value the subscription replays on registration. Membership
+     * changes are delivered to subscribe() listeners, not to this handler.
      */
     setUpdateHandler(handler: ((state: S) => void) | null): void {
         this.updateSubs.forEach(unsub => unsub());
@@ -132,13 +134,30 @@ export class OverlayCollector<S extends { id: string }> {
         if (!this.updateHandler) return;
         const observable = (state as unknown as WithObservable).asObservable?.();
         if (!observable) return;
+        // A state's subject replays its current value to a new subscriber, and
+        // that first emission is a baseline rather than an edit: membership
+        // changes reach consumers through notify(), not the update handler.
+        // Delivering it breaks any consumer that treats a callback as "this one
+        // changed" — marker clustering, for instance, would be fed one marker at
+        // a time ahead of the batch add and could never form a cluster.
+        //
+        // Matches android-sdk's ChildCollector ("the first emission after a
+        // (re)start is recorded as the baseline and not delivered") and
+        // ios-sdk's `state.asFlow().dropFirst()`.
+        //
+        // Only emissions delivered synchronously from subscribe() are dropped,
+        // so a state type whose subject has never emitted keeps its first real
+        // change.
+        let replaying = true;
         const unsub = observable.subscribe(() => {
+            if (replaying) return;
             if (this.batchDepth > 0) {
                 this.batchDirty = true;
                 return;
             }
             this.updateHandler?.(state);
         });
+        replaying = false;
         this.updateSubs.set(state.id, unsub);
     }
 

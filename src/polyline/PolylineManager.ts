@@ -1,8 +1,7 @@
 import { GeoPoint } from "../features";
 import { MapCameraPosition } from "../types";
 import { calculateMetersPerPixel } from "../sperical/CalculateMetersPerPixel";
-import { isPointOnLinearLine } from "../sperical/IsPointOnLinearLine";
-import { pointOnGeodesicSegmentOrNull } from "../sperical/PointOnGeodesicSegmentOrNull";
+import { WGS84Geodesic, Planar } from "../sperical";
 import { createGeoRectBounds } from "../features/GeoRectBounds";
 import { PolylineEntity } from "./PolylineEntity";
 
@@ -77,13 +76,13 @@ export class PolylineManager<ActualPolyline> implements PolylineManagerInterface
                 if (visibleRegion && !visibleRegion.intersects(box)) continue;
 
                 const result = entity.state.geodesic
-                    ? pointOnGeodesicSegmentOrNull({
+                    ? WGS84Geodesic.pointOnLineOrNull({
                         from: pts[i],
                         to: pts[i + 1],
                         position,
                         thresholdMeters: threshold,
                     })
-                    : isPointOnLinearLine({
+                    : Planar.pointOnLineOrNull({
                         from: pts[i],
                         to: pts[i + 1],
                         position,

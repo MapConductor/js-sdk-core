@@ -44,7 +44,8 @@ export interface GroundImageStateCopyParams {
     id?: string | null;
 }
 
-const DEFAULT_TILE_SIZE = 256;
+// android-sdk / ios-sdk と一致（GroundImageTileProvider.DEFAULT_TILE_SIZE = 512）。
+const DEFAULT_TILE_SIZE = 512;
 
 const fingerPrintEquals = (a: GroundImageFingerPrint, b: GroundImageFingerPrint): boolean =>
     a.id === b.id &&
@@ -94,8 +95,18 @@ export function createGroundImageState(params: {
         };
     }
 
+    // android-sdk と一致: fingerprint の全フィールドを *31 で畳み込む
+    // （opacity/tileSize/extra を含める。以前は id/bounds/imageUrl の XOR だけで、
+    // opacity や tileSize のみ変えた ground image が equals 扱いになり差分が落ちていた）。
     const hashCode = (): number => {
-        return (fingerPrint().id ^ fingerPrint().bounds ^ fingerPrint().imageUrl) | 0;
+        const fp = fingerPrint();
+        let result = fp.id;
+        result = combineHash(result, fp.bounds);
+        result = combineHash(result, fp.imageUrl);
+        result = combineHash(result, fp.opacity);
+        result = combineHash(result, fp.tileSize);
+        result = combineHash(result, fp.extra);
+        return result;
     };
 
     const copy = (opts: GroundImageStateCopyParams = {}): GroundImageState =>

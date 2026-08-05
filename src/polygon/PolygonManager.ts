@@ -1,5 +1,5 @@
 import { GeoPoint } from "../features";
-import { createInterpolatePoints } from "../sperical/CreateInterpolatePoints";
+import { WGS84Geodesic } from "../sperical";
 import { PolygonEntity } from "./PolygonEntity";
 
 function normalizeLng(lng: number): number {
@@ -65,7 +65,7 @@ export class PolygonManager<ActualPolygon> implements PolygonManagerInterface<Ac
 
             let ring: GeoPoint[];
             try {
-                ring = state.geodesic ? createInterpolatePoints(basePoints) : basePoints;
+                ring = state.geodesic ? WGS84Geodesic.createInterpolatePoints(basePoints) : basePoints;
             } catch {
                 ring = basePoints;
             }
@@ -79,7 +79,7 @@ export class PolygonManager<ActualPolygon> implements PolygonManagerInterface<Ac
                     if (hole.length < 3) continue;
                     let holeRing: GeoPoint[];
                     try {
-                        holeRing = state.geodesic ? createInterpolatePoints(hole) : hole;
+                        holeRing = state.geodesic ? WGS84Geodesic.createInterpolatePoints(hole) : hole;
                     } catch {
                         holeRing = hole;
                     }

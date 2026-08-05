@@ -14,7 +14,9 @@ export interface ImageIconOptions {
     debug?: boolean;
 }
 
-// Module-level bitmap icon cache keyed by hashCode
+// Module-level bitmap icon cache keyed by hashCode.
+// android-sdk（BitmapIconCache の LRU）/ ios-sdk 相当のエントリ数上限で LRU 退避する。
+const BITMAP_ICON_CACHE_MAX = 512;
 const bitmapIconCache = new Map<number, BitmapIcon>();
 
 // WeakMap-based object identity tracking (equivalent to System.identityHashCode)
@@ -111,7 +113,12 @@ export class ImageIcon extends AbstractMarkerIcon {
     toBitmapIcon(): BitmapIcon {
         const id = this.hashCode();
         const cached = bitmapIconCache.get(id);
-        if (cached) return cached;
+        if (cached) {
+            // LRU: 最近使用として末尾へ移動する。
+            bitmapIconCache.delete(id);
+            bitmapIconCache.set(id, cached);
+            return cached;
+        }
 
         const scaledSize = Math.max(1, Math.round(this.iconSize * this.scale));
         const canvas = document.createElement("canvas");
@@ -132,6 +139,10 @@ export class ImageIcon extends AbstractMarkerIcon {
             size: { width: scaledSize, height: scaledSize },
         };
         bitmapIconCache.set(id, result);
+        if (bitmapIconCache.size > BITMAP_ICON_CACHE_MAX) {
+            const oldest = bitmapIconCache.keys().next().value;
+            if (oldest !== undefined) bitmapIconCache.delete(oldest);
+        }
         return result;
     }
 }

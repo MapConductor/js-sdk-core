@@ -92,12 +92,18 @@ export abstract class PolygonController<ActualPolygon>
                 }
             }
 
+            // android-sdk / ios-sdk と同じ遅延削除: 先にマネージャから取得（まだ忘れない）→
+            // onRemove でマップから消してから removeEntity で忘れる。sync が削除途中で
+            // 中断されてもマネージャに残るため、次の sync が再試行でき、グラフィックが孤立しない。
             for (const remainId of previous) {
-                const e = this.polygonManager.removeEntity(remainId);
+                const e = this.polygonManager.getEntity(remainId);
                 if (e) removed.push(e);
             }
 
-            if (removed.length > 0) await this.renderer.onRemove(removed);
+            if (removed.length > 0) {
+                await this.renderer.onRemove(removed);
+                for (const e of removed) this.polygonManager.removeEntity(e.state.id);
+            }
 
             if (added.length > 0) {
                 const polygons = await this.renderer.onAdd(added);
@@ -144,6 +150,8 @@ export abstract class PolygonController<ActualPolygon>
                     createPolygonEntity({ polygon: polygons[0], state }),
                 );
             }
+            // ios-sdk と同じく update() でも onPostProcess を呼んで単一更新をコミットする。
+            await this.renderer.onPostProcess();
         });
     }
 

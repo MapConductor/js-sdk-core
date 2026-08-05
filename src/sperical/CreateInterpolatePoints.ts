@@ -1,5 +1,5 @@
 import { GeoPoint } from "../features/GeoPoint";
-import { computeDistanceBetween, interpolate } from "./GeographicLibCalculator";
+import { computeDistanceBetween, interpolate } from "./WGS84Geodesic";
 
 export function createInterpolatePoints(points: GeoPoint[], maxSegmentLength: number = 10000.0): GeoPoint[] {
     if (points.length === 0) {

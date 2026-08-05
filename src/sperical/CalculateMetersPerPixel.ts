@@ -17,19 +17,3 @@ export function calculateMetersPerPixel({
 
     return metersPerPixelAtZoom * latitudeAdjustment;
 }
-
-export function meterToPixel({
-    meter,
-    latitude,
-    zoom,
-    tileSize = 256.0,
-}: {
-    meter: number;
-    latitude: number;
-    zoom: number;
-    tileSize?: number;
-}): number {
-    const earthCircumference = 2 * Math.PI * Earth.RADIUS_METERS;
-    const metersPerPixel = Math.cos(toRadians(latitude)) * earthCircumference / (tileSize * Math.pow(2.0, zoom));
-    return meter / metersPerPixel;
-}

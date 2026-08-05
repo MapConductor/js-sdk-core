@@ -8,7 +8,8 @@ import { MarkerRenderingStrategy } from "./MarkerRenderingStrategy"
 import { MarkerState } from "./MarkerState"
 
 export abstract class AbstractMarkerRenderingStrategy<ActualMarker> implements MarkerRenderingStrategy<ActualMarker> {
-    protected readonly defaultMarkerIcon: BitmapIcon = new ColorDefaultIcon("#FF0000").toBitmapIcon();
+    // android-sdk / ios-sdk と同じく素の DefaultMarkerIcon（既定色は赤）を使う。
+    protected readonly defaultMarkerIcon: BitmapIcon = new ColorDefaultIcon().toBitmapIcon();
     
     constructor(
         /**

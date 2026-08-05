@@ -108,6 +108,15 @@ export class StrategyMarkerController<ActualMarker>
     }
 
     async clear(): Promise<void> {
+        // Release the renderer's per-marker resources (icon images / sprites)
+        // before dropping the entities. strategy.clear() only clears the manager's
+        // bookkeeping and never calls onRemove, so without this the GL providers'
+        // reference-counted icon images and Azure's sprite images would stay
+        // registered on the map after an explicit clear() while the map is alive.
+        const entities = this.strategy.markerManager.allEntities();
+        if (entities.length > 0) {
+            await this.renderer.onRemove(entities);
+        }
         this.strategy.clear();
     }
 

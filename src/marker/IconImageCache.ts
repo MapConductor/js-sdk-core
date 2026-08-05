@@ -6,8 +6,19 @@ export class IconImageCache {
     // broken icon doesn't get retried on every renderTile() call.
     private readonly failed = new Set<string>();
 
+    // android-sdk（BitmapIconCache: maxMemory/8 の LRU）/ ios-sdk（NSCache.totalCostLimit）
+    // に相当する上限。Web では ImageBitmap のバイト数を取れないためエントリ数で LRU 退避する。
+    private static readonly MAX_READY_ENTRIES = 512;
+    private static readonly MAX_FAILED_ENTRIES = 512;
+
     get(url: string): ImageBitmap | HTMLImageElement | undefined {
-        return this.ready.get(url);
+        const img = this.ready.get(url);
+        if (img !== undefined) {
+            // LRU: 参照されたものを最近使用として末尾へ移動する。
+            this.ready.delete(url);
+            this.ready.set(url, img);
+        }
+        return img;
     }
 
     /** Decode (or return the in-flight/cached decode of) an icon image. Never throws. */
@@ -22,14 +33,15 @@ export class IconImageCache {
             .then((img) => {
                 if (img) {
                     this.ready.set(url, img);
+                    this.evictReadyIfNeeded();
                 } else {
-                    this.failed.add(url);
+                    this.addFailed(url);
                     console.warn('[MapConductor] MarkerTileRenderer: failed to decode icon image', url.slice(0, 64));
                 }
                 return img;
             })
             .catch((err) => {
-                this.failed.add(url);
+                this.addFailed(url);
                 console.warn('[MapConductor] MarkerTileRenderer: icon decode threw', err);
                 return null;
             })
@@ -38,6 +50,28 @@ export class IconImageCache {
             });
         this.pending.set(url, promise);
         return promise;
+    }
+
+    private evictReadyIfNeeded(): void {
+        while (this.ready.size > IconImageCache.MAX_READY_ENTRIES) {
+            const oldest = this.ready.keys().next().value;
+            if (oldest === undefined) break;
+            const evicted = this.ready.get(oldest);
+            this.ready.delete(oldest);
+            // ImageBitmap は GPU メモリを保持するので明示的に解放する。
+            if (evicted != null && "close" in evicted && typeof evicted.close === "function") {
+                evicted.close();
+            }
+        }
+    }
+
+    private addFailed(url: string): void {
+        this.failed.add(url);
+        while (this.failed.size > IconImageCache.MAX_FAILED_ENTRIES) {
+            const oldest = this.failed.values().next().value;
+            if (oldest === undefined) break;
+            this.failed.delete(oldest);
+        }
     }
 
     private async decode(url: string): Promise<ImageBitmap | HTMLImageElement | null> {

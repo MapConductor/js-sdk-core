@@ -1,5 +1,5 @@
 import { GeoPoint } from "../features";
-import { combineHash, hashBool, hashNum, hashObj } from "../features/hash-utils";
+import { combineHash, hashBool, hashGeoPoint, hashNum, hashObj } from "../features/hash-utils";
 import { createSubject } from "../features/subscribe";
 import { Serializable } from "../marker/MarkerState";
 
@@ -50,7 +50,9 @@ export interface PolylineStateCopyParams {
 function listHashCode(list: GeoPoint[]): number {
     let result = 0;
     for (const p of list) {
-        result = (31 * result + (hashNum(p.latitude) ^ hashNum(p.longitude))) | 0;
+        // android-sdk / ios-sdk と一致: 各点の GeoPoint.hashCode（lat/lng/altitude を
+        // fold して *31 畳み込み）を使う。以前の lat^lng（XOR・altitude 無視）から変更。
+        result = (31 * result + hashGeoPoint(p)) | 0;
     }
     return result;
 }

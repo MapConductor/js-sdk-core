@@ -1,4 +1,4 @@
-import { combineHash, toInt } from "./hash-utils";
+import { combineHash, longHashCode } from "./hash-utils";
 
 export interface GeoPointInterface {
     latitude: number;
@@ -151,10 +151,12 @@ export function createGeoPoint(params: {
         );
     }
 
+    // android-sdk / ios-sdk と一致: 各座標を ×1e7 して truncate した整数の
+    // Java Long.hashCode()（切り捨て + 上位ビット fold）を *31 で畳み込む。
     const hashCode = (): number => {
-        let result = toInt(Number((params.latitude * 1e7).toFixed(0)));
-        result = combineHash(result, toInt(Number((params.longitude * 1e7).toFixed(0))));
-        result = combineHash(result, toInt(Number(((altitude ?? 0) * 1e7).toFixed(0))));
+        let result = longHashCode(params.latitude * 1e7);
+        result = combineHash(result, longHashCode(params.longitude * 1e7));
+        result = combineHash(result, longHashCode((altitude ?? 0) * 1e7));
         return result;
     };
 

@@ -9,7 +9,14 @@ export interface MapConfig {
   container: HTMLElement | string;
   /** API key or access token for the map provider */
   apiKey?: string;
-  /** Additional provider-specific options */
+  /**
+   * Additional provider-specific options. Deliberately typed as `Record<string,
+   * any>`: provider configs extend MapConfig and NARROW this to their own
+   * option interface (e.g. LeafletConfig -> Leaflet's `MapOptions`), which is
+   * only assignable when the base is permissive. `Record<string, unknown>` would
+   * break that subtyping (TS2430), so `any` is intentional here.
+   */
+  // eslint-disable-next-line typescript/no-explicit-any
   options?: Record<string, any>;
   
   initCameraPosition: MapCameraPosition;

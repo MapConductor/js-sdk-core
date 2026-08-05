@@ -41,7 +41,7 @@ function interpolateAltitude({
     return 0.0;
 }
 
-export function isPointOnLinearLine({
+export function pointOnLinearLineOrNull({
     from,
     to,
     position,

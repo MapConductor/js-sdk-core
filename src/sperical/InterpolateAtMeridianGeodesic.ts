@@ -1,5 +1,5 @@
 import { createGeoPoint, GeoPoint } from "../features/GeoPoint";
-import { sphericalInterpolate } from "./Spherical";
+import { interpolate } from "./Spherical";
 
 export function interpolateAtMeridianGeodesic(from: GeoPoint, to: GeoPoint): GeoPoint {
     const fromLng = from.longitude;
@@ -13,7 +13,7 @@ export function interpolateAtMeridianGeodesic(from: GeoPoint, to: GeoPoint): Geo
     let iteration = 0;
     while (iteration < maxIterations && (high - low) > tolerance) {
         const mid = (low + high) / 2.0;
-        const interpolatedPoint = sphericalInterpolate({ from, to, fraction: mid });
+        const interpolatedPoint = interpolate({ from, to, fraction: mid });
         const interpolatedLng = interpolatedPoint.longitude;
 
         const normalizedLng =
@@ -34,7 +34,7 @@ export function interpolateAtMeridianGeodesic(from: GeoPoint, to: GeoPoint): Geo
     }
 
     const finalFraction = (low + high) / 2.0;
-    const crossingPoint = sphericalInterpolate({ from, to, fraction: finalFraction });
+    const crossingPoint = interpolate({ from, to, fraction: finalFraction });
 
     return createGeoPoint({
         latitude: crossingPoint.latitude,

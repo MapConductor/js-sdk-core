@@ -1,5 +1,5 @@
 import { createGeoPoint, GeoPoint } from "../features/GeoPoint";
-import { computeDistanceBetween, interpolate } from "./GeographicLibCalculator";
+import { computeDistanceBetween, interpolate } from "./WGS84Geodesic";
 
 export type GeodesicPointDistancePair = [GeoPoint, number];
 
@@ -26,7 +26,7 @@ function interpolateAltitude({
     return 0.0;
 }
 
-export function pointOnGeodesicSegmentOrNull({
+export function pointOnGeodesicLineOrNull({
     from,
     to,
     position,

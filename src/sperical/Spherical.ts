@@ -5,10 +5,6 @@ import { toDegrees, toRadians } from "./utils";
 const RAD_TO_DEG = 180.0 / Math.PI;
 const DEG_TO_RAD = Math.PI / 180.0;
 
-function normalizeLng(lng: number): number {
-    return ((((lng + 180.0) % 360.0) + 360.0) % 360.0) - 180.0;
-}
-
 function interpolateAltitude({
     from,
     to,
@@ -142,7 +138,7 @@ export function computeSignedArea(path: GeoPoint[]): number {
     return area * Earth.RADIUS_METERS * Earth.RADIUS_METERS / 2.0;
 }
 
-export function sphericalInterpolate({
+export function interpolate({
     from,
     to,
     fraction,
@@ -186,34 +182,6 @@ export function sphericalInterpolate({
     return createGeoPoint({
         latitude: toDegrees(Math.asin(vectorZ)),
         longitude: toDegrees(Math.atan2(vectorY, vectorX)),
-        altitude: interpolateAltitude({ from, to, fraction }),
-    });
-}
-
-export function linearInterpolate({
-    from,
-    to,
-    fraction,
-}: {
-    from: GeoPoint;
-    to: GeoPoint;
-    fraction: number;
-}): GeoPoint {
-    const interpolatedLatitude = from.latitude + fraction * (to.latitude - from.latitude);
-
-    const fromLng = from.longitude;
-    const toLng = to.longitude;
-    const directDiff = toLng - fromLng;
-    const crossMeridianDiff =
-        directDiff > 180 ? directDiff - 360 :
-        directDiff < -180 ? directDiff + 360 :
-        directDiff;
-
-    const interpolatedLongitude = fromLng + fraction * crossMeridianDiff;
-
-    return createGeoPoint({
-        latitude: interpolatedLatitude,
-        longitude: normalizeLng(interpolatedLongitude),
         altitude: interpolateAltitude({ from, to, fraction }),
     });
 }

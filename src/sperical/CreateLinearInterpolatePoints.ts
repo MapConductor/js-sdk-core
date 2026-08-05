@@ -1,6 +1,6 @@
 import { GeoPoint } from "../features/GeoPoint";
-import { computeDistanceBetween } from "./GeographicLibCalculator";
-import { linearInterpolate } from "./Spherical";
+import { computeDistanceBetween } from "./WGS84Geodesic";
+import { planarInterpolate as linearInterpolate } from "./_PlanarInterpolate";
 
 /**
  * 非測地線（直線補間）の点列を密度化する。
