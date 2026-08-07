@@ -3,7 +3,7 @@ import type { OverlayController } from "../controller/OverlayController";
 import { MapCameraPosition, Offset } from "../types";
 import { Settings } from "../settings";
 import { Mutex } from "../base/Mutex";
-import { createDefaultIcon } from "./DefaultMarkerIcon";
+import { createDefaultIcon } from "./ColorDefaultIcon";
 import { MarkerEntity } from "./MarkerEntity";
 import { MarkerManager } from "./MarkerManager";
 import { MarkerOverlayRenderer } from "./MarkerOverlayRenderer";

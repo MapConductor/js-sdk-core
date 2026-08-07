@@ -5,12 +5,13 @@ import type { PolygonState } from './PolygonState';
  * Unions overlapping hole rings in a planar lon/lat coordinate space, with no
  * external geometry library.
  *
- * Mirrors Android's `PolygonState.unionHoles()` (which uses JTS
- * `CascadedPolygonUnion`). Instead of a Boolean-op sweep line, this builds the
- * planar arrangement of all hole edges (splitting them at every intersection),
- * keeps only the sub-edges that lie on the outer boundary of the union — those
- * with the union interior on exactly one side, decided by point-in-polygon
- * coverage — and chains them back into rings.
+ * android-sdk (`PolygonHoleUnion.kt`) and ios-sdk have the equivalent port of
+ * this implementation — no platform uses an external geometry library. Instead
+ * of a Boolean-op sweep line, this builds the planar arrangement of all hole
+ * edges (splitting them at every intersection), keeps only the sub-edges that
+ * lie on the outer boundary of the union — those with the union interior on
+ * exactly one side, decided by point-in-polygon coverage — and chains them back
+ * into rings.
  *
  * Notes:
  * - Planar geometry (not geodesic). For very large polygons or near the poles,

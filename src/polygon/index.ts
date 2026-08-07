@@ -1,4 +1,5 @@
 export * from "./AbstractPolygonOverlayRenderer";
+export * from "./HoleBridge";
 export * from "./PolygonCapable";
 export * from "./PolygonController";
 export * from "./PolygonEntity";

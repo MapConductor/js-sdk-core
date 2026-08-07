@@ -6,7 +6,7 @@ import type { BitmapIcon } from './MarkerOverlayRenderer';
 // android-sdk（LruCache）/ ios-sdk（NSCache.totalCostLimit）相当の上限。1 renderer は
 // 1 sync ごとに作り直されるが、単一 sync でのパンによる無制限蓄積を防ぐ。
 const TILE_CACHE_MAX = 1024;
-import { createDefaultIcon } from './DefaultMarkerIcon';
+import { createDefaultIcon } from './ColorDefaultIcon';
 import { GeoGridIndex } from './GeoGridIndex';
 import { IconImageCache } from './IconImageCache';
 import type { PreparedMarker } from './MarkerTileTypes';

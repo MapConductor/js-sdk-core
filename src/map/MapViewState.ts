@@ -40,13 +40,6 @@ export interface MapViewStateInterface<ActualMapDesignType extends MapDesignType
   /** Which map gestures the user may perform. See {@link MapUISettings}. */
   uiSettings: MapUISettings;
 
-  /**
-   * Called by the provider's own view component so it hears about later
-   * `uiSettings` assignments. A plain field write cannot re-render a component
-   * that does not own the state, so the flags are pushed instead of polled.
-   */
-  setUISettingsChangeListener(listener: ((settings: MapUISettings) => void) | null): void;
-
   moveCameraTo(cameraPosition: MapCameraPosition, durationMillis?: number): void;
   moveCameraTo(position: GeoPoint, durationMillis?: number): void;
 
@@ -55,20 +48,57 @@ export interface MapViewStateInterface<ActualMapDesignType extends MapDesignType
   fitBounds(bounds: GeoRectBounds, padding?: number): void;
 
   getMapViewHolder(): MapViewHolder<unknown, unknown> | null;
+}
 
-  // Called by the provider's own view component once its controller is ready
-  // (and with null on unmount) — the shared attach point every MapConductor
-  // React component (LeafletMapView, GoogleMapView, ...) already uses internally.
+/**
+ * プロバイダのビューと `js-sdk-react` だけが使う内部配線。**公開 API ではない。**
+ *
+ * ここにある 4 つはアプリから呼ぶものではない（呼ぶと押し込んだ値と地図の実態がずれる）。
+ * 公開インタフェース {@link MapViewStateInterface} には出さず、SDK 内部からは
+ * {@link mapViewStateInternal} を通して取り出す。
+ *
+ * android-sdk / ios-sdk では同じものが具象クラスの internal / 非 public として隠れている
+ * （ビューが具象クラスを受け取るため）。React はビューがインタフェース越しに state を
+ * 受け取るので、こうして型を分けないと公開面に出てしまう。
+ */
+export interface MapViewStateInternal {
+  /**
+   * プロバイダのビューが、コントローラの準備完了時（アンマウント時は null）に呼ぶ。
+   * MapConductor の React コンポーネント（LeafletMapView, GoogleMapView, ...）が
+   * 内部で使っている共通の接続点。
+   */
   setController(controller: MapViewControllerInterface | null): void;
 
-  // Called by the provider's own view component on every camera move/start/end.
+  /** プロバイダのビューが、地図 SDK のカメラ移動イベントごとに現在値を押し込む。 */
   updateCameraPosition(camera: MapCameraPosition): void;
 
+  /** カメラ変化で再レンダリングするためにプロバイダのビューが購読する。 */
   setCameraPositionChangeListener(listener: ((camera: MapCameraPosition) => void) | null): void;
+
+  /**
+   * `uiSettings` への代入をエンジンへ伝えるために `useMapUISettings` が購読する。
+   *
+   * state を持たないコンポーネントはフィールド代入では再レンダリングできないため、
+   * ポーリングではなく push する（Android の `mutableStateOf` / iOS の `@Published` が
+   * 暗黙にやっていることを手で書いている）。
+   */
+  setUISettingsChangeListener(listener: ((settings: MapUISettings) => void) | null): void;
+}
+
+/**
+ * 公開 state から内部配線（{@link MapViewStateInternal}）を取り出す。
+ *
+ * **プロバイダのビューと `js-sdk-react` の専用**。アプリから呼ばないこと。
+ * 実装は必ず {@link MapViewState} を継承しているので、実行時は常に成立する。
+ */
+export function mapViewStateInternal(
+  state: MapViewStateInterface<MapDesignTypeInterface<unknown>>,
+): MapViewStateInternal {
+  return state as unknown as MapViewStateInternal;
 }
 
 export abstract class MapViewState<ActualMapDesignType extends MapDesignTypeInterface<unknown>>
-  implements MapViewStateInterface<ActualMapDesignType>
+  implements MapViewStateInterface<ActualMapDesignType>, MapViewStateInternal
 {
   // Equivalent of `private val tag = this.javaClass.name` in Kotlin.
   // Used for debug logging to identify the concrete subclass.

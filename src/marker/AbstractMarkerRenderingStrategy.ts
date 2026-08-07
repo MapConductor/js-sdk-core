@@ -1,6 +1,6 @@
 import { GeoRectBounds } from "../features"
 import { MapCameraPosition } from "../types"
-import { ColorDefaultIcon } from "./DefaultMarkerIcon"
+import { ColorDefaultIcon } from "./ColorDefaultIcon"
 import { MarkerManager } from "./MarkerManager"
 import { MarkerOverlayRenderer } from "./MarkerOverlayRenderer"
 import { BitmapIcon } from "./MarkerOverlayRenderer"

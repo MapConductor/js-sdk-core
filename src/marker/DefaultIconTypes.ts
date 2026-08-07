@@ -2,7 +2,7 @@ import { Settings } from "../settings";
 import { Offset } from "../types";
 
 /**
- * Android ColorDefaultIcon / iOS DefaultMarkerIcon の名前付きコンストラクタ引数に対応する
+ * Android ColorDefaultIcon / iOS ColorDefaultIcon の名前付きコンストラクタ引数に対応する
  * オプション群（fillColor を含む全パラメータを 1 つのオブジェクトで受ける）。
  * `labelTypeFace` は Android の Typeface / iOS の UIFont に対応する Web の font-family 文字列。
  */

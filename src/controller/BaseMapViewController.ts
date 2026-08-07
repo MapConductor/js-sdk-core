@@ -143,10 +143,6 @@ export abstract class BaseMapViewController {
     if (index >= 0) this.overlayControllers.splice(index, 1);
   }
 
-  getOverlayControllers(): readonly OverlayControllerLike[] {
-    return this.overlayControllers;
-  }
-
   protected notifyCameraMoveStart(camera: MapCameraPosition): void {
     this.cameraMoveStartCallback?.(camera);
   }
