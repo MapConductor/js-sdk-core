@@ -1,5 +1,5 @@
 import { GeoPoint } from "../features";
-import { computeDistanceBetween } from "../sperical/Spherical";
+import { computeDistanceBetween } from "../spherical/Spherical";
 import { CircleEntity } from "./CircleEntity";
 
 function calculateZIndex(center: GeoPoint): number {

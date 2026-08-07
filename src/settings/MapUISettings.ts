@@ -21,27 +21,37 @@ export interface MapUISettings {
     tiltGesture: boolean;
 }
 
-/** All gestures enabled — the default. */
-export const DefaultMapUISettings: Readonly<MapUISettings> = Object.freeze({
-    scrollGesture: true,
-    zoomGesture: true,
-    rotateGesture: true,
-    tiltGesture: true,
-});
+/**
+ * `MapUISettings.Default` / `MapUISettings.None` を提供する名前空間。
+ *
+ * android-sdk / ios-sdk の companion object（`MapUISettings.Default` / `.None`）に対応する。
+ * TypeScript には companion object が無いので、interface と同名の const を宣言マージして
+ * 型位置と値位置の両方で `MapUISettings` を使えるようにしている
+ * （`DefaultMarkerIcon.ts` が Kotlin の typealias に対して使っているのと同じ手法）。
+ */
+export const MapUISettings = {
+    /** All gestures enabled — the default. */
+    Default: Object.freeze({
+        scrollGesture: true,
+        zoomGesture: true,
+        rotateGesture: true,
+        tiltGesture: true,
+    }) as Readonly<MapUISettings>,
 
-/** Every gesture disabled; the map becomes non-interactive. */
-export const NoMapUISettings: Readonly<MapUISettings> = Object.freeze({
-    scrollGesture: false,
-    zoomGesture: false,
-    rotateGesture: false,
-    tiltGesture: false,
-});
+    /** Every gesture disabled; the map becomes non-interactive. */
+    None: Object.freeze({
+        scrollGesture: false,
+        zoomGesture: false,
+        rotateGesture: false,
+        tiltGesture: false,
+    }) as Readonly<MapUISettings>,
+} as const;
 
 /** Fills in any omitted flag with the default (`true`). */
 export function resolveMapUISettings(
     settings?: Partial<MapUISettings> | null,
 ): MapUISettings {
-    return { ...DefaultMapUISettings, ...(settings ?? {}) };
+    return { ...MapUISettings.Default, ...(settings ?? {}) };
 }
 
 /** The gestures {@link MapUISettings} can turn on and off. */

@@ -4,5 +4,5 @@
 // namespace — e.g. `geodesic ? WGS84Geodesic : Planar`.
 
 export { planarInterpolate as interpolate } from "./_PlanarInterpolate";
-export { createLinearInterpolatePoints as createInterpolatePoints } from "./CreateLinearInterpolatePoints";
-export { pointOnLinearLineOrNull as pointOnLineOrNull } from "./PointOnLinearLineOrNull";
+export { densifyAlongStraightLine as createInterpolatePoints } from "./CreateLinearInterpolatePoints";
+export { linearPointOnLineOrNull as pointOnLineOrNull } from "./PointOnLinearLineOrNull";

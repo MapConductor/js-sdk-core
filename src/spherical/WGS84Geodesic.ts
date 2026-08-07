@@ -3,8 +3,8 @@ import { Earth } from "../projection/Earth";
 import { toDegrees, toRadians } from "./utils";
 
 // Path operations that follow the geodesic curve, exposed as WGS84Geodesic.* .
-export { createInterpolatePoints } from "./CreateInterpolatePoints";
-export { pointOnGeodesicLineOrNull as pointOnLineOrNull } from "./PointOnGeodesicLineOrNull";
+export { densifyAlongGeodesic as createInterpolatePoints } from "./CreateInterpolatePoints";
+export { geodesicPointOnLineOrNull as pointOnLineOrNull } from "./PointOnGeodesicLineOrNull";
 
 const FLATTENING = Earth.FLATTENING;
 const SEMI_MINOR_AXIS = Earth.SEMI_MINOR_AXIS_METERS;

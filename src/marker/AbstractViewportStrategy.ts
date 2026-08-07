@@ -55,19 +55,33 @@ export abstract class AbstractViewportStrategy<ActualMarker>
                 if (inViewport) {
                     toUpdate.push({ current: { ...prev, state }, prev, bitmapIcon: icon });
                 } else {
-                    this.markerManager.registerEntity({ ...prev, state });
+                    // ビューポートから出たものは、出ていたなら取り下げる。
+                    // 取り下げずに entity だけ差し替えると、描画済みマーカーが画面外に
+                    // 残り続け、描画数が単調増加する（ビューポート最適化にならない）。
+                    if (prev.marker != null) toRemove.push(prev);
+                    // isRendered は実態に合わせる。marker が無いのに true を立てると、
+                    // 「描画済みか」で出し入れを決めるサブクラスが未描画のものを消そうとし、
+                    // 画面に入っても出てこなくなる。
+                    this.markerManager.registerEntity({
+                        ...prev,
+                        state,
+                        marker: null as unknown as ActualMarker,
+                        isRendered: false,
+                    });
                 }
             } else {
                 previousIds.delete(state.id);
                 if (inViewport) {
                     toAdd.push({ state, bitmapIcon: state.icon?.toBitmapIcon() ?? this.defaultMarkerIcon });
                 } else {
+                    // 未描画なので isRendered は false（上の既存分と同じ理由）。
                     const entity: MarkerEntity<ActualMarker> = {
                         marker: null as unknown as ActualMarker,
                         state,
                         visible: true,
-                        isRendered: true,
+                        isRendered: false,
                         fingerPrint: state.fingerPrint(),
+                        tiling: false,
                     };
                     this.markerManager.registerEntity(entity);
                 }
@@ -91,6 +105,7 @@ export abstract class AbstractViewportStrategy<ActualMarker>
                     visible: true,
                     isRendered: true,
                     fingerPrint: toAdd[i].state.fingerPrint(),
+                    tiling: false,
                 };
                 this.markerManager.registerEntity(entity);
             });
@@ -106,6 +121,7 @@ export abstract class AbstractViewportStrategy<ActualMarker>
                     visible: true,
                     isRendered: true,
                     fingerPrint: toUpdate[i].current.state.fingerPrint(),
+                    tiling: false,
                 };
                 this.markerManager.registerEntity(entity);
             });
@@ -143,6 +159,7 @@ export abstract class AbstractViewportStrategy<ActualMarker>
                     visible: true,
                     isRendered: true,
                     fingerPrint: currentFP,
+                    tiling: false,
                 });
             }
         }

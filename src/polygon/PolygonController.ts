@@ -1,4 +1,4 @@
-import { GeoPoint } from "../features";
+import { GeoPoint, wrapClickedPoint } from "../features";
 import { MapCameraPosition } from "../types";
 import { OverlayController } from "../controller/OverlayController";
 import { createPolygonEntity, PolygonEntity } from "./PolygonEntity";
@@ -48,8 +48,9 @@ export abstract class PolygonController<ActualPolygon>
     }
 
     dispatchClick(event: PolygonEvent): void {
-        event.state.onClick?.(event);
-        this.clickListener?.(event);
+        const normalized: PolygonEvent = { ...event, clicked: wrapClickedPoint(event.clicked) };
+        normalized.state.onClick?.(normalized);
+        this.clickListener?.(normalized);
     }
 
     async composition(data: PolygonState[]): Promise<void> {

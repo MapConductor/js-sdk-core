@@ -1,4 +1,4 @@
-import { GeoPoint } from "../features";
+import { GeoPoint, wrapClickedPoint } from "../features";
 import { MapCameraPosition } from "../types";
 import { OverlayController } from "../controller/OverlayController";
 import { createCircleEntity, CircleEntity } from "./CircleEntity";
@@ -46,8 +46,10 @@ export abstract class CircleController<ActualCircle>
     }
 
     dispatchClick(event: CircleEvent): void {
-        event.state.onClick?.(event);
-        this.clickListener?.(event);
+        // 配送時に wrap して正規化する。理由は PolygonController.dispatchClick を参照。
+        const normalized: CircleEvent = { ...event, clicked: wrapClickedPoint(event.clicked) };
+        normalized.state.onClick?.(normalized);
+        this.clickListener?.(normalized);
     }
 
     async composition(data: CircleState[]): Promise<void> {

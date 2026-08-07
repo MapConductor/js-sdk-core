@@ -1,5 +1,5 @@
 import { GeoPoint } from "../features";
-import { WGS84Geodesic } from "../sperical";
+import { WGS84Geodesic } from "../spherical";
 import { PolygonEntity } from "./PolygonEntity";
 
 function normalizeLng(lng: number): number {

@@ -24,7 +24,8 @@ type MarkerFingerPrintState = {
     clickable: boolean;
     draggable: boolean;
     position: GeoPoint;
-    zIndex: number;
+    /** null は「未指定」。MarkerState.zIndex と同じく android-sdk の `Int?` に対応する。 */
+    zIndex: number | null;
     getAnimation(): MarkerAnimation | null;
 };
 
@@ -50,7 +51,8 @@ export const createFingerPrint = (state: MarkerFingerPrintState): MarkerFingerPr
         latitude: hashNum(state.position.latitude),
         longitude: hashNum(state.position.longitude),
         animation: hashAnimation(animation),
-        zIndex: state.zIndex,
+        // Kotlin の `null.hashCode() == 0` に合わせて、未指定は 0 として比較する。
+        zIndex: state.zIndex ?? 0,
     };
 };
 
@@ -62,7 +64,7 @@ export function createMarkerFingerPrint(params: {
     draggable: boolean;
     position: GeoPoint;
     animation: MarkerAnimation | null;
-    zIndex?: number;
+    zIndex?: number | null;
 }): MarkerFingerPrint;
 export function createMarkerFingerPrint(params: MarkerFingerPrintState | {
     id: string;
@@ -71,7 +73,7 @@ export function createMarkerFingerPrint(params: MarkerFingerPrintState | {
     draggable: boolean;
     position: GeoPoint;
     animation: MarkerAnimation | null;
-    zIndex?: number;
+    zIndex?: number | null;
 }): MarkerFingerPrint {
     if ("getAnimation" in params) {
         return createFingerPrint(params);

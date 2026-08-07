@@ -43,7 +43,7 @@ export function segmentIntersectsRegion({
     region: GeoRectBounds;
     geodesic?: boolean;
 }): boolean {
-    if (region.isEmpty()) return false;
+    if (region.isEmpty) return false;
 
     const segmentBounds = createSegmentBounds({ point1: start, point2: end, geodesic });
     return segmentBounds.intersects(region);

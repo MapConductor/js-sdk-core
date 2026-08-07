@@ -1,5 +1,5 @@
 import { GeoRectBounds, createGeoRectBounds } from "../features";
-import { interpolate } from "../sperical/WGS84Geodesic";
+import { interpolate } from "../spherical/WGS84Geodesic";
 import { PolylineFingerPrint, PolylineState } from "./PolylineState";
 
 export interface PolylineEntity<ActualPolyline> {

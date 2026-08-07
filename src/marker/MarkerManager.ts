@@ -1,7 +1,7 @@
 import { GeoPoint, GeoRectBounds } from "../features";
 import { HexGeocell, HexGeocellImpl, HexCellRegistry, HexCell } from "../geocell";
 import { Earth } from "../projection";
-import { Spherical } from "../sperical";
+import { Spherical } from "../spherical";
 import { MarkerEntity } from "./MarkerEntity";
 
 /**
@@ -31,11 +31,6 @@ export class MarkerManager<ActualMarker> {
 
     public lock(): void { /* no-op: JS is single-threaded */ }
     public unlock(): void { /* no-op: JS is single-threaded */ }
-
-    openGetEntity(id: string): MarkerEntity<ActualMarker> | null {
-        // （Kotlinの open fun を明示名で区別したい場合）
-        return this.getEntity(id);
-    }
 
     public getEntity(id: string): MarkerEntity<ActualMarker> | null {
         if (this.isDestroyed) return null;
@@ -102,7 +97,11 @@ export class MarkerManager<ActualMarker> {
                         bestDistSq = d2;
                     }
                 }
-                return best ?? this.bruteForceNearest(position);
+                // セルは見つかったが中身が空 = 空間インデックスの desync。
+                // android-sdk / ios-sdk と同じく null を返す。ここで総当りに落とすと、
+                // 2000件超のマップでタップ1回が全件スキャンになる上、インデックスの
+                // 不整合そのものを隠してしまう。
+                return best;
             }
             // セルが無い場合はフォールバック
             return this.bruteForceNearest(position);
@@ -211,13 +210,19 @@ export class MarkerManager<ActualMarker> {
         bounds: GeoRectBounds
     ): Array<MarkerEntity<ActualMarker>> {
         if (this.isDestroyed) return [];
-        if (bounds.isEmpty()) return [];
+        if (bounds.isEmpty) return [];
 
-        if (this.entities.size > this.minMarkerCount) {
+        // `bounds.isEmpty` above already rules out a null corner, so the `!` was
+        // safe — but it read as if it might not be, and it repeated the assertion
+        // at each use. Binding both up front states the precondition once and
+        // matches android-sdk / ios-sdk.
+        const center = bounds.center;
+        const northEast = bounds.northEast;
+        if (this.entities.size > this.minMarkerCount && center != null && northEast != null) {
             const registry = this.ensureCellRegistry();
-            const distance = Spherical.computeDistanceBetween(bounds.center!, bounds.northEast!);
+            const distance = Spherical.computeDistanceBetween(center, northEast);
             const hexCells = registry.findWithinRadiusWithDistance({
-                position: bounds.center!,
+                position: center,
                 radius: distance,
             });
             const entryIDs = hexCells

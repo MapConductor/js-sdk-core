@@ -12,7 +12,8 @@ export interface GeoRectBounds {
     center: GeoPoint | null;
     equals: (other: GeoRectBounds | null) => boolean;
     extend(point: GeoPointInterface): void;
-    isEmpty(): boolean;
+    /** 南西/北東のどちらかが未設定なら true。android-sdk / ios-sdk と同じくプロパティ。 */
+    readonly isEmpty: boolean;
     intersects(other: GeoRectBounds): boolean;
     contains(point: GeoPointInterface): boolean;
     toSpan(): GeoPoint | null;
@@ -34,7 +35,7 @@ export function createGeoRectBounds(params: {
     let _center: GeoPoint | null = null;
 
     const updateCenter = (): void => {
-        if (isEmpty()) {
+        if (computeIsEmpty()) {
             return;
         }
 
@@ -154,7 +155,7 @@ export function createGeoRectBounds(params: {
         updateCenter();
     };
 
-    const isEmpty = (): boolean => {
+    const computeIsEmpty = (): boolean => {
         return _southWest == null || _northEast == null;
     }
 
@@ -171,7 +172,7 @@ export function createGeoRectBounds(params: {
     };
 
     const contains = (point: GeoPointInterface): boolean => {
-        if (isEmpty()) return false
+        if (computeIsEmpty()) return false
 
         const wrappedPoint = fromGeoPoint(point).wrap();
         const sw = _southWest!.wrap()
@@ -191,10 +192,10 @@ export function createGeoRectBounds(params: {
     };
 
     const union = (other: GeoRectBounds | null): GeoRectBounds => {
-        if (!other || other.isEmpty()) {
+        if (!other || other.isEmpty) {
             return clone(bounds);
         }
-        if (isEmpty()) {
+        if (computeIsEmpty()) {
             return clone(other);
         }
 
@@ -205,7 +206,7 @@ export function createGeoRectBounds(params: {
     }
 
     const expandedByDegrees = (latPad: number, lonPad: number): GeoRectBounds => {
-        if (isEmpty()) {
+        if (computeIsEmpty()) {
             return createGeoRectBounds();
         }
 
@@ -232,7 +233,7 @@ export function createGeoRectBounds(params: {
     };
 
     const toSpan = (): GeoPoint | null => {
-        if (isEmpty()) return null;
+        if (computeIsEmpty()) return null;
 
         const sw = _southWest!.wrap()
         const ne = _northEast!.wrap()
@@ -249,7 +250,7 @@ export function createGeoRectBounds(params: {
     };
 
     const toUrlValue = (precision: number = 6): string => {
-        if (isEmpty()) return "1.0,180.0,-1.0,-180.0";
+        if (computeIsEmpty()) return "1.0,180.0,-1.0,-180.0";
 
         const sw = _southWest!.wrap();
         const ne = _northEast!.wrap();
@@ -293,7 +294,7 @@ export function createGeoRectBounds(params: {
 
 
     const intersects = (other: GeoRectBounds): boolean => {
-        if (isEmpty() || other.isEmpty()) {
+        if (computeIsEmpty() || other.isEmpty) {
             return false;
         }
 
@@ -332,7 +333,7 @@ export function createGeoRectBounds(params: {
     }
     
     const toString = (): string => {
-        if (isEmpty()) {
+        if (computeIsEmpty()) {
             return "((1, 180), (-1, -180))";
         } else {
             const sw = _southWest!;
@@ -358,7 +359,7 @@ export function createGeoRectBounds(params: {
                 samePoint(_northEast?.wrap(), other.northEast?.wrap());
     };
 
-    if (!isEmpty()) {
+    if (!computeIsEmpty()) {
         updateCenter();
     }
 
@@ -370,7 +371,7 @@ export function createGeoRectBounds(params: {
         extend,
         equals,
         expandedByDegrees,
-        isEmpty,
+        get isEmpty() { return computeIsEmpty(); },
         intersects,
         toSpan,
         toString,

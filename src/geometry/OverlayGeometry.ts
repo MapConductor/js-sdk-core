@@ -1,6 +1,6 @@
 import { createGeoPoint, type GeoPoint } from "../features";
-import { WGS84Geodesic, Planar } from "../sperical";
-import { splitByMeridian } from "../sperical/SplitByMeridian";
+import { WGS84Geodesic, Planar } from "../spherical";
+import { splitByMeridian } from "../spherical/SplitByMeridian";
 import { normalizeLngDegrees } from "./CircleGeometry";
 import { splitRingByMeridian } from "./SplitRingByMeridian";
 

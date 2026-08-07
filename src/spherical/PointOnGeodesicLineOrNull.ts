@@ -26,7 +26,7 @@ function interpolateAltitude({
     return 0.0;
 }
 
-export function pointOnGeodesicLineOrNull({
+export function geodesicPointOnLineOrNull({
     from,
     to,
     position,

@@ -25,6 +25,17 @@ export class MutableMapServiceRegistry implements MapServiceRegistry {
         return (this.services.get(key as MapServiceKey<unknown>) as T) ?? null;
     }
 
+    /**
+     * 登録済みのサービスを1件だけ取り消す。未登録のキーを渡しても何も起きない。
+     *
+     * {@link clear} がレジストリ全体を空にするのに対し、こちらは他の capability を
+     * 残したまま1つだけ取り下げたいプラグイン向け。android-sdk の
+     * `MutableMapServiceRegistry.remove` / ios-sdk の `remove(_:)` と同じ意味論。
+     */
+    remove<T>(key: MapServiceKey<T>): void {
+        this.services.delete(key as MapServiceKey<unknown>);
+    }
+
     clear(): void {
         this.services.clear();
     }

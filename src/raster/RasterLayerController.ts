@@ -5,6 +5,7 @@ import { createRasterLayerEntity, RasterLayerEntity } from "./RasterLayerEntity"
 import { RasterLayerManagerInterface } from "./RasterLayerManager";
 import { RasterLayerAddParams, RasterLayerChangeParams, RasterLayerOverlayRenderer } from "./RasterLayerOverlayRenderer";
 import { OnRasterLayerEventHandler, RasterLayerEvent, RasterLayerState } from "./RasterLayerState";
+import { RasterHeaderRuleSet, RasterHeaderSupport } from "./RasterHeaderRules";
 import { Mutex } from "../base/Mutex";
 
 function fingerPrintsEqual(
@@ -19,7 +20,7 @@ function fingerPrintsEqual(
         a.zIndex === b.zIndex &&
         a.userAgent === b.userAgent &&
         a.debug === b.debug &&
-        a.extra === b.extra
+        a.extraHeaders === b.extraHeaders
     );
 }
 
@@ -47,6 +48,38 @@ export abstract class RasterLayerController<ActualLayer extends object>
         this.clickListener = clickListener;
     }
 
+    /**
+     * このプロバイダがタイル要求に何を載せられるか。
+     *
+     * 既定は「載せられない」。宣言し忘れたプロバイダは**黙って無視するのではなく
+     * 警告が出る**側に倒しておく（逆にすると、対応していないのに対応しているように見える）。
+     * 実際に載せられるプロバイダだけが override して `extraHeaders: true` を宣言する。
+     */
+    protected get headerSupport(): RasterHeaderSupport {
+        return { provider: this.constructor.name, extraHeaders: false };
+    }
+
+    /**
+     * ヘッダ指定の反映と、載せられない指定の通知。
+     *
+     * すべてのプロバイダがこの基底クラスを通るので、ここに置けば宣言（[headerSupport]）
+     * だけで全プロバイダの挙動が決まる。renderer 側に散らすと、対応していないプロバイダが
+     * 「何も書かない」ことで黙って無視する形になり、実装漏れと区別できない。
+     */
+    private syncHeaders(pending: RasterLayerState[] = []): void {
+        const support = this.headerSupport;
+        for (const state of pending) RasterHeaderRuleSet.warnUnsupported(support, state);
+        if (!support.extraHeaders) return;
+
+        // 描画に入る前の時点では、これから足すレイヤはまだ manager に無い。タイル要求は
+        // レイヤを足した直後に飛ぶので、規則の登録が後だと**最初の数枚だけヘッダ無し**に
+        // なる。渡された状態を先に混ぜてから登録する。
+        const byId = new Map<string, RasterLayerState>();
+        for (const entity of this.rasterLayerManager.allEntities()) byId.set(entity.state.id, entity.state);
+        for (const state of pending) byId.set(state.id, state);
+        RasterHeaderRuleSet.shared.setRules(RasterHeaderRuleSet.makeRules([...byId.values()]), this);
+    }
+
     async composition(data: RasterLayerState[]): Promise<void> {
         await this.add(data);
     }
@@ -60,6 +93,7 @@ export abstract class RasterLayerController<ActualLayer extends object>
     }
 
     async add(data: RasterLayerState[]): Promise<void> {
+        this.syncHeaders(data);
         await this.semaphore.withLock(async () => {
             const previous = new Set(
                 this.rasterLayerManager.allEntities()
@@ -126,9 +160,11 @@ export abstract class RasterLayerController<ActualLayer extends object>
 
             await this.renderer.onPostProcess();
         });
+        this.syncHeaders();
     }
 
     async update(state: RasterLayerState): Promise<void> {
+        this.syncHeaders([state]);
         await this.semaphore.withLock(async () => {
             const prevEntity = this.rasterLayerManager.getEntity(state.id);
             if (!prevEntity) return;
@@ -152,6 +188,7 @@ export abstract class RasterLayerController<ActualLayer extends object>
     }
 
     async upsert(state: RasterLayerState): Promise<void> {
+        this.syncHeaders([state]);
         await this.semaphore.withLock(async () => {
             this.upsertedIds.add(state.id);
             const prevEntity = this.rasterLayerManager.getEntity(state.id);
@@ -192,6 +229,7 @@ export abstract class RasterLayerController<ActualLayer extends object>
             await this.renderer.onRemove([entity]);
             await this.renderer.onPostProcess();
         });
+        this.syncHeaders();
     }
 
     async clear(): Promise<void> {
@@ -201,6 +239,7 @@ export abstract class RasterLayerController<ActualLayer extends object>
             await this.renderer.onPostProcess();
             this.rasterLayerManager.clear();
         });
+        this.syncHeaders();
     }
 
     find(_position: GeoPoint): RasterLayerEntity<ActualLayer> | null {
@@ -211,5 +250,7 @@ export abstract class RasterLayerController<ActualLayer extends object>
         await this.renderer.onCameraChanged(mapCameraPosition);
     }
 
-    destroy(): void {}
+    destroy(): void {
+        RasterHeaderRuleSet.shared.removeRules(this);
+    }
 }

@@ -1,7 +1,7 @@
 import { GeoPoint } from "../features/GeoPoint";
 import { computeDistanceBetween, interpolate } from "./WGS84Geodesic";
 
-export function createInterpolatePoints(points: GeoPoint[], maxSegmentLength: number = 10000.0): GeoPoint[] {
+export function densifyAlongGeodesic(points: GeoPoint[], maxSegmentLength: number = 10000.0): GeoPoint[] {
     if (points.length === 0) {
         throw new RangeError("points must contain at least one point");
     }

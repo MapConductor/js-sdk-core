@@ -23,7 +23,11 @@ export interface MarkerState {
     animation: MarkerAnimation | null;
     clickable: boolean;
     draggable: boolean;
-    zIndex: number;
+    /**
+     * 描画順。null は「未指定」で、0 とは意味が違う（android-sdk / ios-sdk は `Int?` 既定 null）。
+     * 以前は number 固定で null を 0 に潰していたため、未指定と明示的な 0 を区別できなかった。
+     */
+    zIndex: number | null;
     onClick: OnMarkerEventHandler | null;
     onDragStart: OnMarkerEventHandler | null;
     onDrag: OnMarkerEventHandler | null;
@@ -36,7 +40,7 @@ export interface MarkerState {
     setIcon(icon: MarkerIcon | null): void;
     setClickable(clickable: boolean): void;
     setDraggable(draggable: boolean): void;
-    setZIndex(zIndex: number): void;
+    setZIndex(zIndex: number | null): void;
     copy(opts?: MarkerStateCopyParams): MarkerState;
     equals(other: unknown): boolean;
     hashCode(): number;
@@ -102,7 +106,7 @@ class MarkerStateImpl implements MarkerState {
     private _animation: MarkerAnimation | null;
     private _clickable: boolean;
     private _draggable: boolean;
-    private _zIndex: number;
+    private _zIndex: number | null;
     private _onClick: OnMarkerEventHandler | null;
     private _onDragStart: OnMarkerEventHandler | null;
     private _onDrag: OnMarkerEventHandler | null;
@@ -110,8 +114,6 @@ class MarkerStateImpl implements MarkerState {
     private _onAnimateStart: OnMarkerEventHandler | null;
     private _onAnimateEnd: OnMarkerEventHandler | null;
 
-    private _dragPosition: GeoPoint;
-    private _isDragging = false;
 
     // Created lazily on the first asObservable() call rather than at construction. Most markers
     // in a large set are never individually subscribed to (OverlayCollector only subscribes when
@@ -125,7 +127,7 @@ class MarkerStateImpl implements MarkerState {
         this._icon = params.icon ?? null;
         this._clickable = params.clickable ?? true;
         this._draggable = params.draggable ?? false;
-        this._zIndex = params.zIndex ?? 0;
+        this._zIndex = params.zIndex ?? null;
         this._onClick = params.onClick ?? null;
         this._onDragStart = params.onDragStart ?? null;
         this._onDrag = params.onDrag ?? null;
@@ -133,7 +135,6 @@ class MarkerStateImpl implements MarkerState {
         this._onAnimateStart = params.onAnimateStart ?? null;
         this._onAnimateEnd = params.onAnimateEnd ?? null;
         this._animation = params.animation ?? null;
-        this._dragPosition = this._position;
 
         this.id =
             params.id ??
@@ -190,10 +191,10 @@ class MarkerStateImpl implements MarkerState {
         this.setDraggable(nextDraggable);
     }
 
-    get zIndex(): number {
+    get zIndex(): number | null {
         return this._zIndex;
     }
-    set zIndex(nextZIndex: number) {
+    set zIndex(nextZIndex: number | null) {
         this.setZIndex(nextZIndex);
     }
 
@@ -245,19 +246,8 @@ class MarkerStateImpl implements MarkerState {
         this.emit();
     }
 
-    get isDragging(): boolean {
-        return this._isDragging;
-    }
-
-    get internalPosition(): GeoPoint {
-        return this._isDragging ? this._dragPosition : this._position;
-    }
-
     setPosition(nextPosition: GeoPoint): void {
         this._position = nextPosition;
-        if (this._isDragging) {
-            this._dragPosition = nextPosition;
-        }
         this.emit();
     }
 
@@ -276,7 +266,7 @@ class MarkerStateImpl implements MarkerState {
         this.emit();
     }
 
-    setZIndex(nextZIndex: number): void {
+    setZIndex(nextZIndex: number | null): void {
         this._zIndex = nextZIndex;
         this.emit();
     }
@@ -288,19 +278,6 @@ class MarkerStateImpl implements MarkerState {
 
     getAnimation(): MarkerAnimation | null {
         return this._animation;
-    }
-
-    beginDrag(): void {
-        this._isDragging = true;
-        this._dragPosition = this._position;
-    }
-
-    endDrag(): void {
-        this._isDragging = false;
-    }
-
-    setDragPosition(nextPosition: GeoPoint): void {
-        this._dragPosition = nextPosition;
     }
 
     fingerPrint(): MarkerFingerPrint {
@@ -325,7 +302,7 @@ class MarkerStateImpl implements MarkerState {
             extra: has("extra") ? opts.extra ?? null : this._extra,
             icon: has("icon") ? opts.icon ?? null : this._icon,
             animation: has("animation") ? opts.animation ?? null : this._animation,
-            zIndex: has("zIndex") ? opts.zIndex ?? 0 : this._zIndex,
+            zIndex: has("zIndex") ? opts.zIndex ?? null : this._zIndex,
             clickable: opts.clickable ?? this._clickable,
             draggable: opts.draggable ?? this._draggable,
             onClick: has("onClick") ? opts.onClick ?? null : this._onClick,
@@ -345,7 +322,8 @@ class MarkerStateImpl implements MarkerState {
         result = combineHash(result, hashNum(this._position.longitude));
         result = combineHash(result, hashNum(this._position.altitude ?? 0));
         result = combineHash(result, markerIconHashCode(this._icon));
-        result = combineHash(result, this._zIndex);
+        // Kotlin の `null.hashCode() == 0` に合わせる。
+        result = combineHash(result, this._zIndex ?? 0);
         return toInt(result);
     }
 

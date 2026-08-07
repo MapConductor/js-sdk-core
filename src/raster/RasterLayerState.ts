@@ -2,7 +2,17 @@ import { combineHash, hashBool, hashNum, hashObj } from "../features/hash-utils"
 import { createSubject } from "../features/subscribe";
 import { RasterLayerSource } from "./RasterLayerSource";
 
-const DEFAULT_USER_AGENT = "MapConductor/RasterLayerAgent(https://mapconductor.com)";
+/**
+ * 明示指定が無いときの `userAgent`。
+ *
+ * 「利用者が指定した値かどうか」を判定するために公開している。空ではないので、
+ * 既定のままの状態まで「指定あり」として扱うと、ラスタレイヤを 1 枚置いただけで
+ * 非対応の警告が出てしまう。android-sdk の `RasterLayerState.DEFAULT_USER_AGENT` /
+ * ios-sdk の `RasterLayerState.defaultUserAgent` と同じ値・同じ用途。
+ */
+export const DEFAULT_RASTER_LAYER_USER_AGENT = "MapConductor/RasterLayerAgent(https://mapconductor.com)";
+
+const DEFAULT_USER_AGENT = DEFAULT_RASTER_LAYER_USER_AGENT;
 
 export interface RasterLayerFingerPrint {
     id: number;
@@ -12,7 +22,8 @@ export interface RasterLayerFingerPrint {
     zIndex: number;
     userAgent: number;
     debug: number;
-    extra: number;
+    /** `extraHeaders` のハッシュ。中身が extraHeaders しか無いので名前を実態に合わせている。 */
+    extraHeaders: number;
 }
 
 export interface RasterLayerEvent {
@@ -56,7 +67,7 @@ const fingerPrintEquals = (a: RasterLayerFingerPrint, b: RasterLayerFingerPrint)
     a.zIndex === b.zIndex &&
     a.userAgent === b.userAgent &&
     a.debug === b.debug &&
-    a.extra === b.extra;
+    a.extraHeaders === b.extraHeaders;
 
 export function createRasterLayerState(params: {
     source: RasterLayerSource;
@@ -98,7 +109,7 @@ export function createRasterLayerState(params: {
             zIndex,
             userAgent: hashObj(userAgent),
             debug: hashBool(debug),
-            extra: extraHeaders == null ? 0 : hashObj(extraHeaders),
+            extraHeaders: extraHeaders == null ? 0 : hashObj(extraHeaders),
         };
     }
 

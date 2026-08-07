@@ -45,7 +45,9 @@ export interface GroundImageStateCopyParams {
 }
 
 // android-sdk / ios-sdk と一致（GroundImageTileProvider.DEFAULT_TILE_SIZE = 512）。
-const DEFAULT_TILE_SIZE = 512;
+// js-sdk-react の <GroundImage> も既定値をここから取ること。ハードコードすると
+// state 生成時（512）と useEffect の更新時で値がずれる。
+export const GROUND_IMAGE_DEFAULT_TILE_SIZE = 512;
 
 const fingerPrintEquals = (a: GroundImageFingerPrint, b: GroundImageFingerPrint): boolean =>
     a.id === b.id &&
@@ -67,7 +69,7 @@ export function createGroundImageState(params: {
     let bounds = params.bounds;
     let imageUrl = params.imageUrl;
     let opacity = params.opacity ?? 1.0;
-    let tileSize = params.tileSize ?? DEFAULT_TILE_SIZE;
+    let tileSize = params.tileSize ?? GROUND_IMAGE_DEFAULT_TILE_SIZE;
     let extra = params.extra ?? null;
     let onClick = params.onClick ?? null;
 

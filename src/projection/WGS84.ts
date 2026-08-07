@@ -19,7 +19,7 @@
 
 import { createOffset, Offset } from "../types"
 import { Projection } from "./Projection"
-import { toDegrees, toRadians } from "../sperical/utils"
+import { toDegrees, toRadians } from "../spherical/utils"
 import { GeoPoint, GeoPointInterface, createGeoPoint } from "../features"
 
 class WGS84class implements Projection {

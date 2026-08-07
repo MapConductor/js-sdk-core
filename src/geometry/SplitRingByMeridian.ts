@@ -1,5 +1,5 @@
 import { type GeoPoint } from "../features";
-import { splitByMeridian } from "../sperical/SplitByMeridian";
+import { splitByMeridian } from "../spherical/SplitByMeridian";
 
 /**
  * 閉じたリング（開いた頂点列として渡す）を ±180 子午線で分割する。

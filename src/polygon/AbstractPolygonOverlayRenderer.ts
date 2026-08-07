@@ -1,7 +1,8 @@
 import { MapViewHolder } from "../map";
-import { PolygonEntity } from "./PolygonEntity";
+import { createPolygonEntity, PolygonEntity } from "./PolygonEntity";
 import { PolygonAddParams, PolygonChangeParams, PolygonOverlayRenderer } from "./PolygonOverlayRenderer";
 import { PolygonState } from "./PolygonState";
+import { resolveHoles } from "./PolygonUnion";
 
 export abstract class AbstractPolygonOverlayRenderer<
     MapViewHolderType extends MapViewHolder<unknown, unknown>,
@@ -17,17 +18,32 @@ export abstract class AbstractPolygonOverlayRenderer<
         prev: PolygonEntity<ActualPolygon>;
     }): Promise<ActualPolygon | null>;
 
+    /**
+     * 描画に渡す直前に重なった穴を結合する。android-sdk の各 `PolygonOverlayRenderer` が持つ
+     * `resolveHoles(state)` と同じ位置づけで、`Polygon.tsx` のコンポーネント段が再実行されない
+     * 経路（頂点ドラッグ等での `state.holes` 差し替え）を補う。
+     */
+    protected resolveHoles(state: PolygonState): PolygonState {
+        return resolveHoles(state);
+    }
+
     async onAdd(data: PolygonAddParams[]): Promise<(ActualPolygon | null)[]> {
-        return Promise.all(data.map((p) => this.createPolygon(p.state)));
+        return Promise.all(data.map((p) => this.createPolygon(this.resolveHoles(p.state))));
     }
 
     async onChange(data: PolygonChangeParams<ActualPolygon>[]): Promise<(ActualPolygon | null)[]> {
         return Promise.all(
-            data.map((p) => this.updatePolygonProperties({
-                polygon: p.prev.polygon,
-                current: p.current,
-                prev: p.prev,
-            })),
+            data.map((p) => {
+                const resolved = this.resolveHoles(p.current.state);
+                const current = resolved === p.current.state
+                    ? p.current
+                    : createPolygonEntity({ polygon: p.current.polygon, state: resolved });
+                return this.updatePolygonProperties({
+                    polygon: p.prev.polygon,
+                    current,
+                    prev: p.prev,
+                });
+            }),
         );
     }
 

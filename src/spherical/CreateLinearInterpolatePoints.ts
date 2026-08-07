@@ -5,12 +5,12 @@ import { planarInterpolate as linearInterpolate } from "./_PlanarInterpolate";
 /**
  * 非測地線（直線補間）の点列を密度化する。
  *
- * 分割数はセグメント長に応じて決める（createInterpolatePoints と同じ方式）。固定分割だと
+ * 分割数はセグメント長に応じて決める（densifyAlongGeodesic と同じ方式）。固定分割だと
  * 短いセグメントが多い多頂点ポリゴンで点数が頂点数×分割数に膨れ上がり、描画が極端に
  * 遅くなるため、maxSegmentLength を超えるセグメントのみ分割する。
  * android-sdk / ios-sdk と同一仕様。
  */
-export function createLinearInterpolatePoints(
+export function densifyAlongStraightLine(
     points: GeoPoint[],
     maxSegmentLength: number = 10000.0,
 ): GeoPoint[] {

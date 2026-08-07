@@ -2,7 +2,7 @@ import { createGeoPoint } from "../features/GeoPoint";
 import { createGeoRectBounds, GeoRectBounds } from "../features/GeoRectBounds";
 
 export function expandBounds(bounds: GeoRectBounds, margin: number): GeoRectBounds {
-    if (bounds.isEmpty()) return bounds;
+    if (bounds.isEmpty) return bounds;
 
     const span = bounds.toSpan();
     if (span == null) return bounds;

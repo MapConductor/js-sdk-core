@@ -1,3 +1,4 @@
+import type { CameraRestriction } from './CameraRestriction';
 import type { GeoPoint } from '../features/GeoPoint';
 import type { MapCameraPosition } from '../types/MapCamera';
 import type { MapViewControllerInterface } from '../controller/MapViewControllerInterface';
@@ -25,6 +26,14 @@ export interface MapViewBaseProps<TState extends MapViewStateInterface<MapDesign
   onCameraMove?: OnCameraMoveHandler;
   onCameraMoveEnd?: OnCameraMoveHandler;
   className?: string;
+  /**
+   * カメラの可動範囲（パン範囲・ズーム上下限）を制限する。
+   *
+   * android-sdk の各 *MapView コンポーザブルが受け取る `cameraRestriction` 引数に対応する。
+   * 個別の `restrictBounds` / `minZoom` / `maxZoom` prop も引き続き受け付けるが、
+   * そちらはマップ生成時にしか反映されない。実行時に変更したい場合はこちらを使う。
+   */
+  cameraRestriction?: CameraRestriction | null;
 }
 
 /**

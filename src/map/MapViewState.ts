@@ -1,15 +1,41 @@
 import type { GeoPoint } from '../features/GeoPoint';
 import type { GeoRectBounds } from '../features/GeoRectBounds';
-import { DefaultMapUISettings, resolveMapUISettings, type MapUISettings } from '../settings/MapUISettings';
+import { MapUISettings, resolveMapUISettings } from '../settings/MapUISettings';
 import type { MapCameraPosition } from '../types/MapCamera';
 import type { MapViewControllerInterface } from '../controller/MapViewControllerInterface';
 import type { MapDesignTypeInterface } from './MapDesignTypeInterface';
 import type { MapViewHolder } from './MapViewHolder';
+import { MutableMapServiceRegistry } from './MapServiceRegistry';
 
 export interface MapViewStateInterface<ActualMapDesignType extends MapDesignTypeInterface<unknown>> {
   readonly id: string;
+
+  /**
+   * 現在のカメラ。**カメラを読む正規の経路はここ**で、表示範囲は
+   * `cameraPosition.visibleRegion.bounds` から取る。
+   *
+   * プロバイダが地図 SDK のカメライベントごとに `updateCameraPosition()` で
+   * push する（初期化直後にも 1 回 push される）。変化を追いたい場合は
+   * `onCameraMove` / `onCameraMoveEnd`、拡張モジュールは登録した
+   * オーバーレイコントローラの `onCameraChanged` を使う。
+   *
+   * コントローラ側に `getCameraPosition()` / `getBounds()` を足さないこと。
+   * 理由は `MapViewControllerInterface` のコメントと /docs/reading-camera を参照。
+   */
   readonly cameraPosition: MapCameraPosition;
   mapDesignType: ActualMapDesignType;
+
+  /**
+   * このマップにスコープされたサービス（プラグイン）のレジストリ。
+   *
+   * プロバイダが capability を登録し、拡張モジュール（marker-clustering など）が解決する。
+   * これによりプロバイダはプラグインのインタフェースを実装せずに済み、プラグインは
+   * どのプロバイダ上で動いているかを知らずに済む。
+   * ios-sdk の `MapViewState.serviceRegistry` と同じ位置づけで、React では
+   * `MapServiceRegistryProvider` が `useMapServiceRegistry()` へ供給する
+   * （android-sdk の `LocalMapServiceRegistry` CompositionLocal に相当）。
+   */
+  readonly serviceRegistry: MutableMapServiceRegistry;
 
   /** Which map gestures the user may perform. See {@link MapUISettings}. */
   uiSettings: MapUISettings;
@@ -52,9 +78,12 @@ export abstract class MapViewState<ActualMapDesignType extends MapDesignTypeInte
   abstract readonly cameraPosition: MapCameraPosition;
   abstract mapDesignType: ActualMapDesignType;
 
+  /** @see MapViewStateInterface.serviceRegistry */
+  readonly serviceRegistry: MutableMapServiceRegistry = new MutableMapServiceRegistry();
+
   // Concrete for every provider: the view subscribes and pushes the flags down
   // to its map engine, so no subclass has to reimplement it.
-  private _uiSettings: MapUISettings = { ...DefaultMapUISettings };
+  private _uiSettings: MapUISettings = { ...MapUISettings.Default };
   private _uiSettingsChangeListener: ((settings: MapUISettings) => void) | null = null;
 
   get uiSettings(): MapUISettings {

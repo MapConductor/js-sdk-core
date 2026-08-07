@@ -1,6 +1,6 @@
 import { createGeoPoint, type GeoPoint } from "../features";
 import { Earth } from "../projection/Earth";
-import { computeOffset } from "../sperical/Spherical";
+import { computeOffset } from "../spherical/Spherical";
 
 /** 円リング近似の既定分割数。 */
 export const DEFAULT_CIRCLE_SEGMENTS = 128;

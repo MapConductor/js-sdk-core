@@ -1,4 +1,4 @@
-import { GeoPoint } from "../features";
+import { GeoPoint, wrapClickedPoint } from "../features";
 import { MapCameraPosition } from "../types";
 import { OverlayController } from "../controller/OverlayController";
 import { createGroundImageEntity, GroundImageEntity } from "./GroundImageEntity";
@@ -45,8 +45,11 @@ export abstract class GroundImageController<ActualGroundImage>
     }
 
     dispatchClick(event: GroundImageEvent): void {
-        event.state.onClick?.(event);
-        this.clickListener?.(event);
+        // 配送時に wrap して正規化する。理由は PolygonController.dispatchClick を参照。
+        // clicked は null 許容（android-sdk の GroundImageEvent と同じ）。
+        const normalized: GroundImageEvent = { ...event, clicked: wrapClickedPoint(event.clicked) };
+        normalized.state.onClick?.(normalized);
+        this.clickListener?.(normalized);
     }
 
     async composition(data: GroundImageState[]): Promise<void> {

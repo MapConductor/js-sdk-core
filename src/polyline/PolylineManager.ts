@@ -1,7 +1,7 @@
 import { GeoPoint } from "../features";
 import { MapCameraPosition } from "../types";
-import { calculateMetersPerPixel } from "../sperical/CalculateMetersPerPixel";
-import { WGS84Geodesic, Planar } from "../sperical";
+import { calculateMetersPerPixel } from "../spherical/CalculateMetersPerPixel";
+import { WGS84Geodesic, Planar } from "../spherical";
 import { createGeoRectBounds } from "../features/GeoRectBounds";
 import { PolylineEntity } from "./PolylineEntity";
 

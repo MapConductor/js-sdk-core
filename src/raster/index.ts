@@ -1,3 +1,4 @@
+export * from "./RasterHeaderRules";
 export * from "./RasterLayerCapable";
 export * from "./RasterLayerController";
 export * from "./RasterLayerEntity";

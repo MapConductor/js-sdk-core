@@ -1,3 +1,4 @@
+export * from './ClickedPoint';
 export * from './GeoPoint';
 export * from './GeoRectBounds';
 export * from './RandomId';

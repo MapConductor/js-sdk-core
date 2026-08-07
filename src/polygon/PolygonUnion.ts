@@ -63,6 +63,24 @@ export function unionHolesInPlace(state: PolygonState): PolygonState {
     return state;
 }
 
+/**
+ * 描画直前に穴のユニオンを保証する（レンダラ段）。
+ *
+ * android-sdk / ios-sdk は穴のユニオンを 2 段構えで適用している:
+ *   1. コンポーネント層（`PolygonComponent.kt` / `MapViewContent.swift` の `Polygon`）が
+ *      state 1 インスタンスにつき 1 回 `unionHolesInPlace()` を呼ぶ。
+ *   2. 各プロバイダの `PolygonOverlayRenderer` がジオメトリ組み立て時に `resolveHoles()` を通す。
+ *
+ * 2 が要るのは、頂点ドラッグのように後から `state.holes` が差し替わる経路では 1 が
+ * 再実行されないため（`Polygon.tsx` の union は `[state]` 依存で、holes 差し替えでは走らない）。
+ *
+ * `state` は変更せず、必要なときだけコピーを返す。PolygonManager が保持する state は
+ * 未ユニオンのままにしておき、ヒットテストは元の穴リングで行う（android-sdk と同じ）。
+ */
+export function resolveHoles(state: PolygonState): PolygonState {
+    return state.holes.length > 1 ? unionHoles(state) : state;
+}
+
 // ─── Planar union implementation ────────────────────────────────────────────
 
 interface Vec {

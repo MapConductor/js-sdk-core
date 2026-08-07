@@ -1,27 +1,13 @@
 import { GeoPoint } from "../features";
-import { ColorDefaultIcon, MarkerFingerPrint, MarkerManager, MarkerRenderingStrategy, MarkerState } from "../marker";
+import { ColorDefaultIcon, fingerPrintEquals, MarkerManager, MarkerState } from "../marker";
 import { createMarkerEntity, MarkerEntity } from "../marker";
-import { AddParams, BitmapIcon, ChangeParams, MarkerOverlayRenderer } from "../marker";
+import { BitmapIcon, MarkerOverlayRenderer } from "../marker";
 import { MarkerAnimationOverlayHost } from "../marker";
 import { OnMarkerEventHandler } from "../marker";
 import { MapCameraPosition } from "../types";
+import { ingestMarkers, type MarkerIngestionResult } from "../marker/MarkerIngestionEngine";
 import { OverlayController } from "./OverlayController";
 import { Mutex } from "../base/Mutex";
-
-const MARKER_RENDER_BATCH_SIZE = 500;
-
-function fingerprintsEqual(a: MarkerFingerPrint, b: MarkerFingerPrint): boolean {
-    return (
-        a.id === b.id &&
-        a.icon === b.icon &&
-        a.clickable === b.clickable &&
-        a.draggable === b.draggable &&
-        a.latitude === b.latitude &&
-        a.longitude === b.longitude &&
-        a.animation === b.animation &&
-        a.zIndex === b.zIndex
-    );
-}
 
 export abstract class AbstractMarkerController<ActualMarker>
     implements OverlayController<MarkerState, MarkerEntity<ActualMarker>, MarkerState>
@@ -29,6 +15,8 @@ export abstract class AbstractMarkerController<ActualMarker>
     readonly zIndex: number = 10;
     private defaultIcon: BitmapIcon = new ColorDefaultIcon({ fillColor: "#FF0000" }).toBitmapIcon();
     private readonly draggingStates = new WeakMap<MarkerState, boolean>();
+    /** タイル描画中のマーカー ID。android-sdk の各プロバイダが持つ tiledMarkerIds に対応する。 */
+    protected readonly tiledMarkerIds = new Set<string>();
 
     dragStartListener: OnMarkerEventHandler | null = null;
     dragListener: OnMarkerEventHandler | null = null;
@@ -36,32 +24,26 @@ export abstract class AbstractMarkerController<ActualMarker>
     animateStartListener: OnMarkerEventHandler | null = null;
     animateEndListener: OnMarkerEventHandler | null = null;
 
-    private mapCameraPosition: MapCameraPosition | null = null;
-    private pendingCameraPosition: MapCameraPosition | null = null;
-    private debounceJob: ReturnType<typeof setTimeout> | null = null;
-    private debounceMutex = new Mutex();
+    /** 直近のカメラ位置。サブクラスのヒットテスト等が参照する。 */
+    protected mapCameraPosition: MapCameraPosition | null = null;
     private semaphore = new Mutex();
 
     public markerManager: MarkerManager<ActualMarker>;
     public renderer: MarkerOverlayRenderer<ActualMarker>;
     public clickListener: OnMarkerEventHandler | null;
-    public renderingStrategy: MarkerRenderingStrategy<ActualMarker> | null;
 
     constructor({
         markerManager,
         renderer,
         clickListener = null,
-        renderingStrategy = null,
     }: {
         markerManager: MarkerManager<ActualMarker>;
         renderer: MarkerOverlayRenderer<ActualMarker>;
         clickListener?: OnMarkerEventHandler | null;
-        renderingStrategy?: MarkerRenderingStrategy<ActualMarker> | null;
     }) {
         this.markerManager = markerManager;
         this.renderer = renderer;
         this.clickListener = clickListener;
-        this.renderingStrategy = renderingStrategy;
         this.renderer.animateStartListener = (state) => this.dispatchAnimateStart(state);
         this.renderer.animateEndListener = (state) => this.dispatchAnimateEnd(state);
     }
@@ -153,154 +135,25 @@ export abstract class AbstractMarkerController<ActualMarker>
     }
 
     async add(data: MarkerState[]): Promise<void> {
-        // Collected inside the lock, animated after it is released (see below).
-        const entitiesToAnimate: MarkerEntity<ActualMarker>[] = [];
+        // 取り込みロジック本体は MarkerIngestionEngine に集約している（android-sdk / ios-sdk と同じ）。
+        // ここに残るのはロック管理と、ロック解放後のアニメーション再生だけ。
+        let result: MarkerIngestionResult<ActualMarker> | null = null;
         await this.semaphore.withLock(async () => {
-            const modifiedEntities: MarkerEntity<ActualMarker>[] = [];
-            const previous = new Set(this.markerManager.allEntities().map((it) => it.state.id));
-            const added: AddParams[] = [];
-            const updated: ChangeParams<ActualMarker>[] = [];
-            const removed: MarkerEntity<ActualMarker>[] = [];
-            // Markers rendered as tiles: registered in markerManager (marker=null) but not in renderer
-            const tiledAdded: MarkerState[] = [];
-            const tiledUpdated: MarkerState[] = [];
-
             const totalCount = data.length;
-            for (const state of data) {
-                const wantsTile = this.shouldTile(state, totalCount);
-                if (previous.has(state.id)) {
-                    const prevEntity = this.markerManager.getEntity(state.id)!;
-                    const wasTiled = prevEntity.marker === null;
-                    previous.delete(state.id);
+            result = await ingestMarkers<ActualMarker>({
+                data,
+                markerManager: this.markerManager,
+                renderer: this.renderer,
+                defaultMarkerIcon: this.defaultIcon,
+                // タイル可否の総合判定は shouldTile 側が持つ（有効フラグと件数閾値も含む）ので、
+                // engine 側のゲートは常に true にして二重判定を避ける。
+                tilingEnabled: true,
+                tiledMarkerIds: this.tiledMarkerIds,
+                shouldTile: (state) => this.shouldTile(state, totalCount),
+                onMarkerAdded: (entity) => this.onMarkerAdded(entity),
+            });
 
-                    if (wantsTile) {
-                        if (!wasTiled) {
-                            // Transition: regular → tiled. Keep the entity in the manager,
-                            // but remove its provider marker before replacing it with marker=null.
-                            removed.push(prevEntity);
-                        }
-                        // Always re-register tiled markers to keep markerManager current
-                        tiledUpdated.push(state);
-                    } else if (wasTiled) {
-                        // Transition: tiled → regular
-                        this.markerManager.removeEntity(state.id);
-                        removed.push(prevEntity);
-                        added.push({ state, bitmapIcon: state.icon?.toBitmapIcon() ?? this.defaultIcon });
-                    } else {
-                        const currentFinger = state.fingerPrint();
-                        if (!fingerprintsEqual(currentFinger, prevEntity.fingerPrint)) {
-                            const markerIcon = state.icon?.toBitmapIcon() ?? this.defaultIcon;
-                            updated.push({
-                                current: createMarkerEntity<ActualMarker>({
-                                    marker: prevEntity.marker,
-                                    state,
-                                    isRendered: true,
-                                    visible: true,
-                                }),
-                                bitmapIcon: markerIcon,
-                                prev: prevEntity,
-                            });
-                        }
-                    }
-                } else {
-                    if (wantsTile) {
-                        tiledAdded.push(state);
-                    } else {
-                        added.push({
-                            state,
-                            bitmapIcon: state.icon?.toBitmapIcon() ?? this.defaultIcon,
-                        });
-                    }
-                }
-            }
-
-            for (const remainId of previous) {
-                const removedEntity = this.markerManager.removeEntity(remainId);
-                if (removedEntity != null) {
-                    removed.push(removedEntity);
-                }
-            }
-
-            // Register tiled markers in markerManager only (no renderer call)
-            for (const state of [...tiledAdded, ...tiledUpdated]) {
-                this.markerManager.registerEntity(
-                    createMarkerEntity<ActualMarker>({ marker: null, state, isRendered: true, visible: true }),
-                );
-            }
-
-            // Remove renderer-rendered entities that were removed or transitioned to tiled
-            const removedFromRenderer = removed.filter((e) => e.marker !== null);
-            if (removedFromRenderer.length > 0) {
-                await this.renderer.onRemove(removedFromRenderer);
-                if (removedFromRenderer.length >= MARKER_RENDER_BATCH_SIZE) {
-                    await new Promise<void>((r) => setTimeout(r, 0));
-                }
-            }
-
-            if (added.length > 0) {
-                for (let i = 0; i < added.length; i += MARKER_RENDER_BATCH_SIZE) {
-                    const batch = added.slice(i, i + MARKER_RENDER_BATCH_SIZE);
-                    const actualMarkers = await this.renderer.onAdd(batch);
-                    actualMarkers.forEach((actualMarker, index) => {
-                        if (actualMarker != null) {
-                            const entity = createMarkerEntity<ActualMarker>({
-                                marker: actualMarker,
-                                state: batch[index].state,
-                                isRendered: true,
-                                visible: true,
-                            });
-                            this.markerManager.registerEntity(entity);
-                            this.onMarkerAdded(entity);
-                            modifiedEntities.push(entity);
-                        }
-                    });
-                    await new Promise<void>((r) => setTimeout(r, 0));
-                }
-            }
-
-            if (updated.length > 0) {
-                for (let i = 0; i < updated.length; i += MARKER_RENDER_BATCH_SIZE) {
-                    const batch = updated.slice(i, i + MARKER_RENDER_BATCH_SIZE);
-                    const actualMarkers = await this.renderer.onChange(batch);
-                    actualMarkers.forEach((actualMarker, index) => {
-                        if (actualMarker != null) {
-                            const entity = createMarkerEntity<ActualMarker>({
-                                marker: actualMarker,
-                                state: batch[index].current.state,
-                                isRendered: true,
-                                visible: true,
-                            });
-                            this.markerManager.registerEntity(entity);
-                            const change = batch[index];
-                            if (
-                                change.prev.fingerPrint.animation !== change.current.fingerPrint.animation &&
-                                entity.state.getAnimation() != null
-                            ) {
-                                modifiedEntities.push(entity);
-                            }
-                        }
-                    });
-                    await new Promise<void>((r) => setTimeout(r, 0));
-                }
-            }
-
-            for (const entity of modifiedEntities) {
-                if (entity.state.getAnimation() != null) {
-                    entitiesToAnimate.push(entity);
-                }
-            }
-
-            const rendererChanged =
-                removedFromRenderer.length > 0 || added.length > 0 || updated.length > 0;
-            if (rendererChanged) {
-                await this.renderer.onPostProcess();
-            }
-
-            const tiledChanged =
-                tiledAdded.length > 0 ||
-                tiledUpdated.length > 0 ||
-                removed.some((entity) => entity.marker === null);
-            if (tiledChanged) {
+            if (result.tiledDataChanged) {
                 await this.onTiledMarkersChanged();
             }
         });
@@ -310,8 +163,9 @@ export abstract class AbstractMarkerController<ActualMarker>
         // these animations against each other; the screen-space overlay path
         // resolves only when each animation ends. Running them concurrently lets
         // multiple markers drop/bounce simultaneously. See update() for details.
-        if (entitiesToAnimate.length > 0) {
-            await Promise.all(entitiesToAnimate.map((entity) => this.renderer.onAnimate(entity)));
+        const toAnimate = (result as MarkerIngestionResult<ActualMarker> | null)?.entitiesToAnimate ?? [];
+        if (toAnimate.length > 0) {
+            await Promise.all(toAnimate.map((entity) => this.renderer.onAnimate(entity)));
         }
     }
 
@@ -339,20 +193,24 @@ export abstract class AbstractMarkerController<ActualMarker>
 
             const currentFinger = state.fingerPrint();
             const prevFinger = prevEntity.fingerPrint;
-            if (fingerprintsEqual(currentFinger, prevFinger)) return;
+            if (fingerPrintEquals(currentFinger, prevFinger)) return;
 
             const wantsTile = this.shouldTile(state, this.markerManager.allEntities().length);
-            const wasTiled = prevEntity.marker === null;
+            // タイル判定は tiledMarkerIds で行う。`marker === null` はプロバイダの onAdd が
+            // 失敗して null を返したケースとも一致してしまう。
+            const wasTiled = this.tiledMarkerIds.has(state.id);
 
             if (wantsTile) {
                 if (!wasTiled) {
                     await this.renderer.onRemove([prevEntity]);
                 }
+                this.tiledMarkerIds.add(state.id);
                 this.markerManager.updateEntity(createMarkerEntity<ActualMarker>({
                     state,
                     marker: null,
                     isRendered: true,
                     visible: prevEntity.visible,
+                    tiling: true,
                 }));
                 if (!wasTiled) {
                     await this.renderer.onPostProcess();
@@ -385,6 +243,7 @@ export abstract class AbstractMarkerController<ActualMarker>
                 });
                 this.markerManager.updateEntity(finalEntity);
                 if (wasTiled) {
+                    this.tiledMarkerIds.delete(state.id);
                     this.onMarkerAdded(finalEntity);
                 }
 
@@ -414,6 +273,7 @@ export abstract class AbstractMarkerController<ActualMarker>
     async clear(): Promise<void> {
         await this.semaphore.withLock(async () => {
             const entities = this.markerManager.allEntities();
+            this.tiledMarkerIds.clear();
             const rendered = entities.filter((entity) => entity.marker !== null);
             if (rendered.length > 0) {
                 await this.renderer.onRemove(rendered);
@@ -422,27 +282,10 @@ export abstract class AbstractMarkerController<ActualMarker>
         });
     }
 
+    // android-sdk の各プロバイダ *MarkerController.onCameraChanged と同じく、直近のカメラ位置を
+    // 覚えるだけ。ストラテジ駆動の再描画は StrategyMarkerController（android-sdk と同形）の役目。
     async onCameraChanged(mapCameraPosition: MapCameraPosition): Promise<void> {
-        if (this.mapCameraPosition == null) {
-            this.mapCameraPosition = mapCameraPosition;
-            await this.renderingStrategy?.onCameraChanged?.(mapCameraPosition, this.renderer);
-        } else {
-            await this.debounceMutex.withLock(async () => {
-                this.pendingCameraPosition = mapCameraPosition;
-                if (this.debounceJob != null) {
-                    clearTimeout(this.debounceJob);
-                }
-                this.debounceJob = setTimeout(async () => {
-                    const latest = await this.debounceMutex.withLock(
-                        async () => this.pendingCameraPosition,
-                    );
-                    if (latest != null) {
-                        this.mapCameraPosition = latest;
-                        await this.renderingStrategy?.onCameraChanged?.(latest, this.renderer);
-                    }
-                }, 100);
-            });
-        }
+        this.mapCameraPosition = mapCameraPosition;
     }
 
     setMarkerAnimationOverlayHost(host: MarkerAnimationOverlayHost | null): void {
@@ -450,10 +293,7 @@ export abstract class AbstractMarkerController<ActualMarker>
     }
 
     destroy(): void {
-        if (this.debounceJob != null) {
-            clearTimeout(this.debounceJob);
-            this.debounceJob = null;
-        }
+        this.tiledMarkerIds.clear();
         this.markerManager.destroy();
     }
 }

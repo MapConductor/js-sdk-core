@@ -2,7 +2,6 @@ import { GeoPoint } from "../features";
 import { combineHash, hashBool, hashGeoPoint, hashNum, hashObj } from "../features/hash-utils";
 import { createSubject } from "../features/subscribe";
 import { Serializable } from "../marker";
-import { unionHoleRings } from "./PolygonUnion";
 
 export interface PolygonFingerPrint {
     id: number;
@@ -99,7 +98,11 @@ export function createPolygonState(params: {
     onClick?: OnPolygonEventHandler | null;
 }): PolygonState {
     let points = params.points;
-    let holes = unionHoleRings(params.holes ?? []);
+    // 穴のユニオンはここでは行わない。android-sdk と同じく「コンポーネント層でのみ」適用する
+    // （PolygonComponent.kt: holes.size > 1 のときだけ state.unionHolesInPlace()）。
+    // ctor / copy() / setter でも union すると、unionHolesInPlace 1回の呼び出しで
+    // 最大4回 unionHoleRings が走る（unionHoleRings は CW に巻き直すため再入力で再処理になる）。
+    let holes = params.holes ?? [];
     let strokeColor = params.strokeColor ?? "#000000";
     let strokeWidth = params.strokeWidth ?? 2;
     let fillColor = params.fillColor ?? "transparent";
@@ -153,7 +156,7 @@ export function createPolygonState(params: {
         createPolygonState({
             id: "id" in opts ? opts.id ?? null : id,
             points: opts.points ?? points,
-            holes: "holes" in opts ? unionHoleRings(opts.holes ?? []) : holes,
+            holes: "holes" in opts ? opts.holes ?? [] : holes,
             strokeColor: opts.strokeColor ?? strokeColor,
             strokeWidth: opts.strokeWidth ?? strokeWidth,
             fillColor: opts.fillColor ?? fillColor,
@@ -173,7 +176,7 @@ export function createPolygonState(params: {
         get points() { return points; },
         set points(v: GeoPoint[]) { points = v; emit(); },
         get holes() { return holes; },
-        set holes(v: GeoPoint[][]) { holes = unionHoleRings(v); emit(); },
+        set holes(v: GeoPoint[][]) { holes = v; emit(); },
         get strokeColor() { return strokeColor; },
         set strokeColor(v: string) { strokeColor = v; emit(); },
         get strokeWidth() { return strokeWidth; },
