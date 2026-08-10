@@ -8,6 +8,7 @@ export * from "./FitBoundsCamera";
 export * from "./MapViewBase";
 export * from "./MapOverlayRegistry";
 export * from "./MapServiceRegistry";
+export * from "./ScreenProjectionRequirement";
 export * from "./MapCapability";
 export * from "./MapDiagnostics";
 export * from "./InitState";
