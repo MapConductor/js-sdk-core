@@ -1,3 +1,5 @@
+import type { SlottedOverlayController } from '../controller/OverlayController';
+import type { OverlayKind } from '../controller/OverlayKind';
 import { GeoPoint, wrapClickedPoint } from "../features";
 import { MapCameraPosition } from "../types";
 import { OverlayController } from "../controller/OverlayController";
@@ -23,7 +25,7 @@ function fingerPrintsEqual(
 }
 
 export abstract class PolylineController<ActualPolyline>
-    implements OverlayController<PolylineState, PolylineEntity<ActualPolyline>, PolylineEvent>
+    implements SlottedOverlayController, OverlayController<PolylineState, PolylineEntity<ActualPolyline>, PolylineEvent>
 {
     readonly zIndex: number = 5;
     public readonly polylineManager: PolylineManagerInterface<ActualPolyline>;
@@ -173,4 +175,28 @@ export abstract class PolylineController<ActualPolyline>
     }
 
     destroy(): void {}
+    // ── SlottedOverlayController（Capable ファサードのスロット） ─────────
+    //
+    // kind は**必須メンバ**。宣言を忘れると型エラーになる。既定値を持たせると
+    // 「登録したのに composition が黙って捨てられる」という、ビルドも型検査も
+    // 通ってしまう不具合になる（android-sdk で実際に踏んだ）。
+
+    readonly kind: OverlayKind = 'polyline';
+
+    hasId(id: string): boolean {
+        return this.has({ id } as PolylineState);
+    }
+
+    async compositionAny(data: unknown[]): Promise<void> {
+        await this.composition(data as PolylineState[]);
+    }
+
+    async updateAny(state: unknown): Promise<void> {
+        await this.update(state as PolylineState);
+    }
+
+    setClickListenerAny(listener: unknown): void {
+        this.clickListener = listener as OnPolylineEventHandler | null;
+    }
+
 }

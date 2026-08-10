@@ -2,8 +2,19 @@ import { createGeoPoint, type GeoPoint } from '../features/GeoPoint';
 import { isEmptyCameraRestriction, type CameraRestriction } from '../map/CameraRestriction';
 import type { OnCameraMoveHandler, OnMapEventHandler } from '../map/MapViewBase';
 import type { MapCameraPosition } from '../types/MapCamera';
-import type { OverlayControllerLike } from './OverlayController';
+import {
+  isSlottedOverlayController,
+  type OverlayControllerLike,
+  type SlottedOverlayController,
+} from './OverlayController';
+import type { OverlayKind } from './OverlayKind';
 import type { OnMapInitializedHandler } from './MapViewControllerInterface';
+import type { MarkerState } from '../marker/MarkerState';
+import type { OnPolylineEventHandler, PolylineState } from '../polyline/PolylineState';
+import type { OnPolygonEventHandler, PolygonState } from '../polygon/PolygonState';
+import type { OnCircleEventHandler, CircleState } from '../circle/CircleState';
+import type { OnGroundImageEventHandler, GroundImageState } from '../groundimage/GroundImageState';
+import type { RasterLayerState } from '../raster/RasterLayerState';
 
 // 統一ズーム（Google 準拠）での許容誤差。これ未満の差では補正しない。
 const ZOOM_EPS = 1e-3;
@@ -141,6 +152,151 @@ export abstract class BaseMapViewController {
   unregisterOverlayController(controller: OverlayControllerLike): void {
     const index = this.overlayControllers.indexOf(controller);
     if (index >= 0) this.overlayControllers.splice(index, 1);
+  }
+
+  // ── Capable ファサードの既定実装 ──────────────────────────────────────
+  //
+  // 各プロバイダの *ViewController が `compositionXxx` / `updateXxx` / `hasXxx` を
+  // 「登録済みコントローラへ 1 行転送するだけ」で 13 プロバイダ x 約 100 行あった。
+  // 登録済みの SlottedOverlayController から kind で解決して既定実装にする。
+  //
+  // 描画前に追加処理が要るプロバイダ（MapLibre / Mapbox のポリゴンは z レイヤの
+  // 再構築が要る）は override して super を呼ぶ。
+
+  /**
+   * この種別の**主**コントローラ（最初に登録されたもの）。
+   *
+   * `compositionXxx` / `updateXxx` はここへ流す。クラスタリングは同じ marker 種別で
+   * 追加のコントローラを登録するが、composition の受け口は最初の 1 つでよい
+   * （追加分はクラスタリング側が自分で駆動する）。
+   */
+  protected primaryOverlayController(kind: OverlayKind): SlottedOverlayController | null {
+    for (const controller of this.overlayControllers) {
+      if (isSlottedOverlayController(controller) && controller.kind === kind) return controller;
+    }
+    return null;
+  }
+
+  /** この種別に登録されたすべてのコントローラ。`hasXxx` は「どれかが持っていれば true」。 */
+  protected overlayControllersOf(kind: OverlayKind): SlottedOverlayController[] {
+    return this.overlayControllers
+      .filter(isSlottedOverlayController)
+      .filter((controller) => controller.kind === kind);
+  }
+
+  /** `kind` のいずれかのコントローラがこの id を持っているか。`hasXxx` の既定実装。 */
+  protected hasOverlay(kind: OverlayKind, id: string): boolean {
+    return this.overlayControllersOf(kind).some((controller) => controller.hasId(id));
+  }
+
+  protected async compositionOverlays(kind: OverlayKind, data: unknown[]): Promise<void> {
+    await this.primaryOverlayController(kind)?.compositionAny(data);
+  }
+
+  protected async updateOverlay(kind: OverlayKind, state: unknown): Promise<void> {
+    await this.primaryOverlayController(kind)?.updateAny(state);
+  }
+
+  protected setOverlayClickListener(kind: OverlayKind, listener: unknown): void {
+    this.overlayControllersOf(kind).forEach((controller) => controller.setClickListenerAny(listener));
+  }
+
+  // Marker
+  async compositionMarkers(data: MarkerState[]): Promise<void> {
+    await this.compositionOverlays('marker', data);
+  }
+
+  async updateMarker(state: MarkerState): Promise<void> {
+    await this.updateOverlay('marker', state);
+  }
+
+  hasMarker(state: MarkerState): boolean {
+    return this.hasOverlay('marker', state.id);
+  }
+
+  // Polyline
+  async compositionPolylines(data: PolylineState[]): Promise<void> {
+    await this.compositionOverlays('polyline', data);
+  }
+
+  async updatePolyline(state: PolylineState): Promise<void> {
+    await this.updateOverlay('polyline', state);
+  }
+
+  hasPolyline(state: PolylineState): boolean {
+    return this.hasOverlay('polyline', state.id);
+  }
+
+  /** @deprecated Use PolylineState.onClick instead. */
+  setOnPolylineClickListener(listener: OnPolylineEventHandler | null): void {
+    this.setOverlayClickListener('polyline', listener);
+  }
+
+  // Polygon
+  async compositionPolygons(data: PolygonState[]): Promise<void> {
+    await this.compositionOverlays('polygon', data);
+  }
+
+  async updatePolygon(state: PolygonState): Promise<void> {
+    await this.updateOverlay('polygon', state);
+  }
+
+  hasPolygon(state: PolygonState): boolean {
+    return this.hasOverlay('polygon', state.id);
+  }
+
+  /** @deprecated Use PolygonState.onClick instead. */
+  setOnPolygonClickListener(listener: OnPolygonEventHandler | null): void {
+    this.setOverlayClickListener('polygon', listener);
+  }
+
+  // Circle
+  async compositionCircles(data: CircleState[]): Promise<void> {
+    await this.compositionOverlays('circle', data);
+  }
+
+  async updateCircle(state: CircleState): Promise<void> {
+    await this.updateOverlay('circle', state);
+  }
+
+  hasCircle(state: CircleState): boolean {
+    return this.hasOverlay('circle', state.id);
+  }
+
+  /** @deprecated Use CircleState.onClick instead. */
+  setOnCircleClickListener(listener: OnCircleEventHandler | null): void {
+    this.setOverlayClickListener('circle', listener);
+  }
+
+  // GroundImage
+  async compositionGroundImages(data: GroundImageState[]): Promise<void> {
+    await this.compositionOverlays('groundImage', data);
+  }
+
+  async updateGroundImage(state: GroundImageState): Promise<void> {
+    await this.updateOverlay('groundImage', state);
+  }
+
+  hasGroundImage(state: GroundImageState): boolean {
+    return this.hasOverlay('groundImage', state.id);
+  }
+
+  /** @deprecated Use GroundImageState.onClick instead. */
+  setOnGroundImageClickListener(listener: OnGroundImageEventHandler | null): void {
+    this.setOverlayClickListener('groundImage', listener);
+  }
+
+  // RasterLayer
+  async compositionRasterLayers(data: RasterLayerState[]): Promise<void> {
+    await this.compositionOverlays('rasterLayer', data);
+  }
+
+  async updateRasterLayer(state: RasterLayerState): Promise<void> {
+    await this.updateOverlay('rasterLayer', state);
+  }
+
+  hasRasterLayer(state: RasterLayerState): boolean {
+    return this.hasOverlay('rasterLayer', state.id);
   }
 
   protected notifyCameraMoveStart(camera: MapCameraPosition): void {

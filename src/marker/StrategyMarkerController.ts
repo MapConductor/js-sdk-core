@@ -1,3 +1,5 @@
+import type { SlottedOverlayController } from '../controller/OverlayController';
+import type { OverlayKind } from '../controller/OverlayKind';
 import { GeoPoint, GeoRectBounds } from "../features";
 import type { OverlayController } from "../controller/OverlayController";
 import { MapCameraPosition, Offset } from "../types";
@@ -22,7 +24,7 @@ import { OnMarkerEventHandler } from "./OnMarkerEventHandler";
  * with `Settings.Default.tapTolerance`.
  */
 export class StrategyMarkerController<ActualMarker>
-    implements OverlayController<MarkerState, MarkerEntity<ActualMarker>, MarkerState>
+    implements SlottedOverlayController, OverlayController<MarkerState, MarkerEntity<ActualMarker>, MarkerState>
 {
     readonly markerManager: MarkerManager<ActualMarker>;
     readonly zIndex: number = 10;
@@ -189,4 +191,28 @@ export class StrategyMarkerController<ActualMarker>
     destroy(): void {
         this.strategy.clear();
     }
+    // ── SlottedOverlayController（Capable ファサードのスロット） ─────────
+    //
+    // kind は**必須メンバ**。宣言を忘れると型エラーになる。既定値を持たせると
+    // 「登録したのに composition が黙って捨てられる」という、ビルドも型検査も
+    // 通ってしまう不具合になる（android-sdk で実際に踏んだ）。
+
+    readonly kind: OverlayKind = 'marker';
+
+    hasId(id: string): boolean {
+        return this.getEntity(id) != null;
+    }
+
+    async compositionAny(data: unknown[]): Promise<void> {
+        await this.add(data as MarkerState[]);
+    }
+
+    async updateAny(state: unknown): Promise<void> {
+        await this.update(state as MarkerState);
+    }
+
+    setClickListenerAny(listener: unknown): void {
+        this.clickListener = listener as OnMarkerEventHandler | null;
+    }
+
 }

@@ -1,3 +1,5 @@
+import type { SlottedOverlayController } from '../controller/OverlayController';
+import type { OverlayKind } from '../controller/OverlayKind';
 import { GeoPoint, wrapClickedPoint } from "../features";
 import { MapCameraPosition } from "../types";
 import { OverlayController } from "../controller/OverlayController";
@@ -23,7 +25,7 @@ function fingerPrintsEqual(a: ReturnType<CircleState["fingerPrint"]>, b: ReturnT
 }
 
 export abstract class CircleController<ActualCircle>
-    implements OverlayController<CircleState, CircleEntity<ActualCircle>, CircleEvent>
+    implements SlottedOverlayController, OverlayController<CircleState, CircleEntity<ActualCircle>, CircleEvent>
 {
     readonly zIndex: number = 3;
     public readonly circleManager: CircleManagerInterface<ActualCircle>;
@@ -166,4 +168,28 @@ export abstract class CircleController<ActualCircle>
     destroy(): void {
         // No native resources to clean up for circles
     }
+    // ── SlottedOverlayController（Capable ファサードのスロット） ─────────
+    //
+    // kind は**必須メンバ**。宣言を忘れると型エラーになる。既定値を持たせると
+    // 「登録したのに composition が黙って捨てられる」という、ビルドも型検査も
+    // 通ってしまう不具合になる（android-sdk で実際に踏んだ）。
+
+    readonly kind: OverlayKind = 'circle';
+
+    hasId(id: string): boolean {
+        return this.has({ id } as CircleState);
+    }
+
+    async compositionAny(data: unknown[]): Promise<void> {
+        await this.composition(data as CircleState[]);
+    }
+
+    async updateAny(state: unknown): Promise<void> {
+        await this.update(state as CircleState);
+    }
+
+    setClickListenerAny(listener: unknown): void {
+        this.clickListener = listener as OnCircleEventHandler | null;
+    }
+
 }
