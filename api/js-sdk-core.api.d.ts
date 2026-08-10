@@ -891,25 +891,92 @@ interface MapViewStateInternal {
  * 実装は必ず {@link MapViewState} を継承しているので、実行時は常に成立する。
  */
 declare function mapViewStateInternal(state: MapViewStateInterface<MapDesignTypeInterface<unknown>>): MapViewStateInternal;
+/** {@link MapViewState} のコンストラクタ引数。 */
+interface MapViewStateOptions {
+    /** state の識別子。省略するとランダム。 */
+    id?: string;
+    /**
+     * コントローラが繋がるまでの間、保持しておくカメラ。
+     * {@link MapViewState.attachController} の時点でこの位置へ移動する。
+     */
+    cameraPosition?: MapCameraPosition;
+    /** 初期のジェスチャ設定。 */
+    uiSettings?: Partial<MapUISettings>;
+    /**
+     * {@link MapViewState.moveCameraTo} で、コントローラへ委譲したあとに要求された
+     * カメラを {@link MapViewState.cameraPosition} へ反映するか。
+     *
+     * **web は既定が `true`。** android / iOS は `false`（地図が返してきた実際の値だけを
+     * 入れる）だが、web のエンジンはカメラ移動イベントが非同期で、しかも React には
+     * Compose の再コンポーズや SwiftUI の `@Published` に当たる push が無い。
+     * 要求直後に `cameraPosition` を読むと古い値が返るため、要求値をそのまま保持する。
+     * 全 web プロバイダが移行前からこの形だった。
+     */
+    optimisticCameraUpdate?: boolean;
+}
+/**
+ * 全プロバイダ共通の state 実装。
+ *
+ * カメラの保持と、コントローラへの委譲（{@link moveCameraTo} / {@link fitBounds} /
+ * {@link getMapViewHolder}）はどのプロバイダでも同じなのでここに置く。
+ * プロバイダ固有なのは `mapDesignType` の型と、`getMapViewHolder()` の戻り型を
+ * 絞るオーバーライドだけ。android-sdk / ios-sdk の `MapViewState` と同じ形。
+ */
 declare abstract class MapViewState<ActualMapDesignType extends MapDesignTypeInterface<unknown>> implements MapViewStateInterface<ActualMapDesignType>, MapViewStateInternal {
     protected readonly tag: string;
-    abstract readonly id: string;
-    abstract readonly cameraPosition: MapCameraPosition;
+    readonly id: string;
     abstract mapDesignType: ActualMapDesignType;
     /** @see MapViewStateInterface.serviceRegistry */
     readonly serviceRegistry: MutableMapServiceRegistry;
+    private readonly optimisticCameraUpdate;
+    private _cameraPosition;
+    private _cameraPositionChangeListener;
+    /**
+     * 接続済みのコントローラ。まだ地図が生成されていなければ null。
+     *
+     * 名前が `controller` でないのは、プロバイダが自分のコントローラ型で
+     * `controller` フィールドを持てるようにするため。
+     */
+    protected attachedMapController: MapViewControllerInterface | null;
     private _uiSettings;
     private _uiSettingsChangeListener;
+    constructor(options?: MapViewStateOptions);
+    get cameraPosition(): MapCameraPosition;
     get uiSettings(): MapUISettings;
     set uiSettings(value: MapUISettings);
     setUISettingsChangeListener(listener: ((settings: MapUISettings) => void) | null): void;
-    abstract moveCameraTo(cameraPosition: MapCameraPosition, durationMillis?: number): void;
-    abstract moveCameraTo(position: GeoPoint, durationMillis?: number): void;
-    abstract fitBounds(bounds: GeoRectBounds, padding?: number): void;
-    abstract getMapViewHolder(): MapViewHolder<unknown, unknown> | null;
-    abstract setController(controller: MapViewControllerInterface | null): void;
-    abstract updateCameraPosition(camera: MapCameraPosition): void;
-    abstract setCameraPositionChangeListener(listener: ((camera: MapCameraPosition) => void) | null): void;
+    moveCameraTo(cameraPosition: MapCameraPosition, durationMillis?: number): void;
+    moveCameraTo(position: GeoPoint, durationMillis?: number): void;
+    fitBounds(bounds: GeoRectBounds, padding?: number): void;
+    /**
+     * 各プロバイダは戻り型を自分のホルダー型へ絞るオーバーライドを 1 つだけ置くこと。
+     * アプリが `state.getMapViewHolder()?.map` でネイティブの地図を取れる形を保つため。
+     */
+    getMapViewHolder(): MapViewHolder<unknown, unknown> | null;
+    /**
+     * コントローラを接続する。プロバイダのビューが `setController` から呼ぶ。
+     *
+     * @param moveToInitialCamera 接続時に、保持していたカメラ位置へ移動するか。
+     *   既定は `true`。地図の生成直後にカメラを動かすと初期位置が上書きされてしまう
+     *   プロバイダは `false` を渡す。
+     */
+    protected attachController(controller: MapViewControllerInterface | null, moveToInitialCamera?: boolean): void;
+    /**
+     * 地図から通知された現在のカメラを保持する（地図を動かさない）。
+     *
+     * カメラを**動かしたい**ときは {@link moveCameraTo} を使うこと。
+     */
+    protected setCameraPositionInternal(camera: MapCameraPosition): void;
+    setController(controller: MapViewControllerInterface | null): void;
+    updateCameraPosition(camera: MapCameraPosition): void;
+    setCameraPositionChangeListener(listener: ((camera: MapCameraPosition) => void) | null): void;
+    /**
+     * ズーム・ベアリング・チルトがすべて 0 の「未指定」カメラは、位置だけを差し替える。
+     *
+     * アプリが位置だけを渡してきたときに、いまの縮尺を保ったまま移動するための救済。
+     * 全プロバイダが同じ判定をしていた（react-for-arcgis だけ抜けていたのでここで揃う）。
+     */
+    private resolveCameraPosition;
 }
 
 interface FitBoundsCameraResult {
@@ -4163,4 +4230,4 @@ declare function segmentIntersectsRegion({ start, end, region, geodesic, }: {
 
 declare function splitByMeridian(points: GeoPoint[], geodesic: boolean): GeoPoint[][];
 
-export { AbstractCircleOverlayRenderer, AbstractGroundImageOverlayRenderer, AbstractMarkerController, AbstractMarkerIcon, AbstractMarkerOverlayRenderer, AbstractMarkerRenderingStrategy, AbstractPolygonOverlayRenderer, AbstractPolylineOverlayRenderer, AbstractViewportStrategy, AbstractZoomAltitudeConverter, type AddParams, type AnyMarkerRenderingSupport, type AttributionRule, BaseMapViewController, type BitmapIcon, type CameraOptions, type CameraRestriction, type ChangeParams, type ChangeParamsInterface, type CircleAddParams, type CircleCapable, type CircleChangeParams, CircleController, type CircleEntity, type CircleEvent, type CircleFingerPrint, CircleManager, type CircleManagerInterface, type CircleOptions, CircleOverlay, type CircleOverlayRenderer, type CircleState, type CircleStateCopyParams, CollectorMarkerOverlayRenderer, ColorDefaultIcon, type CreateMarkerStateParams, DEFAULT_CIRCLE_SEGMENTS, DEFAULT_RASTER_LAYER_USER_AGENT, DefaultMarkerIcon, type DefaultMarkerIconOptions, Direction6, Direction6Delta, Earth, EmptyMapServiceRegistry, type FitBoundsCameraResult, GROUND_IMAGE_DEFAULT_TILE_SIZE, GeoGridIndex, GeoPoint, type GeoPointInterface, type GeoRectBounds, type GlGestureHandler, type GlGestureHandlers, type GlTouchZoomRotateHandler, type GroundImageAddParams, type GroundImageCapable, type GroundImageChangeParams, GroundImageController, type GroundImageEntity, type GroundImageEvent, type GroundImageFingerPrint, GroundImageManager, type GroundImageManagerInterface, GroundImageOverlay, type GroundImageOverlayRenderer, type GroundImageState, type GroundImageStateCopyParams, type GroundOverlayOptions, GroundScaleZoomAltitudeConverter, type HexCell, HexCellRegistry, type HexCellWithDistance, type HexCoord, type HexGeocell, HexGeocellImpl, type HexGeocell as HexGeocellInterface, IconImageCache, type IdentifiedHexCell, ImageDefaultIcon, type ImageDefaultIconOptions, ImageIcon, type ImageIconOptions, type ImageSource, type InfoBubbleEntry, InitState, KDTree, type KDTreeStats, LocalTileServer, MAP_CAPABILITIES, MARKER_HIT_RADIUS_MOUSE_PX, MARKER_HIT_RADIUS_TOUCH_PX, MARKER_RENDER_BATCH_SIZE, MapCameraPosition, type MapCameraPositionCopyParams, type MapCameraPositionInterface, type MapCapability, MapCapabilityStatus, type MapConfig, type MapDesignTypeInterface, type MapDiagnosticLevel, MapDiagnostics, type MapDiagnosticsSink, type MapGesture, type MapOverlayInterface, MapOverlayRegistry, MapPaddings, type MapPaddingsInterface, MapProjection, MapProvider, MapProviderType, type MapServiceKey, type MapServiceRegistration, MapServiceRegistrations, type MapServiceRegistry, MapUISettings, MapUISettingsDiagnostics, MapViewBase, type MapViewBaseProps, type MapViewControllerInterface, type MapViewHolder, MapViewHolderBase, MapViewState, type MapViewStateInterface, type MapViewStateInternal, MarkerAnimation, type MarkerAnimationOverlayEntry, type MarkerAnimationOverlayHost, type MarkerCapable, type MarkerEntity, type MarkerEventController, type MarkerFingerPrint, type MarkerIcon, MarkerIconSize, type MarkerIngestionResult, MarkerManager, type MarkerManagerStats, type MarkerOptions, MarkerOverlay, type MarkerOverlayRenderer, type MarkerRenderingStrategy, type MarkerRenderingSupport, MarkerRenderingSupportKey, type MarkerState, type MarkerStateCopyParams, MarkerTileRenderer, MarkerTilingOptions, MutableMapServiceRegistry, Mutex, type NativeMapExtensionCapable, type NativeMapExtensionDescriptor, type NativeMapExtensionEvent, type NativeMapExtensionEventHandler, NoCameraRestriction, type Offset, type OnCameraMoveHandler, type OnCircleEventHandler, type OnGroundImageEventHandler, type OnMapEventHandler, type OnMapInitializedHandler, type OnMapLoadedHandler, type OnMarkerEventHandler, type OnPolygonEventHandler, type OnPolylineEventHandler, type OnRasterLayerEventHandler, OverlayCollector, type OverlayController, type OverlayControllerLike, OverlayGeoJson, type OverlayRendererInterface, Planar, type PolygonAddParams, type PolygonCapable, type PolygonChangeParams, PolygonController, type PolygonEntity, type PolygonEvent, type PolygonFingerPrint, PolygonManager, type PolygonManagerInterface, type PolygonOptions, PolygonOverlay, type PolygonOverlayRenderer, type PolygonRings, type PolygonState, type PolygonStateCopyParams, type PolylineAddParams, type PolylineCapable, type PolylineChangeParams, PolylineController, type PolylineEntity, type PolylineEvent, type PolylineFingerPrint, type PolylineHitResult, PolylineManager, type PolylineManagerInterface, type PolylineOptions, PolylineOverlay, type PolylineOverlayRenderer, type PolylineState, type PolylineStateCopyParams, type PreparedMarker, type Projection, type RasterAttributionRule, type RasterHeaderRule, RasterHeaderRuleSet, type RasterHeaderSupport, type RasterLayerAddParams, type RasterLayerCapable, type RasterLayerChangeParams, RasterLayerController, type RasterLayerEntity, type RasterLayerEvent, type RasterLayerFingerPrint, RasterLayerManager, type RasterLayerManagerInterface, RasterLayerOverlay, type RasterLayerOverlayRenderer, RasterLayerSource, type RasterLayerState, type RasterLayerStateCopyParams, type RasterRequestParameters, type RasterTransformRequest, type RegistryStats, type ScreenOffsetResult, type Serializable, Settings, type SpatialIndex, type SpatialIndexConfig, Spherical, StrategyMarkerController, type TileProvider, type TileRenderRequest, type TileRenderResponse, type TileRequest, TileScheme, TileServerRegistry, type VisibleRegion, WEB_MERCATOR_MAX_EXTENT_METERS, WGS84, WGS84Geodesic, WebMercator, WebMercatorZoomAltitudeConverter, applyGlMapUISettings, bounceInterpolation, bridgeHolesIntoSingleRing, bridgeHolesIntoSingleRingWrapAware, buildPolygonRings, buildPolylineSegments, buildUnwrappedPolygonRings, buildUnwrappedPolylinePath, calculateMetersPerPixel, capabilityOfGesture, circleToRing, closeRing, closestPointOnSegment, combineHash, computeArea$1 as computeArea, computeDistanceBetween$1 as computeDistanceBetween, computeFitBoundsCameraPosition, computeHeading$1 as computeHeading, computeLength$1 as computeLength, computeOffset$1 as computeOffset, computeOffsetOrigin$1 as computeOffsetOrigin, computeSignedArea$1 as computeSignedArea, computeDistanceBetween as computeWGS84DistanceBetween, createCircleEntity, createCircleState, createCollectorMarkerRenderingSupport, createDefaultIcon, createFingerPrint, createGeoPoint, createGeoRectBounds, createGroundImageEntity, createGroundImageState, createHexCell, createHexCellWithDistance, createHexCoord, createIdentifiedHexCell, createMapCameraPosition, createMapServiceKey, createMarkerEntity, createMarkerFingerPrint, createMarkerState, createOffset, createOppositeMeridianPoint, createPolygonEntity, createPolygonState, createPolylineEntity, createPolylineState, createRandomId, createRasterLayerEntity, createRasterLayerState, createSegmentBounds, createSubject, createTileWorkerHandler, densifyAndNormalize, expandBounds, fingerPrintEquals, fromGeoPoint, fromLatLng, fromLatLong, fromLngLat, fromLongLat, generateIdFromHashes, getNeighbors, hashBool, hashDefaultMarkerIcon, hashGeoPoint, hashNullable, hashNum, hashObj, hashStr, hexCellToIdPrefix, hexCoordToString, ingestMarkers, interpolate$1 as interpolate, interpolateAtMeridianGeodesic, interpolateAtMeridianLinear, interpolate as interpolateWGS84, isEmptyCameraRestriction, isFullySupported, isKnownUnsupported, isNativeMapExtensionCapable, isUsable, longHashCode, mapCapabilityFromId, mapViewStateInternal, markerIconHashCode, normalizeLngDegrees, resolveAttributionRules, resolveCameraRestriction, resolveHoles, resolveMapUISettings, resolveRasterAttributions, segmentIntersectsRegion, splitByMeridian, splitRingByMeridian, toDegrees, toInt, toRadians, unionHoleRings, unionHoles, unionHolesInPlace, withRasterHeaderTransform, wrapClickedPoint };
+export { AbstractCircleOverlayRenderer, AbstractGroundImageOverlayRenderer, AbstractMarkerController, AbstractMarkerIcon, AbstractMarkerOverlayRenderer, AbstractMarkerRenderingStrategy, AbstractPolygonOverlayRenderer, AbstractPolylineOverlayRenderer, AbstractViewportStrategy, AbstractZoomAltitudeConverter, type AddParams, type AnyMarkerRenderingSupport, type AttributionRule, BaseMapViewController, type BitmapIcon, type CameraOptions, type CameraRestriction, type ChangeParams, type ChangeParamsInterface, type CircleAddParams, type CircleCapable, type CircleChangeParams, CircleController, type CircleEntity, type CircleEvent, type CircleFingerPrint, CircleManager, type CircleManagerInterface, type CircleOptions, CircleOverlay, type CircleOverlayRenderer, type CircleState, type CircleStateCopyParams, CollectorMarkerOverlayRenderer, ColorDefaultIcon, type CreateMarkerStateParams, DEFAULT_CIRCLE_SEGMENTS, DEFAULT_RASTER_LAYER_USER_AGENT, DefaultMarkerIcon, type DefaultMarkerIconOptions, Direction6, Direction6Delta, Earth, EmptyMapServiceRegistry, type FitBoundsCameraResult, GROUND_IMAGE_DEFAULT_TILE_SIZE, GeoGridIndex, GeoPoint, type GeoPointInterface, type GeoRectBounds, type GlGestureHandler, type GlGestureHandlers, type GlTouchZoomRotateHandler, type GroundImageAddParams, type GroundImageCapable, type GroundImageChangeParams, GroundImageController, type GroundImageEntity, type GroundImageEvent, type GroundImageFingerPrint, GroundImageManager, type GroundImageManagerInterface, GroundImageOverlay, type GroundImageOverlayRenderer, type GroundImageState, type GroundImageStateCopyParams, type GroundOverlayOptions, GroundScaleZoomAltitudeConverter, type HexCell, HexCellRegistry, type HexCellWithDistance, type HexCoord, type HexGeocell, HexGeocellImpl, type HexGeocell as HexGeocellInterface, IconImageCache, type IdentifiedHexCell, ImageDefaultIcon, type ImageDefaultIconOptions, ImageIcon, type ImageIconOptions, type ImageSource, type InfoBubbleEntry, InitState, KDTree, type KDTreeStats, LocalTileServer, MAP_CAPABILITIES, MARKER_HIT_RADIUS_MOUSE_PX, MARKER_HIT_RADIUS_TOUCH_PX, MARKER_RENDER_BATCH_SIZE, MapCameraPosition, type MapCameraPositionCopyParams, type MapCameraPositionInterface, type MapCapability, MapCapabilityStatus, type MapConfig, type MapDesignTypeInterface, type MapDiagnosticLevel, MapDiagnostics, type MapDiagnosticsSink, type MapGesture, type MapOverlayInterface, MapOverlayRegistry, MapPaddings, type MapPaddingsInterface, MapProjection, MapProvider, MapProviderType, type MapServiceKey, type MapServiceRegistration, MapServiceRegistrations, type MapServiceRegistry, MapUISettings, MapUISettingsDiagnostics, MapViewBase, type MapViewBaseProps, type MapViewControllerInterface, type MapViewHolder, MapViewHolderBase, MapViewState, type MapViewStateInterface, type MapViewStateInternal, type MapViewStateOptions, MarkerAnimation, type MarkerAnimationOverlayEntry, type MarkerAnimationOverlayHost, type MarkerCapable, type MarkerEntity, type MarkerEventController, type MarkerFingerPrint, type MarkerIcon, MarkerIconSize, type MarkerIngestionResult, MarkerManager, type MarkerManagerStats, type MarkerOptions, MarkerOverlay, type MarkerOverlayRenderer, type MarkerRenderingStrategy, type MarkerRenderingSupport, MarkerRenderingSupportKey, type MarkerState, type MarkerStateCopyParams, MarkerTileRenderer, MarkerTilingOptions, MutableMapServiceRegistry, Mutex, type NativeMapExtensionCapable, type NativeMapExtensionDescriptor, type NativeMapExtensionEvent, type NativeMapExtensionEventHandler, NoCameraRestriction, type Offset, type OnCameraMoveHandler, type OnCircleEventHandler, type OnGroundImageEventHandler, type OnMapEventHandler, type OnMapInitializedHandler, type OnMapLoadedHandler, type OnMarkerEventHandler, type OnPolygonEventHandler, type OnPolylineEventHandler, type OnRasterLayerEventHandler, OverlayCollector, type OverlayController, type OverlayControllerLike, OverlayGeoJson, type OverlayRendererInterface, Planar, type PolygonAddParams, type PolygonCapable, type PolygonChangeParams, PolygonController, type PolygonEntity, type PolygonEvent, type PolygonFingerPrint, PolygonManager, type PolygonManagerInterface, type PolygonOptions, PolygonOverlay, type PolygonOverlayRenderer, type PolygonRings, type PolygonState, type PolygonStateCopyParams, type PolylineAddParams, type PolylineCapable, type PolylineChangeParams, PolylineController, type PolylineEntity, type PolylineEvent, type PolylineFingerPrint, type PolylineHitResult, PolylineManager, type PolylineManagerInterface, type PolylineOptions, PolylineOverlay, type PolylineOverlayRenderer, type PolylineState, type PolylineStateCopyParams, type PreparedMarker, type Projection, type RasterAttributionRule, type RasterHeaderRule, RasterHeaderRuleSet, type RasterHeaderSupport, type RasterLayerAddParams, type RasterLayerCapable, type RasterLayerChangeParams, RasterLayerController, type RasterLayerEntity, type RasterLayerEvent, type RasterLayerFingerPrint, RasterLayerManager, type RasterLayerManagerInterface, RasterLayerOverlay, type RasterLayerOverlayRenderer, RasterLayerSource, type RasterLayerState, type RasterLayerStateCopyParams, type RasterRequestParameters, type RasterTransformRequest, type RegistryStats, type ScreenOffsetResult, type Serializable, Settings, type SpatialIndex, type SpatialIndexConfig, Spherical, StrategyMarkerController, type TileProvider, type TileRenderRequest, type TileRenderResponse, type TileRequest, TileScheme, TileServerRegistry, type VisibleRegion, WEB_MERCATOR_MAX_EXTENT_METERS, WGS84, WGS84Geodesic, WebMercator, WebMercatorZoomAltitudeConverter, applyGlMapUISettings, bounceInterpolation, bridgeHolesIntoSingleRing, bridgeHolesIntoSingleRingWrapAware, buildPolygonRings, buildPolylineSegments, buildUnwrappedPolygonRings, buildUnwrappedPolylinePath, calculateMetersPerPixel, capabilityOfGesture, circleToRing, closeRing, closestPointOnSegment, combineHash, computeArea$1 as computeArea, computeDistanceBetween$1 as computeDistanceBetween, computeFitBoundsCameraPosition, computeHeading$1 as computeHeading, computeLength$1 as computeLength, computeOffset$1 as computeOffset, computeOffsetOrigin$1 as computeOffsetOrigin, computeSignedArea$1 as computeSignedArea, computeDistanceBetween as computeWGS84DistanceBetween, createCircleEntity, createCircleState, createCollectorMarkerRenderingSupport, createDefaultIcon, createFingerPrint, createGeoPoint, createGeoRectBounds, createGroundImageEntity, createGroundImageState, createHexCell, createHexCellWithDistance, createHexCoord, createIdentifiedHexCell, createMapCameraPosition, createMapServiceKey, createMarkerEntity, createMarkerFingerPrint, createMarkerState, createOffset, createOppositeMeridianPoint, createPolygonEntity, createPolygonState, createPolylineEntity, createPolylineState, createRandomId, createRasterLayerEntity, createRasterLayerState, createSegmentBounds, createSubject, createTileWorkerHandler, densifyAndNormalize, expandBounds, fingerPrintEquals, fromGeoPoint, fromLatLng, fromLatLong, fromLngLat, fromLongLat, generateIdFromHashes, getNeighbors, hashBool, hashDefaultMarkerIcon, hashGeoPoint, hashNullable, hashNum, hashObj, hashStr, hexCellToIdPrefix, hexCoordToString, ingestMarkers, interpolate$1 as interpolate, interpolateAtMeridianGeodesic, interpolateAtMeridianLinear, interpolate as interpolateWGS84, isEmptyCameraRestriction, isFullySupported, isKnownUnsupported, isNativeMapExtensionCapable, isUsable, longHashCode, mapCapabilityFromId, mapViewStateInternal, markerIconHashCode, normalizeLngDegrees, resolveAttributionRules, resolveCameraRestriction, resolveHoles, resolveMapUISettings, resolveRasterAttributions, segmentIntersectsRegion, splitByMeridian, splitRingByMeridian, toDegrees, toInt, toRadians, unionHoleRings, unionHoles, unionHolesInPlace, withRasterHeaderTransform, wrapClickedPoint };

@@ -1,7 +1,8 @@
+import { createRandomId } from '../features/RandomId';
 import type { GeoPoint } from '../features/GeoPoint';
 import type { GeoRectBounds } from '../features/GeoRectBounds';
 import { MapUISettings, resolveMapUISettings } from '../settings/MapUISettings';
-import type { MapCameraPosition } from '../types/MapCamera';
+import { MapCameraPosition as MapCameraPositionNS, type MapCameraPosition } from '../types/MapCamera';
 import type { MapViewControllerInterface } from '../controller/MapViewControllerInterface';
 import type { MapDesignTypeInterface } from './MapDesignTypeInterface';
 import type { MapViewHolder } from './MapViewHolder';
@@ -97,6 +98,38 @@ export function mapViewStateInternal(
   return state as unknown as MapViewStateInternal;
 }
 
+/** {@link MapViewState} のコンストラクタ引数。 */
+export interface MapViewStateOptions {
+  /** state の識別子。省略するとランダム。 */
+  id?: string;
+  /**
+   * コントローラが繋がるまでの間、保持しておくカメラ。
+   * {@link MapViewState.attachController} の時点でこの位置へ移動する。
+   */
+  cameraPosition?: MapCameraPosition;
+  /** 初期のジェスチャ設定。 */
+  uiSettings?: Partial<MapUISettings>;
+  /**
+   * {@link MapViewState.moveCameraTo} で、コントローラへ委譲したあとに要求された
+   * カメラを {@link MapViewState.cameraPosition} へ反映するか。
+   *
+   * **web は既定が `true`。** android / iOS は `false`（地図が返してきた実際の値だけを
+   * 入れる）だが、web のエンジンはカメラ移動イベントが非同期で、しかも React には
+   * Compose の再コンポーズや SwiftUI の `@Published` に当たる push が無い。
+   * 要求直後に `cameraPosition` を読むと古い値が返るため、要求値をそのまま保持する。
+   * 全 web プロバイダが移行前からこの形だった。
+   */
+  optimisticCameraUpdate?: boolean;
+}
+
+/**
+ * 全プロバイダ共通の state 実装。
+ *
+ * カメラの保持と、コントローラへの委譲（{@link moveCameraTo} / {@link fitBounds} /
+ * {@link getMapViewHolder}）はどのプロバイダでも同じなのでここに置く。
+ * プロバイダ固有なのは `mapDesignType` の型と、`getMapViewHolder()` の戻り型を
+ * 絞るオーバーライドだけ。android-sdk / ios-sdk の `MapViewState` と同じ形。
+ */
 export abstract class MapViewState<ActualMapDesignType extends MapDesignTypeInterface<unknown>>
   implements MapViewStateInterface<ActualMapDesignType>, MapViewStateInternal
 {
@@ -104,17 +137,39 @@ export abstract class MapViewState<ActualMapDesignType extends MapDesignTypeInte
   // Used for debug logging to identify the concrete subclass.
   protected readonly tag: string = this.constructor.name;
 
-  abstract readonly id: string;
-  abstract readonly cameraPosition: MapCameraPosition;
+  readonly id: string;
   abstract mapDesignType: ActualMapDesignType;
 
   /** @see MapViewStateInterface.serviceRegistry */
   readonly serviceRegistry: MutableMapServiceRegistry = new MutableMapServiceRegistry();
 
+  private readonly optimisticCameraUpdate: boolean;
+  private _cameraPosition: MapCameraPosition;
+  private _cameraPositionChangeListener: ((camera: MapCameraPosition) => void) | null = null;
+
+  /**
+   * 接続済みのコントローラ。まだ地図が生成されていなければ null。
+   *
+   * 名前が `controller` でないのは、プロバイダが自分のコントローラ型で
+   * `controller` フィールドを持てるようにするため。
+   */
+  protected attachedMapController: MapViewControllerInterface | null = null;
+
   // Concrete for every provider: the view subscribes and pushes the flags down
   // to its map engine, so no subclass has to reimplement it.
   private _uiSettings: MapUISettings = { ...MapUISettings.Default };
   private _uiSettingsChangeListener: ((settings: MapUISettings) => void) | null = null;
+
+  constructor(options: MapViewStateOptions = {}) {
+    this.id = options.id ?? createRandomId();
+    this._cameraPosition = options.cameraPosition ?? MapCameraPositionNS.Default;
+    this._uiSettings = resolveMapUISettings(options.uiSettings);
+    this.optimisticCameraUpdate = options.optimisticCameraUpdate ?? true;
+  }
+
+  get cameraPosition(): MapCameraPosition {
+    return this._cameraPosition;
+  }
 
   get uiSettings(): MapUISettings {
     return this._uiSettings;
@@ -129,16 +184,93 @@ export abstract class MapViewState<ActualMapDesignType extends MapDesignTypeInte
     this._uiSettingsChangeListener = listener;
   }
 
-  abstract moveCameraTo(cameraPosition: MapCameraPosition, durationMillis?: number): void;
-  abstract moveCameraTo(position: GeoPoint, durationMillis?: number): void;
+  moveCameraTo(cameraPosition: MapCameraPosition, durationMillis?: number): void;
+  moveCameraTo(position: GeoPoint, durationMillis?: number): void;
+  moveCameraTo(positionOrCamera: GeoPoint | MapCameraPosition, durationMillis?: number): void {
+    const next =
+      'zoom' in positionOrCamera
+        ? this.resolveCameraPosition(positionOrCamera as MapCameraPosition)
+        : this._cameraPosition.copy({ position: positionOrCamera as GeoPoint });
 
-  abstract fitBounds(bounds: GeoRectBounds, padding?: number): void;
+    const controller = this.attachedMapController;
+    if (!controller) {
+      // まだ地図が無い。接続時に attachController がこの位置へ移動する。
+      this._cameraPosition = next;
+      return;
+    }
 
-  abstract getMapViewHolder(): MapViewHolder<unknown, unknown> | null;
+    if (!durationMillis || durationMillis === 0) {
+      void controller.moveCamera(next);
+    } else {
+      void controller.animateCamera(next, durationMillis);
+    }
 
-  abstract setController(controller: MapViewControllerInterface | null): void;
+    if (this.optimisticCameraUpdate) {
+      this._cameraPosition = next;
+      this._cameraPositionChangeListener?.(next);
+    }
+  }
 
-  abstract updateCameraPosition(camera: MapCameraPosition): void;
+  fitBounds(bounds: GeoRectBounds, padding: number = 0): void {
+    void this.attachedMapController?.fitBounds(bounds, padding);
+  }
 
-  abstract setCameraPositionChangeListener(listener: ((camera: MapCameraPosition) => void) | null): void;
+  /**
+   * 各プロバイダは戻り型を自分のホルダー型へ絞るオーバーライドを 1 つだけ置くこと。
+   * アプリが `state.getMapViewHolder()?.map` でネイティブの地図を取れる形を保つため。
+   */
+  getMapViewHolder(): MapViewHolder<unknown, unknown> | null {
+    return this.attachedMapController?.holder ?? null;
+  }
+
+  /**
+   * コントローラを接続する。プロバイダのビューが `setController` から呼ぶ。
+   *
+   * @param moveToInitialCamera 接続時に、保持していたカメラ位置へ移動するか。
+   *   既定は `true`。地図の生成直後にカメラを動かすと初期位置が上書きされてしまう
+   *   プロバイダは `false` を渡す。
+   */
+  protected attachController(
+    controller: MapViewControllerInterface | null,
+    moveToInitialCamera: boolean = true,
+  ): void {
+    this.attachedMapController = controller;
+    if (controller && moveToInitialCamera) {
+      void controller.moveCamera(this._cameraPosition);
+    }
+  }
+
+  /**
+   * 地図から通知された現在のカメラを保持する（地図を動かさない）。
+   *
+   * カメラを**動かしたい**ときは {@link moveCameraTo} を使うこと。
+   */
+  protected setCameraPositionInternal(camera: MapCameraPosition): void {
+    this._cameraPosition = camera;
+    this._cameraPositionChangeListener?.(camera);
+  }
+
+  setController(controller: MapViewControllerInterface | null): void {
+    this.attachController(controller);
+  }
+
+  updateCameraPosition(camera: MapCameraPosition): void {
+    this.setCameraPositionInternal(camera);
+  }
+
+  setCameraPositionChangeListener(listener: ((camera: MapCameraPosition) => void) | null): void {
+    this._cameraPositionChangeListener = listener;
+  }
+
+  /**
+   * ズーム・ベアリング・チルトがすべて 0 の「未指定」カメラは、位置だけを差し替える。
+   *
+   * アプリが位置だけを渡してきたときに、いまの縮尺を保ったまま移動するための救済。
+   * 全プロバイダが同じ判定をしていた（react-for-arcgis だけ抜けていたのでここで揃う）。
+   */
+  private resolveCameraPosition(target: MapCameraPosition): MapCameraPosition {
+    const isUnspecified = target.zoom === 0 && target.bearing === 0 && target.tilt === 0;
+    if (isUnspecified) return this._cameraPosition.copy({ position: target.position });
+    return target;
+  }
 }
