@@ -1,3 +1,5 @@
+import type { GeoPointInterface } from '../features/GeoPoint';
+import type { OverlayHit } from '../controller/OverlayHitResolver';
 import type { SlottedOverlayController } from '../controller/OverlayController';
 import type { OverlayKind } from '../controller/OverlayKind';
 import { GeoPoint, GeoRectBounds } from "../features";
@@ -213,6 +215,11 @@ export class StrategyMarkerController<ActualMarker>
 
     setClickListenerAny(listener: unknown): void {
         this.clickListener = listener as OnMarkerEventHandler | null;
+    }
+
+    /** マーカーは別経路（`dispatchMarkerTap`）。ここでは当たらない。 */
+    resolveTap(_position: GeoPointInterface): OverlayHit | null {
+        return null;
     }
 
 }

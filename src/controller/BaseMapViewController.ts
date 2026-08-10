@@ -7,6 +7,7 @@ import {
   type OverlayControllerLike,
   type SlottedOverlayController,
 } from './OverlayController';
+import { CANONICAL_ORDER, OverlayHitResolver } from './OverlayHitResolver';
 import type { OverlayKind } from './OverlayKind';
 import type { OnMapInitializedHandler } from './MapViewControllerInterface';
 import type { MarkerState } from '../marker/MarkerState';
@@ -152,6 +153,78 @@ export abstract class BaseMapViewController {
   unregisterOverlayController(controller: OverlayControllerLike): void {
     const index = this.overlayControllers.indexOf(controller);
     if (index >= 0) this.overlayControllers.splice(index, 1);
+  }
+
+  // ── タップのカスケード ────────────────────────────────────────────────
+  //
+  // marker → circle → groundImage → polyline → polygon → map の一本道。
+  // 13 プロバイダが同じ 40〜50 行を各自持っていたものの集約。しかも順序が
+  // 揃っていなかった（Azure Maps は circle → polyline → polygon → groundImage）。
+  // 順序と先勝ちの規則は {@link OverlayHitResolver} にある。
+
+  /**
+   * オーバーレイの探索順。既定は {@link CANONICAL_ORDER}。
+   *
+   * 種別を持たないプロバイダ（TomTom の円とグラウンドイメージはネイティブでは
+   * どちらも Polygon）でも順序は同じでよい。判定はコアの Manager が行うので、
+   * ネイティブの実装がどうであれ結果は他プロバイダと揃う。
+   */
+  protected get overlayCascadeOrder(): readonly OverlayKind[] {
+    return CANONICAL_ORDER;
+  }
+
+  /**
+   * マーカーのヒットテストと配送。既定は「当たらない」。
+   *
+   * マーカーだけコアが既定を持たないのは、判定に画面投影が要り、プロバイダごとに
+   * マーカーの実装方式（DOM 要素 / シンボルレイヤ / タイル）が違うため。
+   *
+   * @returns マーカーがタップを消費したら true。
+   */
+  protected dispatchMarkerTap(_position: GeoPoint): boolean {
+    return false;
+  }
+
+  /**
+   * オーバーレイ（マーカー以外）のタップを、正準順に 1 つだけ配送する。
+   *
+   * マーカーを含まないので、ネイティブのオーバーレイクリックリスナーから
+   * 呼ぶこともできる。
+   *
+   * @returns 何かに当たって配送したら true。
+   */
+  dispatchOverlayTap(position: GeoPoint): boolean {
+    const hit = OverlayHitResolver.resolve(this.overlayControllers, position, this.overlayCascadeOrder);
+    if (hit == null) return false;
+    hit.dispatch();
+    return true;
+  }
+
+  /**
+   * タップの入口。marker → オーバーレイ → 地図クリックの順に 1 つだけ配送する。
+   *
+   * プロバイダは SDK のタップを地理座標に直してこれを呼ぶだけでよい。
+   *
+   * **必ずどれか 1 つだけ**が配送される。オーバーレイに当たったのに地図クリックも
+   * 飛ぶ、という二重配送を防ぐのがこの関数の役目。
+   *
+   * @returns 常に true（タップは必ずどこかで処理される）。
+   */
+  dispatchTap(position: GeoPoint): boolean {
+    if (this.dispatchMarkerTap(position)) return true;
+    if (this.dispatchOverlayTap(position)) return true;
+    this.emitMapClick(position);
+    return true;
+  }
+
+  /** 地図クリックをアプリへ通知する。 */
+  emitMapClick(point: GeoPoint): void {
+    this.mapClickCallback?.(point);
+  }
+
+  /** 地図の長押しをアプリへ通知する。 */
+  emitMapLongClick(point: GeoPoint): void {
+    this.mapLongClickCallback?.(point);
   }
 
   // ── Capable ファサードの既定実装 ──────────────────────────────────────

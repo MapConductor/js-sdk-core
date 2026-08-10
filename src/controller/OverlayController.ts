@@ -1,5 +1,6 @@
-import { GeoPoint } from "../features";
+import { GeoPoint, type GeoPointInterface } from "../features";
 import { MapCameraPosition } from "../types";
+import type { OverlayHit } from "./OverlayHitResolver";
 import type { OverlayKind } from "./OverlayKind";
 
 /**
@@ -27,6 +28,7 @@ export interface OverlayControllerLike {
     compositionAny?(data: unknown[]): Promise<void>;
     updateAny?(state: unknown): Promise<void>;
     setClickListenerAny?(listener: unknown): void;
+    resolveTap?(position: GeoPointInterface): OverlayHit | null;
 }
 
 export interface OverlayController<StateType, EntityType, EventType> {
@@ -82,6 +84,24 @@ export interface SlottedOverlayController {
      * 型付きの `clickListener` を持つコアのコントローラだけが意味のある実装を持つ。
      */
     setClickListenerAny(listener: unknown): void;
+
+    /**
+     * タップの当たり判定と、当たったときの配送手段。当たらなければ null。
+     *
+     * クリックカスケード（{@link OverlayHitResolver}）の 1 段。解決するだけで配送はしない
+     * （呼び出し側が `OverlayHit.dispatch()` を呼ぶまで副作用は起きない）。
+     *
+     * ## これも `kind` と同じく**必須メンバ**にしてある
+     *
+     * 省略可能にすると、実装を忘れたコントローラが「タップに反応しないが、
+     * ビルドも型検査も通る」状態になる。android-for-maplibre / mapbox のポリゴンが
+     * 実際にそれで、カスケードからも `hasPolygon` からも黙って漏れていた。
+     *
+     * クリックを持たない種別は明示的に null を返すこと（ラスターレイヤ）。
+     * マーカーは判定に画面投影が要るため別経路
+     * （`BaseMapViewController.dispatchMarkerTap`）で、ここでは null を返す。
+     */
+    resolveTap(position: GeoPointInterface): OverlayHit | null;
 }
 
 /** 登録済みコントローラが {@link SlottedOverlayController} を満たすか。 */

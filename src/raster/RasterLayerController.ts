@@ -1,3 +1,5 @@
+import type { GeoPointInterface } from '../features/GeoPoint';
+import type { OverlayHit } from '../controller/OverlayHitResolver';
 import type { SlottedOverlayController } from '../controller/OverlayController';
 import type { OverlayKind } from '../controller/OverlayKind';
 import { GeoPoint } from "../features";
@@ -277,6 +279,11 @@ export abstract class RasterLayerController<ActualLayer extends object>
 
     setClickListenerAny(listener: unknown): void {
         this.clickListener = listener as OnRasterLayerEventHandler | null;
+    }
+
+    /** ラスターレイヤはクリックを持たない。**明示的に null を返す**（実装忘れと区別するため）。 */
+    resolveTap(_position: GeoPointInterface): OverlayHit | null {
+        return null;
     }
 
 }

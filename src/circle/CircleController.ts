@@ -1,3 +1,6 @@
+import { createGeoPoint } from '../features/GeoPoint';
+import type { GeoPointInterface } from '../features/GeoPoint';
+import { createOverlayHit, type OverlayHit } from '../controller/OverlayHitResolver';
 import type { SlottedOverlayController } from '../controller/OverlayController';
 import type { OverlayKind } from '../controller/OverlayKind';
 import { GeoPoint, wrapClickedPoint } from "../features";
@@ -190,6 +193,15 @@ export abstract class CircleController<ActualCircle>
 
     setClickListenerAny(listener: unknown): void {
         this.clickListener = listener as OnCircleEventHandler | null;
+    }
+
+    resolveTap(position: GeoPointInterface): OverlayHit | null {
+        const point = createGeoPoint(position);
+        const entity = this.find(point);
+        if (entity == null) return null;
+        return createOverlayHit('circle', point, () =>
+            this.dispatchClick({ state: entity.state, clicked: point }),
+        );
     }
 
 }

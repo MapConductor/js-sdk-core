@@ -1,3 +1,6 @@
+import { createGeoPoint } from '../features/GeoPoint';
+import type { GeoPointInterface } from '../features/GeoPoint';
+import { createOverlayHit, type OverlayHit } from '../controller/OverlayHitResolver';
 import type { SlottedOverlayController } from '../controller/OverlayController';
 import type { OverlayKind } from '../controller/OverlayKind';
 import { GeoPoint, wrapClickedPoint } from "../features";
@@ -197,6 +200,19 @@ export abstract class PolylineController<ActualPolyline>
 
     setClickListenerAny(listener: unknown): void {
         this.clickListener = listener as OnPolylineEventHandler | null;
+    }
+
+    /**
+     * ポリラインだけ配送座標がタップ点ではない。**線上の最近傍点**を返す。
+     * 線の上をきっかりタップすることはないので、タップ点をそのまま返すと
+     * 線から外れた座標がアプリへ渡る。3 プラットフォーム共通の既存契約。
+     */
+    resolveTap(position: GeoPointInterface): OverlayHit | null {
+        const hit = this.findWithClosestPoint(createGeoPoint(position));
+        if (hit == null) return null;
+        return createOverlayHit('polyline', hit.closestPoint, () =>
+            this.dispatchClick({ state: hit.entity.state, clicked: hit.closestPoint }),
+        );
     }
 
 }

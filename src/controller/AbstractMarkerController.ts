@@ -1,3 +1,5 @@
+import type { GeoPointInterface } from '../features/GeoPoint';
+import type { OverlayHit } from './OverlayHitResolver';
 import type { SlottedOverlayController } from './OverlayController';
 import type { OverlayKind } from './OverlayKind';
 import { GeoPoint } from "../features";
@@ -320,6 +322,14 @@ export abstract class AbstractMarkerController<ActualMarker>
 
     setClickListenerAny(listener: unknown): void {
         this.clickListener = listener as OnMarkerEventHandler | null;
+    }
+
+    /**
+     * マーカーは判定に画面投影が要るのでカスケードの別経路
+     * （`BaseMapViewController.dispatchMarkerTap`）で扱う。ここでは当たらない。
+     */
+    resolveTap(_position: GeoPointInterface): OverlayHit | null {
+        return null;
     }
 
 }
