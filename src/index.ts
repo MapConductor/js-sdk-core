@@ -6,6 +6,7 @@ export * from './groundimage';
 export * from './raster';
 export * from './tileserver';
 export * from './zoom';
+export * from './conformance';
 export * from './controller';
 export * from './extension';
 export * from './features';
