@@ -24,3 +24,4 @@ export * from "./GeoGridIndex"
 export * from "./IconImageCache"
 export * from "./MarkerTileTypes"
 export * from "./MarkerTileRenderer"
+export * from './DefaultMarkerEventController';
