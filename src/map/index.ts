@@ -12,3 +12,4 @@ export * from "./ScreenProjectionRequirement";
 export * from "./MapCapability";
 export * from "./MapDiagnostics";
 export * from "./InitState";
+export * from './VisibleRegionBuilder';
