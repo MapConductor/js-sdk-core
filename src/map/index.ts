@@ -8,4 +8,6 @@ export * from "./FitBoundsCamera";
 export * from "./MapViewBase";
 export * from "./MapOverlayRegistry";
 export * from "./MapServiceRegistry";
+export * from "./MapCapability";
+export * from "./MapDiagnostics";
 export * from "./InitState";

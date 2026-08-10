@@ -1,3 +1,6 @@
+import { capabilityOfGesture } from '../map/MapCapability';
+import { MapDiagnostics } from '../map/MapDiagnostics';
+
 /**
  * Which map gestures the user is allowed to perform.
  *
@@ -57,8 +60,6 @@ export function resolveMapUISettings(
 /** The gestures {@link MapUISettings} can turn on and off. */
 export type MapGesture = 'scroll' | 'zoom' | 'rotate' | 'tilt';
 
-const warned = new Set<string>();
-
 /**
  * Reports gesture flags a provider cannot honour.
  *
@@ -71,6 +72,9 @@ export const MapUISettingsDiagnostics = {
      * Logs once if `requested` is `false` — i.e. the app asked to disable a
      * gesture this provider cannot disable. A `true` value needs no warning,
      * because leaving a gesture enabled is always achievable.
+     *
+     * 実体は {@link MapDiagnostics} に一般化済み。ジェスチャは「無効化を要求されたのに
+     * できない」という向きなので、`requested = !requested` として渡している。
      */
     warnIfRequested(
         requested: boolean,
@@ -78,18 +82,18 @@ export const MapUISettingsDiagnostics = {
         provider: string,
         reason: string,
     ): void {
-        if (requested) return;
-        const key = `${provider}.${gesture}`;
-        if (warned.has(key)) return;
-        warned.add(key);
-        // eslint-disable-next-line no-console
-        console.warn(
-            `MapConductor: ${gesture}Gesture is not supported by ${provider} (${reason}); the setting is ignored.`,
+        MapDiagnostics.reportIfRequested(
+            !requested,
+            capabilityOfGesture(gesture),
+            'ignored',
+            provider,
+            reason,
+            `${gesture}Gesture`,
         );
     },
 
     /** Test hook — forget which warnings have already been logged. */
     resetWarnings(): void {
-        warned.clear();
+        MapDiagnostics.resetWarnings();
     },
 };

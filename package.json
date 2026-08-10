@@ -22,7 +22,8 @@
     "build": "tsup src/index.ts --format cjs,esm --dts && cp src/tileserver/tile-sw.js dist/tile-sw.js",
     "dev": "tsup src/index.ts --format cjs,esm --watch",
     "clean": "rm -rf dist",
-    "test": "echo 'No tests yet'"
+    "pretest": "npm run build",
+    "test": "node --test \"test/**/*.test.mjs\""
   },
   "keywords": [
     "maps",
