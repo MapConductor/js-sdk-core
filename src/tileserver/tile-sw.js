@@ -19,8 +19,9 @@ const EMPTY_TILE = new Uint8Array([
 /**
  * SW-side provider data registered by the main thread:
  * routeId -> { items: [{lat,lng,iconIndex}], icons: [{bitmap,anchor,size}], zoomScales, extraIconScale, grid }
- * `icons[].bitmap` are transferred ImageBitmaps (see MarkerTileRenderer.toSWData()),
- * decoded once on the main thread and deduplicated by icon content.
+ * `icons[].bitmap` are ImageBitmaps this worker owns: the main thread clones
+ * them in (they are NOT in the transfer list — see LocalTileServer), decoded
+ * once there and deduplicated by icon content.
  */
 const swProviders = new Map();
 

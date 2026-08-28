@@ -1,3 +1,4 @@
+import { copyIconBitmap } from './swIconBitmaps';
 import type { TileProvider } from '../tileserver/TileProvider';
 import type { TileRequest } from '../tileserver/TileRequest';
 import type { GeoPoint } from '../features';
@@ -322,6 +323,10 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
      * whose icon could not be decoded to an ImageBitmap (SW contexts have no
      * <img>) fall back to the default icon's index rather than being dropped,
      * so they still render (as the default icon) instead of silently vanishing.
+     *
+     * The returned bitmaps belong to the caller, who must release them with
+     * `closeSWIcons()` once they have been posted. `sendSWRegisterAndWait()`
+     * already does this, so the usual one-line call site needs nothing extra.
      */
     async toSWData(): Promise<{
         items: { lat: number; lng: number; iconIndex: number }[];
@@ -340,10 +345,14 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
             if (!decoded || !(typeof ImageBitmap !== 'undefined' && decoded instanceof ImageBitmap)) {
                 return null;
             }
+            // A copy, not the cache's own bitmap: the cache closes an entry as
+            // soon as its LRU evicts it, and this loop runs long enough for that
+            // to happen to icons already collected here. See swIconBitmaps.ts.
+            const bitmap = await copyIconBitmap(decoded);
             const index = icons.length;
             iconIndexByUrl.set(bitmapIcon.url, index);
             icons.push({
-                bitmap: decoded,
+                bitmap,
                 anchor: bitmapIcon.anchor,
                 size: markerTileDrawSize(bitmapIcon, 1.0),
             });

@@ -1,6 +1,7 @@
 import { TileProvider } from "./TileProvider";
 import { TileRequest } from "./TileRequest";
 import type { TileRenderRequest, TileRenderResponse } from "./WorkerProtocol";
+import { closeSWIcons } from '../marker/swIconBitmaps';
 
 /**
  * Browser-side tile server implemented via a Service Worker interceptor.
@@ -89,6 +90,10 @@ export class LocalTileServer {
         },
     ): Promise<void> {
         if (typeof navigator === 'undefined' || !navigator.serviceWorker?.controller) {
+            // Nothing will be posted, so the payload's bitmaps have no reader.
+            // Bailing out without this leaks one copy per distinct icon every
+            // time the markers change on a page with no controlling SW.
+            closeSWIcons(data.icons);
             return Promise.resolve();
         }
         const controller = navigator.serviceWorker.controller;
@@ -114,6 +119,11 @@ export class LocalTileServer {
                 },
                 [channel.port2],
             );
+            // The clone above is synchronous, so the SW has its copy and the
+            // payload's own bitmaps can go. Doing it here rather than at the
+            // 14 provider call sites keeps `await server.sendSWRegisterAndWait(
+            // id, await renderer.toSWData())` a complete, leak-free handover.
+            closeSWIcons(data.icons);
         });
     }
 
