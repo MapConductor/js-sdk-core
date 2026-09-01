@@ -1,6 +1,7 @@
 import { GeoPoint, createGeoPoint } from "../features/GeoPoint";
 import type { GeoRectBounds } from "../features/GeoRectBounds";
 import { WebMercator, WEB_MERCATOR_MAX_EXTENT_METERS } from "../projection/WebMercator";
+import { toNativeHeading } from "./CameraBearing";
 
 /**
  * Unified, provider-independent "fit bounds" camera computation.
@@ -67,8 +68,10 @@ export function computeFitBoundsCameraPosition({
     const centerX = (corners[0].x + corners[3].x) / 2;
     const centerY = (corners[0].y + corners[3].y) / 2;
 
-    // Rotate corners by -bearing about the center → screen-aligned extent.
-    const rad = (-bearing * Math.PI) / 180;
+    // Rotate the corners about the center so the direction that is *up* on
+    // screen lands on +y → screen-aligned extent. Screen-up is the camera
+    // heading, which is the opposite of MapConductor's map-rotation bearing.
+    const rad = (-toNativeHeading(bearing) * Math.PI) / 180;
     const cos = Math.cos(rad);
     const sin = Math.sin(rad);
     let minX = Infinity;
