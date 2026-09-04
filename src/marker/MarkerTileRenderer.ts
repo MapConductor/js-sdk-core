@@ -67,6 +67,9 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
     /** Per-instance tile output cache; each sync creates a fresh renderer instance, so no invalidation is needed. */
     private readonly tileCache = new Map<string, Uint8Array | null>();
 
+    /** Largest icon half-extent any tile has needed so far, in px. */
+    private observedHalfExtentPx = 32;
+
     // android-sdk / ios-sdk の MarkerTileRenderer と同じく位置引数で受ける
     // （名前付きオプション型は持たない）。
     constructor(
@@ -193,9 +196,18 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         for (const m of markers) {
             const centerX = m.centerNormX + paddingPx;
             const centerY = m.centerNormY + paddingPx;
-            const dx = centerX - m.drawW * m.anchorX;
-            const dy = centerY - m.drawH * m.anchorY;
-            offCtx.drawImage(m.image as CanvasImageSource, dx, dy, m.drawW, m.drawH);
+            // Whole pixels, deliberately. The destination comes out of a
+            // projection, so it lands on a fraction of a pixel almost every
+            // time, and drawing to a non-integer destination makes the canvas
+            // resample: 20k markers measured at 277 ms unaligned against 38 ms
+            // aligned in Chromium, and the same effect costs 20x on Android.
+            // Rounding moves a pin by at most half a pixel, which is not
+            // visible at icon scale.
+            const dx = Math.round(centerX - m.drawW * m.anchorX);
+            const dy = Math.round(centerY - m.drawH * m.anchorY);
+            const w = Math.max(1, Math.round(m.drawW));
+            const h = Math.max(1, Math.round(m.drawH));
+            offCtx.drawImage(m.image as CanvasImageSource, dx, dy, w, h);
         }
 
         // android-sdk / ios-sdk と同じデバッグオーバーレイ：padding 位置に上/左の枠線と
@@ -252,7 +264,11 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
 
         const { x, y, z } = req;
         const tilePx = this.tileSize;
-        const assumedHalfExtentPx = 32;
+        // Starts at 32px but widens to whatever a tile has actually needed.
+        // Left fixed, the "conservative first pass" never pays off — real icons
+        // are larger than the guess — and query+prepare simply run twice for
+        // every tile.
+        const assumedHalfExtentPx = this.observedHalfExtentPx;
 
         let candidates = this.queryCandidates(z, x, y, assumedHalfExtentPx);
         if (candidates.length === 0) {
@@ -269,6 +285,7 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
 
         let { markers, maxHalfExtentPx } = this.prepareMarkers(candidates, tileOriginWx, tileOriginWy, z, tilePx);
         if (maxHalfExtentPx > assumedHalfExtentPx + 1) {
+            this.observedHalfExtentPx = maxHalfExtentPx;
             candidates = this.queryCandidates(z, x, y, maxHalfExtentPx);
             await Promise.all([...new Set(candidates.map((c) => this.bitmapIconOf(c).url))].map((url) => this.icons.ensure(url)));
             ({ markers, maxHalfExtentPx } = this.prepareMarkers(candidates, tileOriginWx, tileOriginWy, z, tilePx));
@@ -296,7 +313,7 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
     renderTileDataUrl(req: TileRequest): string | null {
         const { x, y, z } = req;
         const tilePx = this.tileSize;
-        const assumedHalfExtentPx = 32;
+        const assumedHalfExtentPx = this.observedHalfExtentPx;
 
         const candidates = this.queryCandidates(z, x, y, assumedHalfExtentPx);
         if (candidates.length === 0) return null;
