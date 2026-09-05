@@ -205,19 +205,31 @@ async function renderOffscreen(provider, x, y, z, tileSize) {
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
 
-    for (const m of markers) {
-        const cx = m.centerX + paddingPx;
-        const cy = m.centerY + paddingPx;
-        // Whole pixels — see the same loop in MarkerTileRenderer.draw(). A
-        // non-integer destination makes the canvas resample every marker, which
-        // measured 277 ms against 38 ms for 20k markers in Chromium.
-        ctx.drawImage(
-            m.bitmap,
-            Math.round(cx - m.drawW * m.anchorX),
-            Math.round(cy - m.drawH * m.anchorY),
-            Math.max(1, Math.round(m.drawW)),
-            Math.max(1, Math.round(m.drawH)),
-        );
+    // Whole pixels, and markers exactly on top of one another drawn once —
+    // see the same loop in MarkerTileRenderer.draw() for why both matter.
+    const placed = markers.map((m) => ({
+        bitmap: m.bitmap,
+        dx: Math.round(m.centerX + paddingPx - m.drawW * m.anchorX),
+        dy: Math.round(m.centerY + paddingPx - m.drawH * m.anchorY),
+        w: Math.max(1, Math.round(m.drawW)),
+        h: Math.max(1, Math.round(m.drawH)),
+    }));
+    const lastAt = new Map();
+    const seenIcon = new Map();
+    const mixedIcons = new Set();
+    for (let index = 0; index < placed.length; index++) {
+        const p = placed[index];
+        const key = p.dx + ',' + p.dy + ',' + p.w + ',' + p.h;
+        const previous = seenIcon.get(key);
+        if (previous !== undefined && previous !== p.bitmap) mixedIcons.add(key);
+        seenIcon.set(key, p.bitmap);
+        lastAt.set(key, index);
+    }
+    for (let index = 0; index < placed.length; index++) {
+        const p = placed[index];
+        const key = p.dx + ',' + p.dy + ',' + p.w + ',' + p.h;
+        if (!mixedIcons.has(key) && lastAt.get(key) !== index) continue;
+        ctx.drawImage(p.bitmap, p.dx, p.dy, p.w, p.h);
     }
 
     const finalCanvas = new OffscreenCanvas(tileSize, tileSize);

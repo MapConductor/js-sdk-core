@@ -193,7 +193,21 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
     ): OffscreenCanvas | HTMLCanvasElement {
         const offscreenSize = tilePx + paddingPx * 2;
         const { canvas: offscreen, ctx: offCtx } = this.createCanvas(offscreenSize);
-        for (const m of markers) {
+        // Drop markers completely hidden by a later one.
+        //
+        // Zoom out far enough and a whole city collapses onto a few hundred
+        // pixels: at z6 a dataset of 20k markers resolves to a couple of
+        // thousand distinct positions, and the rest are drawn underneath copies
+        // of themselves. Keeping the last of each group is what would have been
+        // visible anyway, since drawing is in painter's order.
+        //
+        // Only exact agreement counts — same rectangle, same icon — so nothing
+        // that could peek out from behind another is dropped. Where markers
+        // share a rectangle but not an icon, none are: a different icon may be
+        // transparent where the one above it is not.
+        const lastAt = new Map<string, number>();
+        const mixedIcons = new Set<string>();
+        const placed = markers.map((m) => {
             const centerX = m.centerNormX + paddingPx;
             const centerY = m.centerNormY + paddingPx;
             // Whole pixels, deliberately. The destination comes out of a
@@ -203,11 +217,30 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
             // aligned in Chromium, and the same effect costs 20x on Android.
             // Rounding moves a pin by at most half a pixel, which is not
             // visible at icon scale.
-            const dx = Math.round(centerX - m.drawW * m.anchorX);
-            const dy = Math.round(centerY - m.drawH * m.anchorY);
-            const w = Math.max(1, Math.round(m.drawW));
-            const h = Math.max(1, Math.round(m.drawH));
-            offCtx.drawImage(m.image as CanvasImageSource, dx, dy, w, h);
+            return {
+                image: m.image as CanvasImageSource,
+                dx: Math.round(centerX - m.drawW * m.anchorX),
+                dy: Math.round(centerY - m.drawH * m.anchorY),
+                w: Math.max(1, Math.round(m.drawW)),
+                h: Math.max(1, Math.round(m.drawH)),
+            };
+        });
+
+        const seenIcon = new Map<string, CanvasImageSource>();
+        for (let index = 0; index < placed.length; index++) {
+            const p = placed[index];
+            const key = `${p.dx},${p.dy},${p.w},${p.h}`;
+            const previous = seenIcon.get(key);
+            if (previous !== undefined && previous !== p.image) mixedIcons.add(key);
+            seenIcon.set(key, p.image);
+            lastAt.set(key, index);
+        }
+
+        for (let index = 0; index < placed.length; index++) {
+            const p = placed[index];
+            const key = `${p.dx},${p.dy},${p.w},${p.h}`;
+            if (!mixedIcons.has(key) && lastAt.get(key) !== index) continue;
+            offCtx.drawImage(p.image, p.dx, p.dy, p.w, p.h);
         }
 
         // android-sdk / ios-sdk と同じデバッグオーバーレイ：padding 位置に上/左の枠線と
