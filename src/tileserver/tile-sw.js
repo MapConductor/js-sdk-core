@@ -25,6 +25,64 @@ const EMPTY_TILE = new Uint8Array([
  */
 const swProviders = new Map();
 
+/**
+ * Rendered tiles, keyed by their URL path.
+ *
+ * The Cache-Control header on the response does nothing here: `respondWith`
+ * intercepts ahead of the HTTP cache, so a repeat request re-rendered the tile
+ * every time — measured at 105 ms per fetch of an already-drawn tile, whether
+ * or not the caller asked for caching.
+ *
+ * Budgeted in bytes rather than entries. Counting entries is the mistake this
+ * project has already made once: a byte-blind cache of a few hundred tiles is
+ * tens of megabytes, and in a Service Worker there is no low-memory callback to
+ * catch it.
+ */
+const TILE_CACHE_MAX_BYTES = 16 * 1024 * 1024;
+const tileCache = new Map();
+let tileCacheBytes = 0;
+
+function cachedTile(key) {
+    const hit = tileCache.get(key);
+    if (hit === undefined) return null;
+    // Map preserves insertion order, so re-inserting makes this the newest and
+    // the eviction loop below can just take from the front.
+    tileCache.delete(key);
+    tileCache.set(key, hit);
+    return hit;
+}
+
+function cacheTile(key, bytes) {
+    if (!bytes || bytes.byteLength === 0) return;
+    // A single tile larger than the whole budget would evict everything and
+    // then not fit; skip it rather than empty the cache for nothing.
+    if (bytes.byteLength > TILE_CACHE_MAX_BYTES) return;
+    const existing = tileCache.get(key);
+    if (existing !== undefined) {
+        tileCacheBytes -= existing.byteLength;
+        tileCache.delete(key);
+    }
+    tileCache.set(key, bytes);
+    tileCacheBytes += bytes.byteLength;
+    while (tileCacheBytes > TILE_CACHE_MAX_BYTES) {
+        const oldest = tileCache.keys().next();
+        if (oldest.done) break;
+        tileCacheBytes -= tileCache.get(oldest.value).byteLength;
+        tileCache.delete(oldest.value);
+    }
+}
+
+/** Drops a route's tiles. Its markers have changed, so they all lie. */
+function dropCachedTiles(routeId) {
+    const prefix = '/__tiles/' + routeId + '/';
+    for (const key of Array.from(tileCache.keys())) {
+        if (key.startsWith(prefix)) {
+            tileCacheBytes -= tileCache.get(key).byteLength;
+            tileCache.delete(key);
+        }
+    }
+}
+
 const GRID_CELL_DEG = 0.02;
 const GRID_MAX_CELLS_PER_QUERY = 4000;
 
@@ -84,12 +142,16 @@ self.addEventListener('message', (event) => {
             extraIconScale: msg.extraIconScale ?? 1.0,
             grid: buildGrid(msg.items),
         });
+        // A re-registration means the markers changed, so anything already
+        // drawn for this route is wrong.
+        dropCachedTiles(msg.routeId);
         console.log('[tile-sw] sw-register:', msg.routeId, 'items:', msg.items.length, 'icons:', msg.icons.length);
         if (event.ports && event.ports[0]) {
             event.ports[0].postMessage({ ok: true });
         }
     } else if (msg.type === 'sw-unregister') {
         swProviders.delete(msg.routeId);
+        dropCachedTiles(msg.routeId);
         console.log('[tile-sw] sw-unregister:', msg.routeId);
     }
 });
@@ -312,11 +374,20 @@ self.addEventListener('fetch', (event) => {
     console.log('[tile-sw] fetch z=' + z + ' x=' + x + ' y=' + y, 'swProvider:', !!swProvider, 'offscreen:', offscreenOk, 'clientId:', event.clientId);
 
     if (swProvider && offscreenOk) {
+        const cached = cachedTile(url.pathname);
+        if (cached) {
+            // A fresh Response each time: a body can only be read once, so the
+            // cache holds the bytes rather than the Response.
+            event.respondWith(pngResponse(cached));
+            return;
+        }
         event.respondWith(
             renderOffscreen(swProvider, x, y, z, tileSize)
-                .then((blob) => {
-                    // console.log('[tile-sw] offscreen result blob:', blob ? blob.size : 'null', 'for z=' + z + ' x=' + x + ' y=' + y);
-                    return blob ? pngResponse(blob) : emptyTileResponse();
+                .then(async (blob) => {
+                    if (!blob) return emptyTileResponse();
+                    const bytes = await blob.arrayBuffer();
+                    cacheTile(url.pathname, bytes);
+                    return pngResponse(bytes);
                 })
                 .catch((err) => {
                     console.warn('[tile-sw] offscreen failed, falling back to postMessage:', err);
