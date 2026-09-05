@@ -46,6 +46,10 @@ dist/*
 *.map
 *.mjs
 *.cjs
+# The patterns above are unanchored, so they swallow sources as well as build
+# output — `!src/tileserver/tile-sw.js` above is the same problem, patched once
+# before. The whole test suite was invisible to git because of it.
+!test/**
 dist/*.d.ts
 dist/
 dist/
