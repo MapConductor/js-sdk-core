@@ -61,6 +61,8 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
     readonly extraIconScale: number;
     private readonly iconScale: (item: T, zoom: number) => number;
     private readonly debugTileOverlay: boolean;
+    /** Keep one marker per cell of this many pixels, or 0 to keep them all. */
+    private readonly declutterPx: number;
     private readonly grid: GeoGridIndex<T>;
     private readonly icons = new IconImageCache();
     private readonly defaultBitmapIcon: BitmapIcon = createDefaultIcon().toBitmapIcon();
@@ -78,8 +80,10 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         iconScaleCallback?: (item: T, zoom: number) => number,
         extraIconScale: number = 1.0,
         debugTileOverlay: boolean = false,
+        declutterPx: number = 0,
     ) {
         this.tileSize = tileSize;
+        this.declutterPx = declutterPx;
         this.iconScale = iconScaleCallback ?? ((_item, _zoom) => 1.0);
         this.extraIconScale = extraIconScale;
         this.debugTileOverlay = debugTileOverlay;
@@ -226,19 +230,32 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
             };
         });
 
+        // With decluttering on the group is a cell rather than a rectangle, and
+        // the mixed-icon exemption does not apply: the caller has said markers
+        // that close together are interchangeable, so one of them stands for
+        // the rest whatever they draw.
+        const declutter = this.declutterPx > 0;
+        const cell = this.declutterPx;
+        const groupKey = (p: { dx: number; dy: number; w: number; h: number }): string =>
+            declutter
+                ? `${Math.floor(p.dx / cell)},${Math.floor(p.dy / cell)}`
+                : `${p.dx},${p.dy},${p.w},${p.h}`;
+
         const seenIcon = new Map<string, CanvasImageSource>();
         for (let index = 0; index < placed.length; index++) {
             const p = placed[index];
-            const key = `${p.dx},${p.dy},${p.w},${p.h}`;
-            const previous = seenIcon.get(key);
-            if (previous !== undefined && previous !== p.image) mixedIcons.add(key);
-            seenIcon.set(key, p.image);
+            const key = groupKey(p);
+            if (!declutter) {
+                const previous = seenIcon.get(key);
+                if (previous !== undefined && previous !== p.image) mixedIcons.add(key);
+                seenIcon.set(key, p.image);
+            }
             lastAt.set(key, index);
         }
 
         for (let index = 0; index < placed.length; index++) {
             const p = placed[index];
-            const key = `${p.dx},${p.dy},${p.w},${p.h}`;
+            const key = groupKey(p);
             if (!mixedIcons.has(key) && lastAt.get(key) !== index) continue;
             offCtx.drawImage(p.image, p.dx, p.dy, p.w, p.h);
         }
