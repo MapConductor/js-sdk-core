@@ -89,7 +89,25 @@ export async function ingestMarkers<ActualMarker>(params: {
                 // 再送されただけ等）は、manager への再登録もタイルキャッシュの破棄も要らない。
                 // やってしまうと no-op の更新のために可視タイル全部が再描画される。
                 const unchanged = wasTiled && fingerPrintEquals(prevEntity.fingerPrint, state.fingerPrint());
-                if (!unchanged) {
+                if (unchanged) {
+                    // 描画は変わらないが、state オブジェクトが差し替わっているなら
+                    // エンティティの参照だけは最新にする。onClick などのハンドラと
+                    // 更新購読はこのオブジェクトに付いているので、古いままだと
+                    // クリックが前回のハンドラへ配送され続ける。
+                    // Polygon / Polyline / Circle / GroundImage の各コントローラは
+                    // 同じ位置で同じことをしている。
+                    if (prevEntity.state !== state) {
+                        markerManager.registerEntity(
+                            createMarkerEntity<ActualMarker>({
+                                marker: prevEntity.marker,
+                                state,
+                                visible: prevEntity.visible,
+                                isRendered: prevEntity.isRendered,
+                                tiling: true,
+                            }),
+                        );
+                    }
+                } else {
                     if (!wasTiled) {
                         if (prevEntity.marker != null) removedActualMarkers.push(prevEntity);
                         tiledMarkerIds.add(state.id);
@@ -114,6 +132,24 @@ export async function ingestMarkers<ActualMarker>(params: {
                     // 描画結果が変わらないので renderer を往復させない。
                     // android-sdk には無い React 固有の最適化で、非同期 renderer の
                     // 再生成によるちらつきを防ぐ（他のオーバーレイコントローラも同様）。
+                    //
+                    // ただし state オブジェクトは最新のものを採用する。同じ見た目でも
+                    // 別インスタンスなら onClick などのハンドラが新しい可能性があり、
+                    // dispatchClick が読むのは manager が持つエンティティの state
+                    // だからである。ここを飛ばすと、React 側が同じ id で作り直した
+                    // MarkerState のハンドラが永久に呼ばれない（id は見た目のハッシュで、
+                    // ハンドラは含まれない）。
+                    if (prevEntity.state !== state) {
+                        markerManager.registerEntity(
+                            createMarkerEntity<ActualMarker>({
+                                marker: prevEntity.marker,
+                                state,
+                                visible: prevEntity.visible,
+                                isRendered: prevEntity.isRendered,
+                                tiling: false,
+                            }),
+                        );
+                    }
                     continue;
                 }
                 updated.push({
