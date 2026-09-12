@@ -49,7 +49,14 @@ export interface MapCameraPosition {
   center: GeoPoint;
   /** Zoom level (typically 0-22, where higher is more zoomed in). */
   zoom: number;
-  /** Bearing/rotation in degrees (0-360, where 0 is north). */
+  /**
+   * Map rotation in degrees (0-360, where 0 is north).
+   *
+   * Increasing it turns the map **clockwise**: at 90 the map has rotated 90
+   * degrees to the right, so west is at the top of the screen. This is the
+   * opposite sign from the "camera heading" used by most native SDKs — see
+   * `CameraBearing` for the conversion.
+   */
   bearing: number;
   /** Kotlin-compatible tilt in degrees. */
   tilt: number;

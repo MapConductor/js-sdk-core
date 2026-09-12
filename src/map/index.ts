@@ -1,5 +1,6 @@
 export * from "./MapDesignTypeInterface";
 export * from "./MapProjection";
+export * from "./CameraBearing";
 export * from './AttributionRule';
 export * from "./CameraRestriction";
 export * from "./MapViewHolder";
