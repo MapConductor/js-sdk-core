@@ -30,15 +30,30 @@ export function createTileWorkerHandler(providers: Record<string, TileProvider>)
         if (msg.type !== 'render') return;
         const { id, routeId, request } = msg;
         const provider = providers[routeId];
-        const result = provider ? await Promise.resolve(provider.renderTile(request)) : null;
+        if (!provider) {
+            const response: TileRenderResponse = { type: 'render', id, result: null, outcome: 'notFound' };
+            ctx.postMessage(response);
+            return;
+        }
+        let result: Uint8Array | null;
+        try {
+            result = await Promise.resolve(provider.renderTile(request));
+        } catch (error) {
+            // Not an empty tile: the caller has to be able to ask again. Saying
+            // "empty" here is what puts a permanent hole in the map.
+            console.warn('[tile-worker] renderTile threw for', routeId, request, error);
+            const response: TileRenderResponse = { type: 'render', id, result: null, outcome: 'failed' };
+            ctx.postMessage(response);
+            return;
+        }
         if (result) {
             // Copy before transferring: providers may cache and reuse the
             // returned bytes, so transferring their buffer would detach it.
             const bytes = new Uint8Array(result);
-            const response: TileRenderResponse = { type: 'render', id, result: bytes };
+            const response: TileRenderResponse = { type: 'render', id, result: bytes, outcome: 'tile' };
             ctx.postMessage(response, [bytes.buffer]);
         } else {
-            const response: TileRenderResponse = { type: 'render', id, result: null };
+            const response: TileRenderResponse = { type: 'render', id, result: null, outcome: 'empty' };
             ctx.postMessage(response);
         }
     });

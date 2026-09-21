@@ -248,7 +248,7 @@ async function renderOffscreen(provider, x, y, z, tileSize) {
         if (provider.items.length > 0) {
             console.debug('[tile-sw] no candidates in bounds for z=' + z + ' x=' + x + ' y=' + y, 'totalItems:', provider.items.length);
         }
-        return null;
+        return { kind: 'empty' };
     }
 
     let { markers, maxHalfExtentPx } = prepareMarkers(provider, candidates, tileOriginX, tileOriginY, z, tileSize);
@@ -258,14 +258,14 @@ async function renderOffscreen(provider, x, y, z, tileSize) {
     }
     if (markers.length === 0) {
         console.debug('[tile-sw] candidates found but 0 markers prepared for z=' + z + ' x=' + x + ' y=' + y, 'candidates:', candidates.length, 'icons registered:', provider.icons.length);
-        return null;
+        return { kind: 'empty' };
     }
 
     const paddingPx = Math.max(Math.ceil(maxHalfExtentPx + 2), 2);
     const offscreenSize = tileSize + paddingPx * 2;
     const canvas = new OffscreenCanvas(offscreenSize, offscreenSize);
     const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
+    if (!ctx) return { kind: 'failed' };
 
     // Whole pixels, and markers exactly on top of one another drawn once —
     // see the same loop in MarkerTileRenderer.draw() for why both matter.
@@ -296,15 +296,15 @@ async function renderOffscreen(provider, x, y, z, tileSize) {
 
     const finalCanvas = new OffscreenCanvas(tileSize, tileSize);
     const finalCtx = finalCanvas.getContext('2d');
-    if (!finalCtx) return null;
+    if (!finalCtx) return { kind: 'failed' };
     finalCtx.drawImage(canvas, -paddingPx, -paddingPx);
 
     const blob = await finalCanvas.convertToBlob({ type: 'image/png' });
     if (!blob || blob.size === 0) {
         console.warn('[tile-sw] convertToBlob returned empty blob for tile', x, y, z);
-        return null;
+        return { kind: 'failed' };
     }
-    return blob;
+    return { kind: 'tile', blob };
 }
 
 async function findWindowClient(clientId) {
@@ -316,8 +316,30 @@ async function findWindowClient(clientId) {
     return windows.find((c) => c.focused) ?? windows[0] ?? null;
 }
 
+/**
+ * Nothing to draw here — a real answer, and a cacheable one.
+ *
+ * What this must never be used for is a tile that could not be drawn right
+ * now. A map library keeps what it is given: a transparent picture handed out
+ * for a failure becomes a hole that is never asked about again, and the
+ * neighbouring tiles' overhang is cut off at its edge. ios-sdk and android-sdk
+ * answer the same three ways -- empty with pixels, failure with 503, and 404
+ * only for a path that names nothing.
+ */
 function emptyTileResponse() {
-    return new Response(EMPTY_TILE, { headers: { 'Content-Type': 'image/png' } });
+    return pngResponse(EMPTY_TILE);
+}
+
+/** Could not draw it now. The library will ask again; nothing is cached. */
+function failedTileResponse() {
+    return new Response('tile render failed', {
+        status: 503,
+        headers: {
+            'Content-Type': 'text/plain',
+            'Cache-Control': 'no-store',
+            'Retry-After': '1',
+        },
+    });
 }
 
 function pngResponse(body) {
@@ -337,16 +359,22 @@ function pngResponse(body) {
 function postMessageRender(client, pathname) {
     return new Promise((resolve) => {
         const channel = new MessageChannel();
+        // A page that never answered has not told us the tile is empty.
         const timeout = setTimeout(() => {
-            resolve(emptyTileResponse());
+            console.warn('[tile-sw] main thread did not answer in 5s for', pathname);
+            resolve(failedTileResponse());
         }, 5000);
 
         channel.port1.onmessage = (e) => {
             clearTimeout(timeout);
-            const result = e.data.result;
+            const { result, outcome } = e.data;
             if (result) {
                 resolve(pngResponse(result));
+            } else if (outcome === 'failed') {
+                resolve(failedTileResponse());
             } else {
+                // 'empty', 'notFound', and pages older than this protocol,
+                // where no bytes only ever meant nothing to draw.
                 resolve(emptyTileResponse());
             }
         };
@@ -357,7 +385,9 @@ function postMessageRender(client, pathname) {
 
 async function mainThreadRender(pathname, clientId) {
     const client = await findWindowClient(clientId);
-    if (!client) return emptyTileResponse();
+    // No page to draw it: nobody has said this tile is empty, so do not claim
+    // it is. The next request will find a client.
+    if (!client) return failedTileResponse();
     return postMessageRender(client, pathname);
 }
 
@@ -383,9 +413,10 @@ self.addEventListener('fetch', (event) => {
         }
         event.respondWith(
             renderOffscreen(swProvider, x, y, z, tileSize)
-                .then(async (blob) => {
-                    if (!blob) return emptyTileResponse();
-                    const bytes = await blob.arrayBuffer();
+                .then(async (outcome) => {
+                    if (outcome.kind === 'empty') return emptyTileResponse();
+                    if (outcome.kind === 'failed') return failedTileResponse();
+                    const bytes = await outcome.blob.arrayBuffer();
                     cacheTile(url.pathname, bytes);
                     return pngResponse(bytes);
                 })
