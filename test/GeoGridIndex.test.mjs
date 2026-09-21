@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { GeoGridIndex } from '../dist/index.mjs';
+import { GeoGridIndex, MarkerGrid } from '../dist/index.mjs';
 
 /**
  * The grid must answer exactly what a scan would.
  *
  * android-sdk の `MarkerGridIndexTest`、ios-sdk の `MarkerGridIndexTests` と
- * 1 対 1 で対応する。3 つとも同じセルサイズ (0.005°) で、同じ折り返しを行う。
+ * 1 対 1 で対応する。3 つとも同じ階層セル（`MarkerGrid`）を使い、同じ折り返しを行う。
  *
  * ## なぜここを固定するか
  *
@@ -107,4 +107,119 @@ test('a query spanning the globe returns everything in its latitudes', () => {
     }));
     const index = new GeoGridIndex(items);
     assert.equal(index.queryBounds(-90, 90, -180, 180).length, items.length);
+});
+
+/**
+ * 間引きクエリは、覆ったセルすべてから 1 つずつ返す。
+ *
+ * android-sdk の `thinnedQueryKeepsOneMarkerFromEveryCellItCovers`、ios-sdk の
+ * `testThinnedQueryKeepsOneMarkerFromEveryCellItCovers` と同じもの。困るのは
+ * **穴**で、箱の中に中身を持つセルが何も返さないと、地図上ではマーカーの無い
+ * 一角になり、どこにもエラーは出ない。
+ *
+ * 箱の外のものが混じるのは正しい。セルの代表は箱と無関係に決まるので、縁の
+ * セルの代表が箱の外に落ちることがある。そこを縁で切り捨てないことが、隣の
+ * タイルと判断を揃える条件そのもの（`MarkerTileSeam.test.mjs`）。
+ */
+test('間引きクエリは覆ったセルすべてから 1 つずつ返す', () => {
+    const items = scatter(60000, 35.68, 139.76, 0.4);
+    const index = new GeoGridIndex(items);
+    const [south, north, west, east] = [35.6, 35.76, 139.68, 139.84];
+
+    // index が選ぶ段を、こちらでも同じ式で出す。0.005 度に対しては段 16 --
+    // 偶数段なので geocell でちょうど 9 文字になり、文字列で名指しできる。
+    assert.equal(MarkerGrid.levelForSeparation(0.005), 16);
+    const cellOf = (item) => MarkerGrid.geocell(item.position.latitude, item.position.longitude, 9);
+
+    const kept = index.queryBoundsThinned(south, north, west, east, 0.005);
+    assert.ok(kept !== null, '0.005 度は最下段より粗いので、必ず答えられるはず');
+
+    const inside = index.queryBounds(south, north, west, east);
+    assert.ok(inside.length > 1000, '比較できるだけの中身が要る');
+
+    // 箱の中にいるものが属するセルは、1 つ残らず代表を持っていること。
+    const keptCells = new Set(kept.map(cellOf));
+    for (const cell of new Set(inside.map(cellOf))) {
+        assert.ok(keptCells.has(cell), `セル ${cell} が代表を返していない`);
+    }
+    assert.equal(keptCells.size, kept.length, '同じセルから 2 つ返っている');
+    // はみ出しは縁のセル 1 つぶんまで。
+    const insideIds = ids(inside);
+    const outside = kept.filter((item) => !insideIds.has(item.id));
+    assert.ok(outside.length < kept.length * 0.15, '縁のセル 1 つぶんでは説明のつかない数が外にいる');
+    // これが無いと、間引く必要のないほど疎なデータでも上の assert が通ってしまう。
+    assert.ok(kept.length * 2 < inside.length, '間引きを働かせるには疎すぎる');
+});
+
+/**
+ * セルが呼び出し側の分離距離より細かくできないときは、断る。
+ *
+ * 平らなグリッドだったころ、この下限は 0.005 度だった。階層になった今は
+ * 最下段（一辺 0.000687 度）が下限で、そこまでは段を選び直して応じる。
+ */
+test('分離距離が最下段より細かいと断る', () => {
+    const index = new GeoGridIndex(scatter(2000, 35.68, 139.76, 0.4));
+    assert.equal(index.queryBoundsThinned(35.6, 35.7, 139.7, 139.8, 0.0005), null);
+    assert.ok(index.queryBoundsThinned(35.6, 35.7, 139.7, 139.8, 0.001) !== null);
+});
+
+/** 通常クエリが覚えた日付変更線の折り返しは、間引きでも成り立つ必要がある。 */
+test('間引きクエリも日付変更線をまたぐ', () => {
+    const items = [
+        { id: 'a', position: { latitude: -18, longitude: 179.99 } },
+        { id: 'b', position: { latitude: -18, longitude: -179.99 } },
+        { id: 'c', position: { latitude: -18, longitude: 178 } },
+    ];
+    const kept = new GeoGridIndex(items).queryBoundsThinned(-18.5, -17.5, 179.5, -179.5, 0.01);
+    assert.ok(kept !== null);
+    assert.deepEqual(new Set(kept.map((i) => i.id)), new Set(['a', 'b']));
+});
+
+/**
+ * どんな形の箱でも、索引は走査と同じ答えを返す必要がある。
+ *
+ * 四角い箱だけでは、新しい段選びの**軸ごとの上限**が効く経路---極端に平たい帯、
+ * 極端に細い縦帯---を一度も通らない。そこを外しても地図には何も起きず、その形の
+ * 問い合わせだけが静かにマーカーを落とす。
+ *
+ * ほぼ全球の箱を入れてあるのは、経度の列が折り返すため。180 の列と -180 の列は
+ * 同じなので、東端の列から歩く終わりを決めると 1 列しか見ない（`columnWalk`）。
+ *
+ * android-sdk の `boundsQueryMatchesBruteForceForEveryShapeOfBox`、
+ * ios-sdk の同名テストと対になる。
+ */
+test('どんな形の箱でも走査と一致する', () => {
+    // 2 つ目の群の id をずらす。`scatter` は毎回 0 から振るので、そのまま足すと
+    // id が重なり、集合比較が別のマーカーを 1 つに畳んでしまう。
+    const near = scatter(30000, 35.68, 139.76, 0.8);
+    const far = scatter(10000, -18, 179.95, 0.6).map((item) => ({
+        ...item,
+        id: String(Number(item.id) + 30000),
+    }));
+    const items = [...near, ...far];
+    const index = new GeoGridIndex(items);
+
+    const boxes = [
+        // タイル相当（z=14 から z=9 まで）。
+        [35.68, 35.6946, 139.76, 139.782],
+        [35.6, 35.7, 139.6, 139.8],
+        [35.2, 36.2, 139.2, 140.2],
+        // 極端に平たい帯と、極端に細い縦帯。
+        [35.679, 35.681, 139.0, 140.5],
+        [35.0, 36.4, 139.759, 139.761],
+        // ほぼ全球と、日付変更線をまたぐ箱。
+        [-85, 85, -179.9, 179.9],
+        [-18.5, -17.5, 179.5, -179.5],
+        // 何も無い場所。
+        [10, 11, 100, 101],
+    ];
+    let nonEmpty = 0;
+    boxes.forEach(([south, north, west, east], at) => {
+        const expected = scan(items, south, north, west, east);
+        const found = index.queryBounds(south, north, west, east);
+        assert.deepEqual(ids(found), ids(expected), `箱 ${at}: 走査と食い違った`);
+        assert.equal(found.length, expected.length, `箱 ${at}: 同じマーカーを 2 度返した`);
+        if (expected.length > 0) nonEmpty++;
+    });
+    assert.equal(nonEmpty, 7, '空の集合どうしを比べているだけになっている');
 });

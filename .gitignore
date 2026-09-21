@@ -56,3 +56,4 @@ dist/
 
 # 適合テストが吐く自分の出力。突き合わせ用の中間物で、正本は projection-expected.txt。
 test/resources/projection-actual.*.txt
+test/resources/geocell-actual.*.txt

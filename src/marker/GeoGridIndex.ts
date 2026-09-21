@@ -1,39 +1,68 @@
 import type { GeoPoint } from '../features';
+import {
+    columnWalk,
+    eastwardSpan,
+    latCell,
+    levelForSeparation,
+    lonCell,
+    morton,
+    queryLevel,
+    wrap,
+} from './MarkerGrid';
 
-/** Uniform lat/lng grid used to cull the candidate set per tile without scanning every marker. */
+/**
+ * A hierarchical lat/lng grid used to cull the candidate set per tile without
+ * scanning every marker.
+ *
+ * The cells are the ones {@link MarkerGrid} describes, the same ones android-sdk
+ * and ios-sdk index on. What differs is the storage. Those two keep one sorted
+ * array of `(cellKey << 24) | position`, which works because a `Long` has 63
+ * bits and the pair needs 60. A JavaScript `number` has 53, so the pair does
+ * not fit — and its bitwise operators would truncate to 32 in any case. Here
+ * the position lives in the bucket instead of in the key, which needs no packing
+ * at all.
+ *
+ * The consequence is that a level is a map of its own rather than a prefix of a
+ * shared array, so each one is built when first asked for. In practice a
+ * renderer asks for one or two: the level its tiles fall on, and the level its
+ * declutter separation asks for.
+ */
 export class GeoGridIndex<T extends { position: GeoPoint }> {
-    private readonly cells = new Map<string, T[]>();
+    /** Cells per level, built on demand. `level -> cellKey -> items`. */
+    private readonly levels = new Map<number, Map<number, T[]>>();
+
     /**
-     * About 450 m at Tokyo's latitude.
+     * How many levels to keep built.
      *
-     * Measured rather than picked: on 144k markers a tile-sized query costs
-     * 0.06 ms at this size, 0.03 ms at 0.001 and 2.31 ms at the 0.02 this used
-     * to be — the last no better than scanning, because a cell that size
-     * returns five times the markers a tile needs. Matches android-sdk's and
-     * ios-sdk's MarkerGridIndex.
+     * A renderer settles on one or two and stays there; holding more would keep
+     * a second reference to every marker for a zoom the user has left.
      */
-    private static readonly CELL_DEG = 0.005;
+    private static readonly LEVEL_CACHE_MAX = 3;
 
-    /** Columns around the globe: the wrap the cell walk folds on. */
-    private static readonly LON_CELLS = Math.round(360 / 0.005);
-    // If a bounds query would need to scan more cells than this, brute-force
-    // scanning `items` directly is comparably cheap and avoids pathological
-    // cell-iteration costs for very large (near-global) bounds.
-    private static readonly MAX_CELLS_PER_QUERY = 4000;
+    constructor(private readonly items: ReadonlyArray<T>) {}
 
-    constructor(private readonly items: ReadonlyArray<T>) {
-        for (const item of items) {
-            const key = this.cellKey(item.position.latitude, item.position.longitude);
-            const bucket = this.cells.get(key);
+    private cellsAt(level: number): Map<number, T[]> {
+        const existing = this.levels.get(level);
+        if (existing) return existing;
+
+        const cells = new Map<number, T[]>();
+        for (const item of this.items) {
+            const key = morton(
+                latCell(item.position.latitude, level),
+                lonCell(item.position.longitude, level),
+                level,
+            );
+            const bucket = cells.get(key);
             if (bucket) bucket.push(item);
-            else this.cells.set(key, [item]);
+            else cells.set(key, [item]);
         }
-    }
-
-    private cellKey(lat: number, lng: number): string {
-        const cx = GeoGridIndex.wrapColumn(Math.floor(lng / GeoGridIndex.CELL_DEG));
-        const cy = Math.floor(lat / GeoGridIndex.CELL_DEG);
-        return `${cx}:${cy}`;
+        this.levels.set(level, cells);
+        while (this.levels.size > GeoGridIndex.LEVEL_CACHE_MAX) {
+            const oldest = this.levels.keys().next().value;
+            if (oldest === undefined) break;
+            this.levels.delete(oldest);
+        }
+        return cells;
     }
 
     /**
@@ -46,45 +75,128 @@ export class GeoGridIndex<T extends { position: GeoPoint }> {
      * a reversed box iterates no cells at all and quietly returns nothing.
      */
     queryBounds(south: number, north: number, west: number, east: number): T[] {
-        const cellDeg = GeoGridIndex.CELL_DEG;
-        // A full turn or more covers everything; anything else folds into a
-        // single eastward sweep, whether the caller reversed the corners or ran
-        // past ±180.
-        const fullGlobe = east - west >= 360;
-        const lonSpan = fullGlobe ? 360 : (((east - west) % 360) + 360) % 360;
-        const cx0 = Math.floor(west / cellDeg);
-        const cx1 = Math.floor(east / cellDeg) + (east < west ? GeoGridIndex.LON_CELLS : 0);
-        const cy0 = Math.floor(south / cellDeg);
-        const cy1 = Math.floor(north / cellDeg);
-        const cellCount = (cx1 - cx0 + 1) * (cy1 - cy0 + 1);
+        const span = GeoGridIndex.spanOf(west, east);
+        const inside = GeoGridIndex.insideTest<T>(south, north, west, span);
+        if (north < south) return [];
 
-        const inside = (item: T): boolean =>
-            item.position.latitude >= south &&
-            item.position.latitude <= north &&
-            (fullGlobe || GeoGridIndex.withinLongitude(item.position.longitude, west, lonSpan));
-
-        if (!Number.isFinite(cellCount) || cellCount > GeoGridIndex.MAX_CELLS_PER_QUERY) {
-            return this.items.filter(inside);
-        }
-
+        const level = queryLevel(north - south, span.lonSpan);
         const out: T[] = [];
-        for (let cx = cx0; cx <= cx1; cx++) {
-            const wrapped = GeoGridIndex.wrapColumn(cx);
-            for (let cy = cy0; cy <= cy1; cy++) {
-                const bucket = this.cells.get(`${wrapped}:${cy}`);
-                if (!bucket) continue;
-                for (const item of bucket) {
-                    if (inside(item)) out.push(item);
-                }
-            }
-        }
+        this.forEachCell(south, north, west, span.lonSpan, level, (bucket) => {
+            for (const item of bucket) if (inside(item)) out.push(item);
+        });
         return out;
     }
 
-    /** Folds a column index back onto the globe, so 180° and -180° share cells. */
-    private static wrapColumn(cx: number): number {
-        const min = -GeoGridIndex.LON_CELLS / 2;
-        return min + (((cx - min) % GeoGridIndex.LON_CELLS) + GeoGridIndex.LON_CELLS) % GeoGridIndex.LON_CELLS;
+    /**
+     * One item for each cell the bounds touch.
+     *
+     * The caller has said that items closer together than `minSeparationDegrees`
+     * are interchangeable, so the index is free to hand back whichever of a
+     * cell's items it likes — which is what lets it answer from its cells rather
+     * than reading every item. The level comes from the separation: the coarsest
+     * one whose cells are no wider than the caller asked for.
+     *
+     * ## Why the winner cannot depend on the bounds
+     *
+     * A cell's representative is the **last item in its bucket, always** — not
+     * the last one that falls inside the bounds. The difference is what a map
+     * made of tiles looks like at the seams.
+     *
+     * Tiles are rendered one at a time, each asking for its own box grown by the
+     * icon overhang. A cell straddling the boundary is asked about twice, by two
+     * different boxes. Choose the winner from what is inside the box and the two
+     * tiles choose **different items:** one item gets its left half drawn on the
+     * left tile and nothing on the right, so the icon is cut down the seam with
+     * no error anywhere. Measured on ios-sdk with Tokyo's street trees, 74
+     * markers at zoom 9 and 84 at zoom 10 were drawn by one tile and not by its
+     * neighbour.
+     *
+     * Choosing without looking at the box removes the disagreement: an item
+     * whose icon reaches the next tile is inside that tile's grown box too, so
+     * that tile asks about the same cell and gets the same answer.
+     *
+     * A returned item may therefore lie just outside the bounds, by less than
+     * one cell. The renderer clips it; what it must not do is filter the list
+     * back down to the box, because that would put the disagreement back.
+     *
+     * Returns null when the index cannot help, meaning a separation finer than
+     * the bottom level, which would thin more than was asked for. The caller
+     * falls back to {@link queryBounds}.
+     *
+     * Mirrors `inBoundsThinned` in android-sdk and ios-sdk, where the index is
+     * internal to the module. Kept off the public surface here for the same
+     * reason: it is how the tile renderer talks to its index, not something an
+     * app calls.
+     *
+     * @internal
+     */
+    queryBoundsThinned(
+        south: number,
+        north: number,
+        west: number,
+        east: number,
+        minSeparationDegrees: number,
+    ): T[] | null {
+        const level = levelForSeparation(minSeparationDegrees);
+        if (level === null) return null;
+        if (north < south) return [];
+
+        const out: T[] = [];
+        this.forEachCell(south, north, west, eastwardSpan(west, east), level, (bucket) => {
+            // The last one, to land on the same item the other two SDKs pick:
+            // there the cell is a run in a sorted array ordered by position in
+            // the snapshot, so its last entry is the one added last — which is
+            // the end of this bucket.
+            out.push(bucket[bucket.length - 1]);
+        });
+        return out;
+    }
+
+    /**
+     * Walks the cells a box covers at `level`, folding columns onto the globe.
+     *
+     * The walk starts at the column holding `west` and runs eastward, which
+     * covers a reversed or past-±180 box without a second loop.
+     */
+    private forEachCell(
+        south: number,
+        north: number,
+        west: number,
+        lonSpan: number,
+        level: number,
+        body: (bucket: T[]) => void,
+    ): void {
+        const cells = this.cellsAt(level);
+        const rowFrom = latCell(south, level);
+        const rowTo = latCell(north, level);
+        const { start, count } = columnWalk(west, lonSpan, level);
+
+        for (let row = rowFrom; row <= rowTo; row++) {
+            for (let step = 0; step < count; step++) {
+                const bucket = cells.get(morton(row, wrap(start + step, level), level));
+                if (bucket) body(bucket);
+            }
+        }
+    }
+
+    private static spanOf(west: number, east: number): { fullGlobe: boolean; lonSpan: number } {
+        // A full turn or more covers everything; anything else folds into a
+        // single eastward sweep, whether the caller reversed the corners or ran
+        // past ±180.
+        return { fullGlobe: east - west >= 360, lonSpan: eastwardSpan(west, east) };
+    }
+
+    private static insideTest<T extends { position: GeoPoint }>(
+        south: number,
+        north: number,
+        west: number,
+        span: { fullGlobe: boolean; lonSpan: number },
+    ): (item: T) => boolean {
+        return (item: T): boolean =>
+            item.position.latitude >= south &&
+            item.position.latitude <= north &&
+            (span.fullGlobe ||
+                GeoGridIndex.withinLongitude(item.position.longitude, west, span.lonSpan));
     }
 
     /** Whether `lng` lies within `span` degrees east of `west`. */

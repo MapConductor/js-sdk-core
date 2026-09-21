@@ -121,10 +121,42 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         // the Android/iOS renderer without needing a full projection inverse.
         const latSpan = north - south;
         const lonSpan = east - west || 1e-9;
-        const padNorm = paddingPx / this.tileSize;
+        // A whole declutter cell beyond the icon overhang.
+        //
+        // The overhang alone is enough to draw the tile, but not enough to
+        // decide it: a declutter cell straddling the edge would have some of
+        // its markers inside the query and some outside, and the tile next door
+        // would see a different part of the same cell. Both would keep a marker
+        // and the two would not be the same one, which is an icon cut at the
+        // seam. Growing by the cell as well means every cell that reaches this
+        // tile is here in full, so both tiles see all of it and agree.
+        const padNorm = (paddingPx + this.declutterPx) / this.tileSize;
         const latPad = latSpan * padNorm;
         const lonPad = lonSpan * padNorm;
-        return this.grid.queryBounds(south - latPad, north + latPad, west - lonPad, east + lonPad);
+        const s = south - latPad;
+        const n = north + latPad;
+        const w = west - lonPad;
+        const e = east + lonPad;
+
+        // With declutter on, thin at the index rather than after.
+        //
+        // The caller is about to keep one marker per `declutterPx` cell anyway,
+        // so every marker it will drop is one the index need not have returned
+        // — and on a dense layer that is most of them. Positioning and decoding
+        // the ones destined for the bin is what made declutter *cost* time on
+        // the other two SDKs before they moved the thinning here (20,000
+        // markers, 82.8 ms to 178.5 ms on iOS).
+        //
+        // The index declines when its cells cannot guarantee the separation, in
+        // which case this falls back to the full query and the later pass does
+        // the thinning as before.
+        const separationDegrees =
+            this.declutterPx > 0 ? (Math.max(latSpan, lonSpan) * this.declutterPx) / this.tileSize : 0;
+        if (separationDegrees > 0) {
+            const thinned = this.grid.queryBoundsThinned(s, n, w, e, separationDegrees);
+            if (thinned) return thinned;
+        }
+        return this.grid.queryBounds(s, n, w, e);
     }
 
     private prepareMarkers(
@@ -194,6 +226,8 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         tilePx: number,
         paddingPx: number,
         req: TileRequest,
+        tileOriginWx: number,
+        tileOriginWy: number,
     ): OffscreenCanvas | HTMLCanvasElement {
         const offscreenSize = tilePx + paddingPx * 2;
         const { canvas: offscreen, ctx: offCtx } = this.createCanvas(offscreenSize);
@@ -227,6 +261,8 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
                 dy: Math.round(centerY - m.drawH * m.anchorY),
                 w: Math.max(1, Math.round(m.drawW)),
                 h: Math.max(1, Math.round(m.drawH)),
+                worldX: m.centerNormX + tileOriginWx,
+                worldY: m.centerNormY + tileOriginWy,
             };
         });
 
@@ -234,11 +270,34 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         // the mixed-icon exemption does not apply: the caller has said markers
         // that close together are interchangeable, so one of them stands for
         // the rest whatever they draw.
+        // The declutter cell is anchored to the world, not to this tile.
+        //
+        // `dx`/`dy` are positions within this tile, so a cell keyed off them
+        // moves with the tile: the same ground lands in a different cell on the
+        // tile next door, the two tiles keep different markers, and a marker
+        // drawn on one and dropped on the other is **cut at the seam.** Adding
+        // the tile's own origin back gives the world pixel the projection
+        // produced, which is the same number whichever tile is asking.
+        //
+        // Subtracting the tile's own cell keeps the numbers small. That does
+        // not move the grid — two tiles still agree about which markers share a
+        // cell, which is all the grouping is asked for — and android-sdk needs
+        // the small numbers, because it packs the group and an index into one
+        // Long. The three stay identical.
         const declutter = this.declutterPx > 0;
-        const cell = this.declutterPx;
-        const groupKey = (p: { dx: number; dy: number; w: number; h: number }): string =>
+        const cell = Math.max(this.declutterPx, 1);
+        const baseCellX = Math.floor(tileOriginWx / cell);
+        const baseCellY = Math.floor(tileOriginWy / cell);
+        const groupKey = (p: {
+            dx: number;
+            dy: number;
+            w: number;
+            h: number;
+            worldX: number;
+            worldY: number;
+        }): string =>
             declutter
-                ? `${Math.floor(p.dx / cell)},${Math.floor(p.dy / cell)}`
+                ? `${Math.floor(p.worldX / cell) - baseCellX},${Math.floor(p.worldY / cell) - baseCellY}`
                 : `${p.dx},${p.dy},${p.w},${p.h}`;
 
         const seenIcon = new Map<string, CanvasImageSource>();
@@ -347,7 +406,7 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         }
 
         const paddingPx = Math.max(Math.ceil(maxHalfExtentPx + 2), 2);
-        const finalCanvas = this.draw(markers, tilePx, paddingPx, req);
+        const finalCanvas = this.draw(markers, tilePx, paddingPx, req, tileOriginWx, tileOriginWy);
         const bytes = await this.canvasToBytes(finalCanvas);
         this.cacheTile(key, bytes);
         return bytes;
@@ -375,7 +434,7 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         if (markers.length === 0) return null;
 
         const paddingPx = Math.max(Math.ceil(maxHalfExtentPx + 2), 2);
-        const finalCanvas = this.draw(markers, tilePx, paddingPx, req);
+        const finalCanvas = this.draw(markers, tilePx, paddingPx, req, tileOriginWx, tileOriginWy);
         return finalCanvas instanceof HTMLCanvasElement ? finalCanvas.toDataURL('image/png') : null;
     }
 
