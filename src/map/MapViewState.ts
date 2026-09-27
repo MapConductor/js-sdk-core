@@ -187,9 +187,11 @@ export abstract class MapViewState<ActualMapDesignType extends MapDesignTypeInte
   moveCameraTo(cameraPosition: MapCameraPosition, durationMillis?: number): void;
   moveCameraTo(position: GeoPoint, durationMillis?: number): void;
   moveCameraTo(positionOrCamera: GeoPoint | MapCameraPosition, durationMillis?: number): void {
+    // カメラを渡されたらそのまま使う。「位置だけ動かして縮尺は保つ」は
+    // `moveCameraTo(position: GeoPoint)` のオーバーロードが担う（下の行）。
     const next =
       'zoom' in positionOrCamera
-        ? this.resolveCameraPosition(positionOrCamera as MapCameraPosition)
+        ? (positionOrCamera as MapCameraPosition)
         : this._cameraPosition.copy({ position: positionOrCamera as GeoPoint });
 
     const controller = this.attachedMapController;
@@ -262,15 +264,4 @@ export abstract class MapViewState<ActualMapDesignType extends MapDesignTypeInte
     this._cameraPositionChangeListener = listener;
   }
 
-  /**
-   * ズーム・ベアリング・チルトがすべて 0 の「未指定」カメラは、位置だけを差し替える。
-   *
-   * アプリが位置だけを渡してきたときに、いまの縮尺を保ったまま移動するための救済。
-   * 全プロバイダが同じ判定をしていた（react-for-arcgis だけ抜けていたのでここで揃う）。
-   */
-  private resolveCameraPosition(target: MapCameraPosition): MapCameraPosition {
-    const isUnspecified = target.zoom === 0 && target.bearing === 0 && target.tilt === 0;
-    if (isUnspecified) return this._cameraPosition.copy({ position: target.position });
-    return target;
-  }
 }
