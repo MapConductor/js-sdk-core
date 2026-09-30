@@ -15,3 +15,4 @@ export * from "./MapDiagnostics";
 export * from "./InitState";
 export * from './VisibleRegionBuilder';
 export * from './BlankMapStyle';
+export * from './VectorStyleSupport';
