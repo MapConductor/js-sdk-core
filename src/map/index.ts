@@ -16,3 +16,8 @@ export * from "./InitState";
 export * from './VisibleRegionBuilder';
 export * from './BlankMapStyle';
 export * from './VectorStyleSupport';
+export * from './StyleMutation';
+export * from './VectorStyleMutationSupport';
+export * from './MapViewStyleHost';
+export * from './MapViewStyle';
+export * from './applyStyleMutations';

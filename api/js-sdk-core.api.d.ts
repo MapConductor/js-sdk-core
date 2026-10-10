@@ -531,164 +531,280 @@ interface OverlayController<StateType, EntityType, EventType> {
 /** 登録済みコントローラが {@link SlottedOverlayController} を満たすか。 */
 declare function isSlottedOverlayController(controller: OverlayControllerLike): controller is OverlayControllerLike & SlottedOverlayController;
 
-/**
- * Configuration options for initializing a map
- */
-interface MapConfig {
-    /** Container element for the map */
-    container: HTMLElement | string;
-    /** API key or access token for the map provider */
-    apiKey?: string;
-    /**
-     * Additional provider-specific options. Deliberately typed as `Record<string,
-     * any>`: provider configs extend MapConfig and NARROW this to their own
-     * option interface (e.g. LeafletConfig -> Leaflet's `MapOptions`), which is
-     * only assignable when the base is permissive. `Record<string, unknown>` would
-     * break that subtyping (TS2430), so `any` is intentional here.
-     */
-    options?: Record<string, any>;
-    initCameraPosition: MapCameraPosition;
+declare enum TileScheme {
+    XYZ = "XYZ",
+    TMS = "TMS"
 }
+type RasterAttributionRule = AttributionRule;
+type RasterLayerSource = {
+    type: "UrlTemplate";
+    template: string;
+    tileSize?: number;
+    minZoom?: number | null;
+    maxZoom?: number | null;
+    attributionRules?: AttributionRule[];
+    scheme?: TileScheme;
+} | {
+    type: "TileJson";
+    url: string;
+} | {
+    type: "ArcGisService";
+    serviceUrl: string;
+};
+declare const RasterLayerSource: {
+    DEFAULT_TILE_SIZE: number;
+    UrlTemplate(params: {
+        template: string;
+        tileSize?: number;
+        minZoom?: number | null;
+        maxZoom?: number | null;
+        attributionRules?: AttributionRule[];
+        scheme?: TileScheme;
+    }): RasterLayerSource;
+    TileJson(url: string): RasterLayerSource;
+    ArcGisService(serviceUrl: string): RasterLayerSource;
+};
+declare function resolveRasterAttributions(sources: RasterLayerSource[], camera: MapCameraPosition): string[];
+
 /**
- * Abstract base class for map providers
+ * 明示指定が無いときの `userAgent`。
+ *
+ * 「利用者が指定した値かどうか」を判定するために公開している。空ではないので、
+ * 既定のままの状態まで「指定あり」として扱うと、ラスタレイヤを 1 枚置いただけで
+ * 非対応の警告が出てしまう。android-sdk の `RasterLayerState.DEFAULT_USER_AGENT` /
+ * ios-sdk の `RasterLayerState.defaultUserAgent` と同じ値・同じ用途。
  */
-declare abstract class MapProvider {
-    protected controller: MapViewControllerInterface | null;
-    /**
-     * Initialize the map provider
-     */
-    abstract initialize(config: MapConfig): Promise<MapViewControllerInterface>;
-    /**
-     * Get the current controller instance
-     */
-    getController(): MapViewControllerInterface | null;
-    /**
-     * Check if the provider is initialized
-     */
-    isInitialized(): boolean;
-    /**
-     * Clean up resources
-     */
-    abstract destroy(): void;
+declare const DEFAULT_RASTER_LAYER_USER_AGENT = "MapConductor/RasterLayerAgent(https://mapconductor.com)";
+interface RasterLayerFingerPrint {
+    id: number;
+    source: number;
+    opacity: number;
+    visible: number;
+    zIndex: number;
+    userAgent: number;
+    debug: number;
+    /** `extraHeaders` のハッシュ。中身が extraHeaders しか無いので名前を実態に合わせている。 */
+    extraHeaders: number;
 }
-/**
- * Map provider types
- */
-declare enum MapProviderType {
-    GOOGLE_MAPS = "google-maps",
-    MAPLIBRE = "maplibre",
-    MAPBOX = "mapbox",
-    HERE = "here",
-    ARCGIS = "arcgis"
+interface RasterLayerEvent {
+    state: RasterLayerState;
+}
+type OnRasterLayerEventHandler = (event: RasterLayerEvent) => void;
+interface RasterLayerState {
+    readonly id: string;
+    source: RasterLayerSource;
+    opacity: number;
+    visible: boolean;
+    zIndex: number;
+    userAgent: string;
+    debug: boolean;
+    extraHeaders: Record<string, string> | null;
+    fingerPrint(): RasterLayerFingerPrint;
+    copy(opts?: RasterLayerStateCopyParams): RasterLayerState;
+    equals(other: unknown): boolean;
+    hashCode(): number;
+    asObservable(): {
+        subscribe: (fn: (fp: RasterLayerFingerPrint) => void) => () => void;
+    };
+}
+interface RasterLayerStateCopyParams {
+    source?: RasterLayerSource;
+    opacity?: number;
+    visible?: boolean;
+    zIndex?: number;
+    userAgent?: string;
+    debug?: boolean;
+    extraHeaders?: Record<string, string> | null;
+    id?: string | null;
+}
+declare function createRasterLayerState(params: {
+    source: RasterLayerSource;
+    opacity?: number;
+    visible?: boolean;
+    zIndex?: number;
+    userAgent?: string;
+    debug?: boolean;
+    extraHeaders?: Record<string, string> | null;
+    id?: string | null;
+}): RasterLayerState;
+
+interface TileRequest {
+    readonly x: number;
+    readonly y: number;
+    readonly z: number;
 }
 
-type OnMapLoadedHandler<TState> = (state: TState) => void;
-type OnMapEventHandler = (point: GeoPoint) => void;
-type OnCameraMoveHandler = (camera: MapCameraPosition) => void;
-/**
- * Common props that every map-view component must accept.
- * Extend this interface in SDK-specific packages to add platform-specific props
- * (e.g. apiKey for Google Maps, style URL for MapLibre).
- */
-interface MapViewBaseProps<TState extends MapViewStateInterface<MapDesignTypeInterface<unknown>>> {
-    state: TState;
-    onMapLoaded?: OnMapLoadedHandler<TState>;
-    onMapClick?: OnMapEventHandler;
-    onMapLongClick?: OnMapEventHandler;
-    onCameraMoveStart?: OnCameraMoveHandler;
-    onCameraMove?: OnCameraMoveHandler;
-    onCameraMoveEnd?: OnCameraMoveHandler;
-    className?: string;
-    /**
-     * カメラの可動範囲（パン範囲・ズーム上下限）を制限する。
-     *
-     * android-sdk の各 *MapView コンポーザブルが受け取る `cameraRestriction` 引数に対応する。
-     * 個別の `restrictBounds` / `minZoom` / `maxZoom` prop も引き続き受け付けるが、
-     * そちらはマップ生成時にしか反映されない。実行時に変更したい場合はこちらを使う。
-     */
-    cameraRestriction?: CameraRestriction | null;
-}
-/**
- * Abstract base for map-view implementations.
- *
- * Mirrors Android's MapViewBase and enforces the three-step initialization
- * contract that every new map SDK module must provide:
- *   1. sdkInitialize  — load the SDK (e.g. inject a script tag)
- *   2. createHolder   — wrap the native map in a MapViewHolder
- *   3. createController — wrap the holder in a map view controller
- *
- * Android equivalent: MapViewBase.kt (sdkInitialize / holderProvider / controllerProvider)
- * iOS equivalent:     Each view's Coordinator.bind() in MapConductorCore
- */
-declare abstract class MapViewBase<TState extends MapViewStateInterface<MapDesignTypeInterface<unknown>>, THolder extends MapViewHolder<unknown, unknown>, TController extends MapViewControllerInterface> {
-    /** Load the underlying map SDK. Return false to abort initialization. */
-    protected abstract sdkInitialize(): Promise<boolean>;
-    /** Build the SDK-specific config from the view state (camera position, design type, etc.). */
-    protected abstract buildConfig(state: TState, container: HTMLElement): MapConfig;
-    /** Create a holder that wraps the native map view instance. */
-    protected abstract createHolder(container: HTMLElement): Promise<THolder>;
-    /** Create the controller that exposes the MapConductor API. */
-    protected abstract createController(holder: THolder): Promise<TController>;
+interface TileProvider {
+    renderTile(request: TileRequest): Uint8Array | null | Promise<Uint8Array | null>;
 }
 
-type OnMapInitializedHandler = () => void;
 /**
- * Core controller interface that all map SDK modules must implement.
- * Mirrors Android MapViewControllerInterface / iOS MapViewControllerProtocol.
+ * What a tile request resolved to.
+ *
+ * The distinction that matters is **empty** versus **failed**, because a map
+ * library remembers them differently. A spot with nothing on it is a real
+ * answer — a transparent picture, cacheable, replaced when the data version
+ * moves the tile URL. A render that could not be completed right now is not:
+ * answering it with a transparent picture paints a hole and caches it, and the
+ * library never asks again, so the neighbouring tiles' overhang is cut off at
+ * its edge.
+ *
+ * ios-sdk's `LocalTileServer.TileOutcome` and android-sdk-core's
+ * `LocalTileServer.TileOutcome` are the same four cases.
  */
-interface MapViewControllerInterface {
-    readonly holder: MapViewHolder<unknown, unknown>;
-    clearOverlays(): Promise<void>;
-    setCameraMoveStartListener(listener: OnCameraMoveHandler | null): void;
-    setCameraMoveListener(listener: OnCameraMoveHandler | null): void;
-    setCameraMoveEndListener(listener: OnCameraMoveHandler | null): void;
-    setMapClickListener(listener: OnMapEventHandler | null): void;
-    setMapLongClickListener(listener: OnMapEventHandler | null): void;
-    setMapInitializedListener(listener: OnMapInitializedHandler | null): void;
-    moveCamera(position: MapCameraPosition): Promise<boolean>;
+type TileOutcome = {
+    readonly kind: 'tile';
+    readonly bytes: Uint8Array;
+}
+/** Nothing to draw here. Answer with a transparent tile. */
+ | {
+    readonly kind: 'empty';
+}
+/** The provider could not draw it now. The caller should retry, not cache. */
+ | {
+    readonly kind: 'failed';
+}
+/** Nothing of that name: an unknown route, or a path that is not a tile. */
+ | {
+    readonly kind: 'notFound';
+};
+/**
+ * A 1x1 transparent PNG, which scales to whatever the map draws it into.
+ *
+ * Shared so the several places that answer "empty" all answer with the same
+ * bytes; the copies that used to live in each provider said the same thing in
+ * seven different arrays.
+ */
+declare const TRANSPARENT_TILE_PNG: Uint8Array;
+/**
+ * Thrown by the helpers that hand tiles straight to a map library, where the
+ * only way to say "this one failed, ask again" is to reject.
+ */
+declare class TileRenderFailedError extends Error {
+    constructor(routeId: string, request: {
+        x: number;
+        y: number;
+        z: number;
+    });
+}
+
+/**
+ * Browser-side tile server implemented via a Service Worker interceptor.
+ *
+ * The Service Worker intercepts requests to `/__tiles/{routeId}/{tileSize}/{z}/{x}/{y}.png`
+ * and renders registered SW-side tile data with OffscreenCanvas when possible.
+ * If SW-side rendering is unavailable, it forwards requests back to the registered
+ * TileProvider on the main thread.
+ *
+ * For CPU-intensive tile rendering, attach a Web Worker via `attachRenderer()` so that
+ * `renderTile()` executes off the main thread. The worker should call
+ * `createTileWorkerHandler()` from `@mapconductor/js-sdk-core`.
+ */
+declare class LocalTileServer {
+    readonly baseUrl: string;
+    private readonly providers;
+    private static instance;
+    private static swRegistered;
+    private workerRenderer;
+    private readonly pendingRequests;
+    private nextRequestId;
+    private constructor();
+    static startServer(): LocalTileServer;
     /**
-     * カメラをアニメーションで移動する。
-     *
-     * 引数は android-sdk の `animateCamera(position, duration: Long)` に揃えてある。
-     * 以前は `CameraOptions` を受けていたが、実際に読まれていたのは `duration` だけで、
-     * `easing` はどのプロバイダも見ておらず、`paddings` は `padding` の別名として
-     * フォールバックされるだけだった。
-     *
-     * 戻り値が `Promise` なのは Kotlin の `Unit` / Swift の `Void` に対する TS 側の
-     * 言い方の違いで、`clearOverlays()` が `suspend fun` に対して `Promise<void>` なのと同じ。
+     * Attach a Web Worker that handles tile rendering via `createTileWorkerHandler()`.
+     * When attached, `handleFetch()` delegates `renderTile()` to the worker thread
+     * instead of running it on the main thread.
      */
-    animateCamera(position: MapCameraPosition, durationMillis: number): Promise<boolean>;
+    attachRenderer(worker: Worker): void;
+    /** Detach the renderer worker and fall back to main-thread rendering. */
+    detachRenderer(): void;
+    register(routeId: string, provider: TileProvider): void;
+    unregister(routeId: string): void;
     /**
-     * Applies the gesture flags to the underlying map engine.
+     * Send provider data to the SW and await acknowledgment before returning.
+     * This guarantees the SW can render tiles with OffscreenCanvas before the
+     * caller adds the raster source (which triggers tile requests immediately).
      *
-     * Optional the same way Android's `applyUISettings` has an empty default body:
-     * a provider that has not been wired up yet simply leaves the map as it is.
+     * Falls back (resolves) after 500 ms if the SW does not respond — in that
+     * case the postMessage fallback path in the SW will handle tile requests
+     * using the provider already stored in `this.providers`.
      */
-    applyUISettings?(settings: MapUISettings): void;
+    sendSWRegisterAndWait(routeId: string, data: {
+        items: {
+            lat: number;
+            lng: number;
+            iconIndex: number;
+        }[];
+        icons: {
+            bitmap: ImageBitmap;
+            anchor: {
+                x: number;
+                y: number;
+            };
+            size: {
+                width: number;
+                height: number;
+            };
+        }[];
+        zoomScales: number[];
+        extraIconScale: number;
+    }): Promise<void>;
+    private postToSW;
+    urlTemplate({ routeId, tileSize, cacheKey, }: {
+        routeId: string;
+        tileSize: number;
+        cacheKey?: string;
+    }): string;
     /**
-     * カメラの可動範囲（パン範囲・ズーム上下限）を制限する。null または空の
-     * `CameraRestriction` で制限解除。
+     * The bytes of one tile, or null when there are none.
      *
-     * ネイティブに範囲制限 API を持つプロバイダは直接適用し、持たないプロバイダは
-     * `BaseMapViewController.cameraRestrictionCorrection()` によるクランプで実現する。
-     * ズームは統一ズーム（Google 準拠）で指定し、各プロバイダが自身の体系へ変換する。
+     * Null is two different things — nothing to draw, and a render that
+     * failed — and callers that can tell a map library "ask again" should use
+     * {@link handleFetchOutcome} or {@link fetchTileOrThrow} instead.
+     */
+    handleFetch(routeId: string, request: TileRequest): Promise<Uint8Array | null>;
+    /**
+     * One tile, said precisely: drawn, empty, failed, or no such route.
      *
-     * `applyUISettings` と同じく optional: 未対応のプロバイダはマップをそのままにする。
+     * A provider says "empty" by returning null and "failed" by throwing. The
+     * two must not be answered the same way: a transparent tile is cacheable
+     * and correct for an empty spot, and a lie for a failure — it paints a
+     * hole the library keeps, with the neighbouring tiles' overhang cut off at
+     * its edge.
      */
-    setCameraRestriction?(restriction: CameraRestriction | null): void;
+    handleFetchOutcome(routeId: string, request: TileRequest): Promise<TileOutcome>;
     /**
-     * オーバーレイコントローラを登録する。登録先にはカメラ変更が伝播し、`destroy()` で
-     * 一括破棄される。`BaseMapViewController` が実装を提供する。
+     * Tile bytes for a map library that has no way to express "empty": an
+     * empty spot comes back as a transparent tile, and a failure throws, which
+     * every library reads as a load it may retry.
      */
-    registerOverlayController?(controller: OverlayControllerLike): void;
-    /** 登録を解除する。`BaseMapViewController` が実装を提供する。 */
-    unregisterOverlayController?(controller: OverlayControllerLike): void;
+    fetchTileOrThrow(routeId: string, request: TileRequest): Promise<Uint8Array>;
+    handleFetchDataUrl(routeId: string, request: TileRequest): string | null;
+    private dispatchToWorker;
     /**
-     * 範囲が収まるようにカメラを合わせる。
-     * 引数は android-sdk の `fitBounds(bounds, padding: Int)` に揃えてある。
+     * Register a Service Worker that intercepts `/__tiles/` requests and routes them
+     * to `handleFetch()` on the main thread.
+     *
+     * Call once at app startup, before the map is rendered. The page URL template
+     * returned by `urlTemplate()` will then be resolvable by the browser.
+     *
+     * @param swPath Path to the tile service worker script (default: `/tile-sw.js`)
      */
-    fitBounds(bounds: GeoRectBounds, padding: number): Promise<boolean>;
-    destroy(): void;
+    startServiceWorker(swPath?: string): void;
+    hasProvider(routeId: string): boolean;
+    /**
+     * Returns true when Service Workers are available in the current context.
+     * SW requires a secure origin (HTTPS or localhost). On plain HTTP non-localhost
+     * origins (e.g. a local IP like 192.168.x.x), SW is unavailable and tile
+     * rendering must use a provider-specific fallback to avoid unresolvable tile URLs.
+     */
+    static isServiceWorkerSupported(): boolean;
+    /**
+     * Resolves when the Service Worker is controlling the current page.
+     * Returns immediately if the SW already controls the page.
+     * Use this to avoid requesting tiles before the SW intercept is active.
+     */
+    waitForController(): Promise<void>;
 }
 
 /**
@@ -863,6 +979,357 @@ declare class MutableMapServiceRegistry implements MapServiceRegistry {
     capabilityStatus(capability: MapCapability): MapCapabilityStatus;
 }
 declare const EmptyMapServiceRegistry: MapServiceRegistry;
+
+/**
+ * How a map looks, as a property of the map rather than a layer inside it.
+ *
+ * A vector style *is* the basemap, so passing one to `<XxxView style={...}>`
+ * says what it is rather than mounting something over it. What happens
+ * underneath depends on the backend and the app does not have to know:
+ * MapLibre, Mapbox and MapTiler are told the style and draw it themselves;
+ * Google Maps, Leaflet, Cesium, OpenLayers and the rest are handed raster
+ * tiles rendered from the same style in a worker. Either way the same
+ * adjustments produce the same map.
+ *
+ * An interface rather than a class, for two reasons. Core must not depend on
+ * the style compiler or the rasteriser — both are optional, and one of them
+ * is a wasm binary — so what core holds is the seam and the modules bring
+ * the implementation. And a provider's own styling, which is nothing like a
+ * MapLibre style, can be added later as another implementation without this
+ * changing.
+ *
+ * The concrete implementations live in the vector style module; an app does
+ * not implement this.
+ *
+ * android-sdk-core and ios-sdk-core carry the same seam.
+ */
+interface MapViewStyle {
+    /**
+     * What identifies this style's content.
+     *
+     * The map re-installs a style whose key changed and leaves alone one
+     * whose key did not. Two objects describing the same thing must have the
+     * same key: a style built inline in JSX is a new object on every
+     * render — which is exactly what a colour picker produces — and keying
+     * off identity would reinstall the whole style on every unrelated state
+     * change.
+     */
+    readonly key: string;
+    /**
+     * Puts the style on the map. Called once the map has a style loaded, and
+     * again if it loads another one.
+     *
+     * @returns the ticket that takes it off again. Disposing must leave the
+     *   map as it was found: a style that cannot be fully undone has no
+     *   business being installed, because the app will switch away from it.
+     */
+    install(host: MapStyleHost): MapStyleInstallation;
+}
+/**
+ * A ticket to undo, and a chance to take a change without tearing down.
+ *
+ * Returned by anything that sets something up on a map.
+ */
+interface MapStyleInstallation {
+    dispose(): void;
+    /**
+     * Takes `next` in place, when it is near enough to what is installed,
+     * and answers whether it did.
+     *
+     * Without this the whole point is lost. A style whose key changed is
+     * installed again, and installing a style means handing the map a
+     * document — which is the reload this design exists to avoid. Moving a
+     * colour slider changes the adjustments and nothing else, so the
+     * installed style answers true, applies the difference, and the map
+     * never reloads anything.
+     *
+     * Left out, or false, and the caller disposes and installs `next` from
+     * scratch. False is always correct, only slower.
+     */
+    update?(next: MapViewStyle): boolean;
+}
+/**
+ * What a map offers to the style installed on it.
+ *
+ * The provider implements this; a {@link MapViewStyle} uses it and never
+ * touches a provider type. That is what keeps one style implementation
+ * working on every backend.
+ */
+interface MapStyleHost {
+    /**
+     * Where to look for what this map can do: `VectorStyleSupportKey` to
+     * hand over a style document, `VectorStyleMutationSupportKey` to change
+     * a loaded one in place, `RasterTilePreferenceKey` for the tile size it
+     * would rather have.
+     */
+    readonly serviceRegistry: MapServiceRegistry;
+    /** For serving a style document, or tiles rendered from one, to the map. */
+    readonly tileServer: LocalTileServer;
+    /**
+     * The vector style the map is drawing now, when it is drawing one.
+     *
+     * Undefined on every backend that has no such thing, which is most of
+     * them. It is how a rule set that adjusts "whatever is showing" finds
+     * something to adjust: the style has to be read before a rule can be
+     * matched against its layers, and only the map knows where it came from.
+     */
+    readonly vectorStyleUrl?: string;
+    /**
+     * Runs `block` whenever the map finishes loading a style, including the
+     * one it has now if it already has one.
+     *
+     * Everything a style installs on a live renderer is lost when that
+     * renderer loads a document again, for any reason. This is how it gets
+     * put back.
+     */
+    onStyleLoaded(block: () => void): MapStyleInstallation;
+    /**
+     * Adds or updates a raster layer the app did not declare.
+     *
+     * The raster path needs somewhere to put its tiles, and that cannot be
+     * the children of the view: the style is a prop, so it is installed from
+     * outside the tree. Marker tiling already mounts its layer the same way.
+     */
+    upsertRaster(state: RasterLayerState): void;
+    removeRaster(id: string): void;
+    /**
+     * Says what the app should know: a rule that matched nothing, an
+     * adjustment this backend cannot make, a style that could not be read.
+     *
+     * Routed to whatever the host gave the style, so a module can report
+     * without knowing how the app logs.
+     */
+    report(diagnostics: readonly string[]): void;
+}
+/**
+ * ラスターレイヤを children の外から載せられるコントローラ。
+ *
+ * {@link RasterLayerController} が既に両方持っている。これは「どのプロバイダの
+ * コントローラか」を知らずにそこへ届くための名前。
+ */
+interface RasterLayerMounting {
+    upsert(state: RasterLayerState): Promise<void>;
+    removeById(id: string): Promise<void>;
+}
+/**
+ * A style that can be carried to a native map SDK instead of installed here.
+ *
+ * React Native is the one host where {@link MapViewStyle.install} cannot do
+ * the work. The compiler is a wasm binary and Hermes has no wasm, so the
+ * style cannot be compiled in JavaScript on a device — and the map is not a
+ * JavaScript object anyway: it is the Android or iOS SDK, which already has
+ * the whole of this working natively.
+ *
+ * So on React Native the style is not installed; it is **described**, sent
+ * across the bridge as two strings, and rebuilt on the other side by the
+ * platform's own vector style module. The map a user sees is produced by
+ * exactly the code an Android or iOS app would run, which is why there is
+ * nothing here about how it is drawn.
+ *
+ * Core declares the shape; `@mapconductor/react-vectorstyle` fills it in.
+ */
+interface NativeStyleDescriptor {
+    /** The style document itself, when the app had it. */
+    readonly documentJson?: string;
+    /** Where to fetch the document, when the app named a URL. */
+    readonly documentUrl?: string;
+    /** Headers for that fetch — an API key, usually. */
+    readonly documentHeaders?: Readonly<Record<string, string>>;
+    /**
+     * Neither of the above: adjust whatever the map is already drawing.
+     * The native side reads the design's own style URL.
+     */
+    readonly fromCurrentDesign?: boolean;
+    /** The rules document, in the form every platform's compiler reads. */
+    readonly rulesJson: string;
+}
+/**
+ * A {@link MapViewStyle} that knows how to describe itself to a native SDK.
+ *
+ * Checked structurally rather than by class, so core stays free of the
+ * module that implements it.
+ */
+interface NativeDescribableStyle extends MapViewStyle {
+    toNativeDescriptor(): NativeStyleDescriptor;
+}
+/** Whether `style` can be sent to a native SDK rather than installed here. */
+declare function isNativeDescribableStyle(style: MapViewStyle | null | undefined): style is NativeDescribableStyle;
+
+/**
+ * Configuration options for initializing a map
+ */
+interface MapConfig {
+    /** Container element for the map */
+    container: HTMLElement | string;
+    /** API key or access token for the map provider */
+    apiKey?: string;
+    /**
+     * Additional provider-specific options. Deliberately typed as `Record<string,
+     * any>`: provider configs extend MapConfig and NARROW this to their own
+     * option interface (e.g. LeafletConfig -> Leaflet's `MapOptions`), which is
+     * only assignable when the base is permissive. `Record<string, unknown>` would
+     * break that subtyping (TS2430), so `any` is intentional here.
+     */
+    options?: Record<string, any>;
+    initCameraPosition: MapCameraPosition;
+}
+/**
+ * Abstract base class for map providers
+ */
+declare abstract class MapProvider {
+    protected controller: MapViewControllerInterface | null;
+    /**
+     * Initialize the map provider
+     */
+    abstract initialize(config: MapConfig): Promise<MapViewControllerInterface>;
+    /**
+     * Get the current controller instance
+     */
+    getController(): MapViewControllerInterface | null;
+    /**
+     * Check if the provider is initialized
+     */
+    isInitialized(): boolean;
+    /**
+     * Clean up resources
+     */
+    abstract destroy(): void;
+}
+/**
+ * Map provider types
+ */
+declare enum MapProviderType {
+    GOOGLE_MAPS = "google-maps",
+    MAPLIBRE = "maplibre",
+    MAPBOX = "mapbox",
+    HERE = "here",
+    ARCGIS = "arcgis"
+}
+
+type OnMapLoadedHandler<TState> = (state: TState) => void;
+type OnMapEventHandler = (point: GeoPoint) => void;
+type OnCameraMoveHandler = (camera: MapCameraPosition) => void;
+/**
+ * Common props that every map-view component must accept.
+ * Extend this interface in SDK-specific packages to add platform-specific props
+ * (e.g. apiKey for Google Maps, style URL for MapLibre).
+ */
+interface MapViewBaseProps<TState extends MapViewStateInterface<MapDesignTypeInterface<unknown>>> {
+    state: TState;
+    onMapLoaded?: OnMapLoadedHandler<TState>;
+    onMapClick?: OnMapEventHandler;
+    onMapLongClick?: OnMapEventHandler;
+    onCameraMoveStart?: OnCameraMoveHandler;
+    onCameraMove?: OnCameraMoveHandler;
+    onCameraMoveEnd?: OnCameraMoveHandler;
+    className?: string;
+    /**
+     * カメラの可動範囲（パン範囲・ズーム上下限）を制限する。
+     *
+     * android-sdk の各 *MapView コンポーザブルが受け取る `cameraRestriction` 引数に対応する。
+     * 個別の `restrictBounds` / `minZoom` / `maxZoom` prop も引き続き受け付けるが、
+     * そちらはマップ生成時にしか反映されない。実行時に変更したい場合はこちらを使う。
+     */
+    cameraRestriction?: CameraRestriction | null;
+    /**
+     * 地図の見た目。デザイン名を選ぶ代わりにアプリが直接述べるときに渡す。
+     *
+     * ベクタースタイルは**ベースマップそのもの**なので、重ねるのではなく
+     * 「これが地図だ」と言う。`@mapconductor/vectorstyle` が作る。下で何が
+     * 起きるかはバックエンド次第で、アプリは知らなくてよい。
+     *
+     * **android-sdk と ios-sdk ではこの引数名は `style`。** JS だけ違うのは
+     * `style` が React/React Native では要素自身の見た目を指す名前として
+     * 予約同然だから。RN の `MapViewBaseProps` は実際に `style` を
+     * コンテナのスタイルとして使っており、そこを奪うと React を書く人全員が
+     * 踏む。web と RN で名前を割るほうが悪いので、JS 側は両方 `mapStyle`。
+     */
+    mapStyle?: MapViewStyle | null;
+    /** スタイルが言ってきたこと。渡さなければ console に出る。 */
+    onStyleDiagnostics?: (diagnostics: readonly string[]) => void;
+}
+/**
+ * Abstract base for map-view implementations.
+ *
+ * Mirrors Android's MapViewBase and enforces the three-step initialization
+ * contract that every new map SDK module must provide:
+ *   1. sdkInitialize  — load the SDK (e.g. inject a script tag)
+ *   2. createHolder   — wrap the native map in a MapViewHolder
+ *   3. createController — wrap the holder in a map view controller
+ *
+ * Android equivalent: MapViewBase.kt (sdkInitialize / holderProvider / controllerProvider)
+ * iOS equivalent:     Each view's Coordinator.bind() in MapConductorCore
+ */
+declare abstract class MapViewBase<TState extends MapViewStateInterface<MapDesignTypeInterface<unknown>>, THolder extends MapViewHolder<unknown, unknown>, TController extends MapViewControllerInterface> {
+    /** Load the underlying map SDK. Return false to abort initialization. */
+    protected abstract sdkInitialize(): Promise<boolean>;
+    /** Build the SDK-specific config from the view state (camera position, design type, etc.). */
+    protected abstract buildConfig(state: TState, container: HTMLElement): MapConfig;
+    /** Create a holder that wraps the native map view instance. */
+    protected abstract createHolder(container: HTMLElement): Promise<THolder>;
+    /** Create the controller that exposes the MapConductor API. */
+    protected abstract createController(holder: THolder): Promise<TController>;
+}
+
+type OnMapInitializedHandler = () => void;
+/**
+ * Core controller interface that all map SDK modules must implement.
+ * Mirrors Android MapViewControllerInterface / iOS MapViewControllerProtocol.
+ */
+interface MapViewControllerInterface {
+    readonly holder: MapViewHolder<unknown, unknown>;
+    clearOverlays(): Promise<void>;
+    setCameraMoveStartListener(listener: OnCameraMoveHandler | null): void;
+    setCameraMoveListener(listener: OnCameraMoveHandler | null): void;
+    setCameraMoveEndListener(listener: OnCameraMoveHandler | null): void;
+    setMapClickListener(listener: OnMapEventHandler | null): void;
+    setMapLongClickListener(listener: OnMapEventHandler | null): void;
+    setMapInitializedListener(listener: OnMapInitializedHandler | null): void;
+    moveCamera(position: MapCameraPosition): Promise<boolean>;
+    /**
+     * カメラをアニメーションで移動する。
+     *
+     * 引数は android-sdk の `animateCamera(position, duration: Long)` に揃えてある。
+     * 以前は `CameraOptions` を受けていたが、実際に読まれていたのは `duration` だけで、
+     * `easing` はどのプロバイダも見ておらず、`paddings` は `padding` の別名として
+     * フォールバックされるだけだった。
+     *
+     * 戻り値が `Promise` なのは Kotlin の `Unit` / Swift の `Void` に対する TS 側の
+     * 言い方の違いで、`clearOverlays()` が `suspend fun` に対して `Promise<void>` なのと同じ。
+     */
+    animateCamera(position: MapCameraPosition, durationMillis: number): Promise<boolean>;
+    /**
+     * Applies the gesture flags to the underlying map engine.
+     *
+     * Optional the same way Android's `applyUISettings` has an empty default body:
+     * a provider that has not been wired up yet simply leaves the map as it is.
+     */
+    applyUISettings?(settings: MapUISettings): void;
+    /**
+     * カメラの可動範囲（パン範囲・ズーム上下限）を制限する。null または空の
+     * `CameraRestriction` で制限解除。
+     *
+     * ネイティブに範囲制限 API を持つプロバイダは直接適用し、持たないプロバイダは
+     * `BaseMapViewController.cameraRestrictionCorrection()` によるクランプで実現する。
+     * ズームは統一ズーム（Google 準拠）で指定し、各プロバイダが自身の体系へ変換する。
+     *
+     * `applyUISettings` と同じく optional: 未対応のプロバイダはマップをそのままにする。
+     */
+    setCameraRestriction?(restriction: CameraRestriction | null): void;
+    /**
+     * オーバーレイコントローラを登録する。登録先にはカメラ変更が伝播し、`destroy()` で
+     * 一括破棄される。`BaseMapViewController` が実装を提供する。
+     */
+    registerOverlayController?(controller: OverlayControllerLike): void;
+    /** 登録を解除する。`BaseMapViewController` が実装を提供する。 */
+    unregisterOverlayController?(controller: OverlayControllerLike): void;
+    /**
+     * 範囲が収まるようにカメラを合わせる。
+     * 引数は android-sdk の `fitBounds(bounds, padding: Int)` に揃えてある。
+     */
+    fitBounds(bounds: GeoRectBounds, padding: number): Promise<boolean>;
+    destroy(): void;
+}
 
 interface MapViewStateInterface<ActualMapDesignType extends MapDesignTypeInterface<unknown>> {
     readonly id: string;
@@ -1210,6 +1677,306 @@ declare const BLANK_MAP_STYLE: {
 declare const BLANK_MAP_STYLE_URL: string;
 
 /**
+ * A map that can draw a MapLibre style itself.
+ *
+ * MapLibre, Mapbox and MapTiler are vector renderers already: handing them a
+ * style is cheaper than rasterising it in a worker and feeding the result back
+ * as PNG tiles, which is what a backend that only takes raster (Google Maps,
+ * Leaflet, ArcGIS, Cesium...) has to be given. A provider that can take the
+ * style directly registers this under {@link VectorStyleSupportKey}; a layer
+ * that has a style to show looks the key up and, if it is there, skips the
+ * rasteriser altogether.
+ *
+ * The style *becomes the basemap*: on every provider that can do this, the
+ * style is the map, so showing one replaces the design the state names and
+ * clearing it puts that design back. A style drawn this way is not an overlay
+ * -- it has no opacity, and nothing of the previous basemap shows through it.
+ * Anything that needs the style on top of another basemap goes through the
+ * raster path.
+ *
+ * android-sdk-core and ios-sdk-core carry the same capability. There the
+ * style is a URL served by the local tile server; in the browser the map
+ * takes the parsed object directly, which is what `style` may be.
+ */
+interface VectorStyleSupport {
+    /**
+     * Draws `style` -- a `style.json` URL or the parsed object -- as the map's
+     * basemap. `attributionRules` are the credits the style's sources ask for,
+     * carried by the design so the map's attribution overlay shows them for as
+     * long as the style is up.
+     */
+    showStyle(style: string | object, attributionRules?: readonly AttributionRule[]): void;
+    /**
+     * Restores the design that was showing before {@link showStyle}, unless
+     * the app has since chosen another one, in which case that choice is left
+     * alone.
+     */
+    clearStyle(): void;
+    /**
+     * Where the style the map is drawing came from, when that is knowable.
+     *
+     * This is what lets a rule set adjust *whatever is showing* rather than
+     * a style the app had to name: the document has to be read before a rule
+     * can be matched against its layers, and only the provider knows where
+     * it came from.
+     *
+     * Undefined when it is not a URL anything can fetch — a provider's own
+     * named design, a style that needs a key this does not have. A caller
+     * that wanted it says so and leaves the map alone rather than showing
+     * something unstyled.
+     */
+    readonly currentStyleUrl?: string;
+}
+/**
+ * {@link VectorStyleSupport} の登録キー。
+ *
+ * 宣言しないプロバイダは「スタイルは受け取れない」。ベクタータイル層はその場合
+ * ラスタータイルに描いて渡す。
+ */
+declare const VectorStyleSupportKey: MapServiceKey<VectorStyleSupport>;
+/**
+ * What identifies a style: its URL, or a digest of its content.
+ *
+ * The design a style is shown as is keyed by this. A map only re-reads a style
+ * whose key changed, so a changed style must change the key -- and a remount
+ * with the same style must not.
+ */
+declare function vectorStyleKey(style: string | object): string;
+/**
+ * {@link VectorStyleSupport} for a provider whose design type can carry a style.
+ *
+ * The MapLibre-based providers differ only in how a style is wrapped into
+ * their design type, which is what `designFor` supplies; the remember-and-
+ * restore dance is the same for all of them and lives here once. The "still
+ * ours" check on {@link clearStyle} is what keeps this from fighting an app
+ * that switched designs while the style was up: a layer unmounting must not
+ * undo a choice the app made after it.
+ *
+ * {@link clearStyle} takes effect a moment later rather than at once, and a
+ * {@link showStyle} of the same style in between cancels it. A view that
+ * rebuilds on a design change remounts the layer that asked for the style
+ * *by the change it caused* -- React's strict-mode double effects do the same
+ * -- and clearing on that unmount would restore the old design, which would
+ * rebuild again, without end. Waiting a beat lets the remount cancel it.
+ */
+declare class VectorStyleAsDesign<D extends MapDesignTypeInterface<string>> implements VectorStyleSupport {
+    private readonly state;
+    private readonly designFor;
+    /**
+     * Where this provider's design points, when it points at a plain
+     * style document. Only some providers and only some designs do.
+     */
+    private readonly urlOf?;
+    private installed;
+    private installedKey;
+    /** Set only when the style was handed over as a URL; a parsed object has none. */
+    private installedUrl;
+    private previous;
+    private pendingClear;
+    constructor(state: MapViewStateInterface<D>, designFor: (style: string | object, key: string, attributionRules: readonly AttributionRule[]) => D, 
+    /**
+     * Where this provider's design points, when it points at a plain
+     * style document. Only some providers and only some designs do.
+     */
+    urlOf?: ((design: D) => string | undefined) | undefined);
+    /**
+     * The URL this put up, or else what the design the app chose points at.
+     *
+     * The first case is the one that matters: a style already installed here
+     * came from somewhere reachable, so a rule set asking for "whatever is
+     * showing" can fetch it too.
+     */
+    get currentStyleUrl(): string | undefined;
+    showStyle(style: string | object, attributionRules?: readonly AttributionRule[]): void;
+    clearStyle(): void;
+}
+
+/**
+ * One change to one layer of a vector style the map has already loaded.
+ *
+ * This is what lets a style be adjusted without being reloaded. Handing a
+ * map a new style document is the obvious way to change how it looks, and on
+ * every provider it is the expensive way: the renderer drops its tiles,
+ * re-reads the document, re-tessellates, and the overlays the app added have
+ * to be put back. A paint property set in place costs none of that.
+ *
+ * Mutations are produced by the vector style compiler from the same
+ * evaluation that produces the adjusted document, so the two can never
+ * disagree about what the style should look like. A provider that can take
+ * them declares {@link VectorStyleMutationSupport}.
+ *
+ * ## Why the values are JSON text
+ *
+ * A style property's value is anything the style spec allows: a string, a
+ * number, or an expression tree. `map.setPaintProperty` here wants the
+ * parsed value, MapLibre on Android wants a Gson tree, MapLibre on iOS an
+ * `NSExpression` -- no shared typed representation saves anyone a
+ * conversion. Text is the one form all three start from, and it is what
+ * crossed the wasm boundary anyway.
+ *
+ * `"null"` means the property had no value, which is also how a renderer is
+ * told to go back to the spec default.
+ *
+ * android-sdk-core and ios-sdk-core carry the same type. A discriminated
+ * union here against a sealed class and an enum there: the same shape in
+ * each language's own grammar.
+ */
+type StyleMutation = {
+    readonly op: 'setPaint';
+    readonly layerId: string;
+    readonly key: string;
+    readonly value: string;
+    readonly previous: string;
+} | {
+    readonly op: 'setLayout';
+    readonly layerId: string;
+    readonly key: string;
+    readonly value: string;
+    readonly previous: string;
+} | {
+    readonly op: 'setFilter';
+    readonly layerId: string;
+    readonly value: string;
+    readonly previous: string;
+} | {
+    readonly op: 'setZoomRange';
+    readonly layerId: string;
+    readonly minZoom: number | null;
+    readonly maxZoom: number | null;
+    readonly previousMinZoom: number | null;
+    readonly previousMaxZoom: number | null;
+}
+/**
+ * Adds a layer the style did not have.
+ *
+ * Used for one thing: a background under a style that has none, so that
+ * "everything else muted" looks the same whether the style is drawn by
+ * the map or rasterised into tiles over another basemap. Without it the
+ * raster path leaves the gaps transparent and the two disagree.
+ */
+ | {
+    readonly op: 'addLayer';
+    /**
+     * The new layer's id, carried rather than read back out of
+     * `layer`: the compiler knew it, every reader needs it, and three
+     * JSON parses of the same object to recover it are three chances
+     * to get it wrong.
+     */
+    readonly layerId: string;
+    readonly layer: string;
+    readonly beforeId: string | null;
+} | {
+    readonly op: 'removeLayer';
+    readonly layerId: string;
+};
+/** The layer a mutation acts on, or undefined for one that names no layer. */
+declare function styleMutationLayerId(mutation: StyleMutation): string;
+/**
+ * What a mutation occupies, for working out which of two sets of mutations
+ * replace each other. Two mutations with the same target are the same change
+ * with different values.
+ */
+declare function styleMutationTarget(mutation: StyleMutation): string;
+/**
+ * What a mutation changes, named the way the style spec names it.
+ *
+ * For telling an app *what* a renderer would not do. The layer is the wrong
+ * thing to name on its own: when a backend has no property for a spec key,
+ * the same key fails on every layer that uses it, so a list of layers is
+ * hundreds of names for one cause while the key is the cause.
+ */
+declare function styleMutationProperty(mutation: StyleMutation): string;
+/** The mutation that puts back what was there, or null when there is nothing to put back. */
+declare function reverseStyleMutation(mutation: StyleMutation): StyleMutation | null;
+/**
+ * Reads the compiler's `mutations` array.
+ *
+ * An entry this version does not know is skipped rather than fatal: the
+ * array is produced by the wasm this package shipped with, so an unknown op
+ * means the two went out of step, and dropping one change is better than
+ * losing every change.
+ */
+declare function parseStyleMutations(json: string): StyleMutation[];
+
+/**
+ * A map that can be told to change a loaded style in place.
+ *
+ * Separate from {@link VectorStyleSupport}, which is about making a style
+ * *be* the basemap. This one is about changing the one that is already up,
+ * without the reload that would otherwise cost every tile on screen and
+ * every overlay the app added. A provider declares it under
+ * {@link VectorStyleMutationSupportKey}.
+ *
+ * Not every provider can take every change: MapLibre on iOS exposes its
+ * paint properties as typed expressions rather than by name, so a raw
+ * style-spec key it has no mapping for cannot be set. That is why
+ * {@link apply} answers with what it could not do instead of returning
+ * nothing -- a caller that silently assumed success would show a map that is
+ * half adjusted and say nothing about it.
+ *
+ * android-sdk-core and ios-sdk-core carry the same capability.
+ */
+interface VectorStyleMutationSupport {
+    /**
+     * Applies `mutations` to the live style, replacing any set applied
+     * before: anything the previous set changed and this one does not is put
+     * back the way it was.
+     *
+     * @returns the mutations that could not be applied, empty when all were.
+     */
+    apply(mutations: readonly StyleMutation[]): StyleMutation[];
+    /** Puts back everything {@link apply} changed. */
+    clear(): void;
+}
+/**
+ * {@link VectorStyleMutationSupport} の登録キー。
+ *
+ * 宣言しないプロバイダは「生きているスタイルは触れない」。スタイル調整は
+ * その場合、文書を差し替えるか（地図が読み直す）、ラスター経路で描き直す。
+ */
+declare const VectorStyleMutationSupportKey: MapServiceKey<VectorStyleMutationSupport>;
+/**
+ * The bookkeeping every provider's {@link VectorStyleMutationSupport} needs,
+ * so no provider has to get it right twice.
+ *
+ * Two things are easy to miss and both show up as "the adjustment worked,
+ * and then stopped":
+ *
+ * - **Replacing a set has to undo what it drops.** Moving a slider sends a
+ *   whole new set each time. A property the new set no longer mentions must
+ *   go back to the value the style gave it — and only the mutation knows
+ *   that value, because by now the renderer's own idea of it is the one this
+ *   put there.
+ * - **A style load wipes everything.** The app switching basemap, the
+ *   provider reloading, a design change: whatever the reason, the renderer
+ *   comes back with the document's own values and nothing this applied. The
+ *   provider calls {@link onStyleLoaded} and the whole set goes on again.
+ */
+declare class StyleMutationStore implements VectorStyleMutationSupport {
+    private readonly applyNow;
+    private current;
+    /**
+     * @param applyNow puts mutations on the live style and returns the ones
+     *   it could not.
+     */
+    constructor(applyNow: (mutations: readonly StyleMutation[]) => StyleMutation[]);
+    apply(mutations: readonly StyleMutation[]): StyleMutation[];
+    clear(): void;
+    /**
+     * Re-applies everything after the map has loaded a style.
+     *
+     * The provider calls this from whatever it has that fires on a style
+     * being ready (`map.on('styledata')` and friends). Without it an
+     * adjustment survives only until the next design change, which is the
+     * kind of bug that is found weeks later by someone switching basemap
+     * with a slider open.
+     */
+    onStyleLoaded(): void;
+    /** What is applied right now. For tests and diagnostics. */
+    get applied(): readonly StyleMutation[];
+}
+
+/**
  * Marker animation types
  */
 declare enum MarkerAnimation {
@@ -1444,285 +2211,57 @@ interface CreateMarkerStateParams {
 declare function createMarkerState(params: CreateMarkerStateParams): MarkerState;
 declare const fingerPrintEquals: (left: MarkerFingerPrint, right: MarkerFingerPrint) => boolean;
 
-interface CircleFingerPrint {
+interface PolylineFingerPrint {
     id: number;
-    center: number;
-    radiusMeters: number;
-    clickable: number;
-    geodesic: number;
     strokeColor: number;
     strokeWidth: number;
-    fillColor: number;
+    geodesic: number;
     zIndex: number;
+    points: number;
     extra: number;
 }
-interface CircleEvent {
-    state: CircleState;
+interface PolylineEvent {
+    state: PolylineState;
     clicked: GeoPoint;
 }
-type OnCircleEventHandler = (event: CircleEvent) => void;
-interface CircleState {
+type OnPolylineEventHandler = (event: PolylineEvent) => void;
+interface PolylineState {
     readonly id: string;
-    center: GeoPoint;
-    radiusMeters: number;
-    geodesic: boolean;
-    clickable: boolean;
+    points: GeoPoint[];
     strokeColor: string;
     strokeWidth: number;
-    fillColor: string;
+    geodesic: boolean;
+    zIndex: number;
     extra: Serializable | null;
-    zIndex: number | null;
-    onClick: OnCircleEventHandler | null;
-    fingerPrint(): CircleFingerPrint;
-    copy(opts?: CircleStateCopyParams): CircleState;
+    onClick: OnPolylineEventHandler | null;
+    fingerPrint(): PolylineFingerPrint;
+    copy(opts?: PolylineStateCopyParams): PolylineState;
     equals(other: unknown): boolean;
     hashCode(): number;
     asObservable(): {
-        subscribe: (fn: (fp: CircleFingerPrint) => void) => () => void;
+        subscribe: (fn: (fp: PolylineFingerPrint) => void) => () => void;
     };
 }
-interface CircleStateCopyParams {
-    center?: GeoPoint;
-    radiusMeters?: number;
-    geodesic?: boolean;
-    clickable?: boolean;
+interface PolylineStateCopyParams {
+    points?: GeoPoint[];
+    id?: string | null;
     strokeColor?: string;
     strokeWidth?: number;
-    fillColor?: string;
-    extra?: Serializable | null;
-    zIndex?: number | null;
-    onClick?: OnCircleEventHandler | null;
-    id?: string | null;
-}
-declare function createCircleState(params: {
-    center: GeoPoint;
-    radiusMeters: number;
     geodesic?: boolean;
-    clickable?: boolean;
+    zIndex?: number;
+    extra?: Serializable | null;
+    onClick?: OnPolylineEventHandler | null;
+}
+declare function createPolylineState(params: {
+    points: GeoPoint[];
+    id?: string | null;
     strokeColor?: string;
     strokeWidth?: number;
-    fillColor?: string;
+    geodesic?: boolean;
+    zIndex?: number;
     extra?: Serializable | null;
-    zIndex?: number | null;
-    onClick?: OnCircleEventHandler | null;
-    id?: string | null;
-}): CircleState;
-
-interface CircleEntity<ActualCircle> {
-    circle: ActualCircle;
-    readonly state: CircleState;
-    readonly fingerPrint: CircleFingerPrint;
-}
-declare const createCircleEntity: <ActualCircle>(params: {
-    circle: ActualCircle;
-    state: CircleState;
-}) => CircleEntity<ActualCircle>;
-
-interface CircleAddParams {
-    readonly state: CircleState;
-}
-interface CircleChangeParams<ActualCircle> {
-    readonly current: CircleEntity<ActualCircle>;
-    readonly prev: CircleEntity<ActualCircle>;
-}
-interface CircleOverlayRenderer<ActualCircle> {
-    onAdd(data: CircleAddParams[]): Promise<(ActualCircle | null)[]>;
-    onChange(data: CircleChangeParams<ActualCircle>[]): Promise<(ActualCircle | null)[]>;
-    onRemove(data: CircleEntity<ActualCircle>[]): Promise<void>;
-    onPostProcess(): Promise<void>;
-}
-
-declare abstract class AbstractCircleOverlayRenderer<MapViewHolderType extends MapViewHolder<unknown, unknown>, ActualCircle> implements CircleOverlayRenderer<ActualCircle> {
-    readonly holder: MapViewHolderType;
-    constructor(holder: MapViewHolderType);
-    abstract removeCircle(entity: CircleEntity<ActualCircle>): Promise<void>;
-    abstract createCircle(state: CircleState): Promise<ActualCircle | null>;
-    abstract updateCircleProperties(params: {
-        circle: ActualCircle;
-        current: CircleEntity<ActualCircle>;
-        prev: CircleEntity<ActualCircle>;
-    }): Promise<ActualCircle | null>;
-    onAdd(data: CircleAddParams[]): Promise<(ActualCircle | null)[]>;
-    onChange(data: CircleChangeParams<ActualCircle>[]): Promise<(ActualCircle | null)[]>;
-    onRemove(data: CircleEntity<ActualCircle>[]): Promise<void>;
-    onPostProcess(): Promise<void>;
-}
-
-interface CircleCapable {
-    compositionCircles(data: CircleState[]): Promise<void>;
-    updateCircle(state: CircleState): Promise<void>;
-    /** @deprecated Use CircleState.onClick instead. */
-    setOnCircleClickListener(listener: OnCircleEventHandler | null): void;
-    hasCircle(state: CircleState): boolean;
-}
-
-interface CircleManagerInterface<ActualCircle> {
-    registerEntity(entity: CircleEntity<ActualCircle>): void;
-    removeEntity(id: string): CircleEntity<ActualCircle> | null;
-    getEntity(id: string): CircleEntity<ActualCircle> | null;
-    hasEntity(id: string): boolean;
-    allEntities(): CircleEntity<ActualCircle>[];
-    clear(): void;
-    find(position: GeoPoint): CircleEntity<ActualCircle> | null;
-    updateEntity(entity: CircleEntity<ActualCircle>): void;
-}
-declare class CircleManager<ActualCircle> implements CircleManagerInterface<ActualCircle> {
-    private readonly entities;
-    getEntity(id: string): CircleEntity<ActualCircle> | null;
-    hasEntity(id: string): boolean;
-    removeEntity(id: string): CircleEntity<ActualCircle> | null;
-    registerEntity(entity: CircleEntity<ActualCircle>): void;
-    updateEntity(entity: CircleEntity<ActualCircle>): void;
-    allEntities(): CircleEntity<ActualCircle>[];
-    clear(): void;
-    find(position: GeoPoint): CircleEntity<ActualCircle> | null;
-}
-
-declare abstract class CircleController<ActualCircle> implements SlottedOverlayController, OverlayController<CircleState, CircleEntity<ActualCircle>, CircleEvent> {
-    readonly zIndex: number;
-    readonly circleManager: CircleManagerInterface<ActualCircle>;
-    readonly renderer: CircleOverlayRenderer<ActualCircle>;
-    clickListener: OnCircleEventHandler | null;
-    private semaphore;
-    constructor({ circleManager, renderer, clickListener, }: {
-        circleManager: CircleManagerInterface<ActualCircle>;
-        renderer: CircleOverlayRenderer<ActualCircle>;
-        clickListener?: OnCircleEventHandler | null;
-    });
-    dispatchClick(event: CircleEvent): void;
-    composition(data: CircleState[]): Promise<void>;
-    has(state: CircleState): boolean;
-    setOnClickListener(listener: OnCircleEventHandler | null): void;
-    add(data: CircleState[]): Promise<void>;
-    update(state: CircleState): Promise<void>;
-    clear(): Promise<void>;
-    find(position: GeoPoint): CircleEntity<ActualCircle> | null;
-    onCameraChanged(_mapCameraPosition: MapCameraPosition): Promise<void>;
-    destroy(): void;
-    readonly kind: OverlayKind;
-    hasId(id: string): boolean;
-    compositionAny(data: unknown[]): Promise<void>;
-    updateAny(state: unknown): Promise<void>;
-    setClickListenerAny(listener: unknown): void;
-    resolveTap(position: GeoPointInterface): OverlayHit | null;
-}
-
-/**
- * Per-map, per-overlay-type source of truth for overlay states.
- *
- * 変更の届け方は 3 プラットフォームで揃えてある。
- *
- * - **membership（add / remove）は debounce**。5ms の無入力窓で、イベントが来るたびに
- *   窓を延長し、件数が閾値に達したら待たずに出す。android-sdk の
- *   `debounceBatch(5ms, 100/300)`、ios-sdk の `scheduleMembership()` と同じ。
- * - **in-place 変更は sample**。1 つの state につき 1 窓 1 回、最新の値だけを配る。
- *   android-sdk の `sample(updateDebounce)`、ios-sdk の `scheduleUpdate()` と同じ。
- *
- * どちらの窓でも、コレクション自体の書き換えは同期のまま（`values()` / `get()` は常に
- * 最新）。遅らせるのは購読者・ハンドラへの通知だけ。
- */
-declare class OverlayCollector<S extends {
-    id: string;
-}> {
-    private readonly map;
-    private readonly subs;
-    private updateHandler;
-    private readonly updateSubs;
-    private batchDepth;
-    private batchDirty;
-    private pendingAdds;
-    private pendingRemoves;
-    private flushTimer;
-    private readonly pendingUpdates;
-    private updateTimer;
-    /**
-     * `<Marker>` を1つマウントするたびに1回ずつ走っていた composition を、
-     * android-sdk の OverlayCollector と同じ窓でまとめる。
-     *
-     * コレクション自体の書き換えは同期のまま（`values()` / `get()` は常に最新）で、
-     * 遅らせるのは購読者への通知だけ。`applyDiff` / `replaceAll` / `clear` は
-     * もともと1回しか通知しないバルク操作なので、android-sdk と同じくデバウンス対象外。
-     */
-    add(state: S): void;
-    remove(id: string): void;
-    /**
-     * Applies a batch of upserts and removals with a single notification.
-     * Unlike calling add()/remove() in a loop (which notifies subscribers once
-     * per call and can trigger an expensive downstream re-render each time),
-     * subscribers see the final state exactly once.
-     */
-    applyDiff(upserts: S[], removeIds: Iterable<string>): void;
-    /**
-     * Applies a group of collection and state mutations as one composition.
-     *
-     * `<Markers states={...}>` は毎レンダーで「既存 state をその場で書き換える」と
-     * 「新しい id を追加し、消えた id を削除する」を同時にやる。素で走らせると:
-     *
-     * 1. `syncMarkerState` の代入1つごとに state の subject が発火 → `updateHandler` が
-     *    1件ずつ呼ばれる（1000件なら最大1000回）
-     * 2. そのあと `applyDiff` の membership 通知が1回
-     *
-     * つまり **membership より先に in-place 更新が飛ぶ**。まだコレクションに入っていない
-     * マーカーの更新を受け取ることになり、マーカークラスタリングのように「membership を
-     * 見てから作り直す」consumer が壊れる。
-     *
-     * batchChanges の間は:
-     * - in-place 変更は `updateHandler` を呼ばず `batchDirty` を立てるだけ（サンプリング窓
-     *   にも積まない）
-     * - `notify()` も同じく `batchDirty` を立てるだけ
-     * - 抜けるときに dirty なら `notify()` を **1回だけ**
-     *
-     * 結果、N件の in-place 更新 + membership 変化が購読者への通知1回に畳まれる。捨てられた
-     * in-place 更新は失われない: 購読者は通知を受けて `values()` から最新の state を読み直す。
-     */
-    batchChanges(action: () => void): void;
-    replaceAll(states: S[]): void;
-    clear(): void;
-    /**
-     * Mirrors Android's OverlayCollector.setUpdateHandler.
-     * When set, subscribes to each state's asObservable() and calls handler
-     * only when the fingerprint actually changes (distinctUntilChanged) — never
-     * for the value the subscription replays on registration. Membership
-     * changes are delivered to subscribe() listeners, not to this handler.
-     */
-    setUpdateHandler(handler: ((state: S) => void) | null): void;
-    values(): S[];
-    get(id: string): S | undefined;
-    subscribe(fn: (map: ReadonlyMap<string, S>) => void): () => void;
-    private startUpdateSub;
-    /**
-     * 変更を 5ms 窓にためて、窓の終わりに id ごと最新の1件だけ配る。
-     *
-     * debounce ではなく **sample**（最初の変更で窓を開き、以降は窓を延長しない）なのが
-     * 重要で、android-sdk が `sample(updateDebounce)` を使うのと同じ理由。ドラッグは
-     * 同じ state を毎フレーム書き換えるので、debounce だと指が止まるまで窓が延び続けて
-     * 1回も配信されない。sample なら変更が続いている間も1窓に1回は届く。
-     *
-     * 以前はここが素通しで、`position` を1回書き換えるたびにプロバイダの
-     * `update(state)`（＝ネイティブ SDK の再描画）が走っていた。
-     */
-    private scheduleUpdate;
-    private cancelPendingUpdates;
-    private stopUpdateSub;
-    private notify;
-    private notifyDebounced;
-    private cancelFlushTimer;
-    private notifySubscribers;
-}
-
-/**
- * Bridge between the React-side CircleState collector and a CircleCapable map controller.
- * Mirrors `CircleOverlay.kt` in the Android SDK.
- *
- * Register an instance of this class with `MapOverlayRegistry` so that whenever
- * the circle collection changes, the controller's `compositionCircles()` is called.
- */
-declare class CircleOverlay implements MapOverlayInterface<CircleState> {
-    private readonly collector;
-    constructor(collector: OverlayCollector<CircleState>);
-    subscribe(fn: (data: ReadonlyMap<string, CircleState>) => void): () => void;
-    render(data: ReadonlyMap<string, CircleState>, controller: MapViewControllerInterface): Promise<void>;
-}
+    onClick?: OnPolylineEventHandler | null;
+}): PolylineState;
 
 declare abstract class AbstractMarkerOverlayRenderer<MapViewHolderType extends MapViewHolder<unknown, unknown>, ActualMarker> implements MarkerOverlayRenderer<ActualMarker> {
     abstract onAdd(data: AddParams[]): Promise<(ActualMarker | null)[]>;
@@ -2387,6 +2926,109 @@ declare function ingestMarkers<ActualMarker>(params: {
 }): Promise<MarkerIngestionResult<ActualMarker>>;
 
 /**
+ * Per-map, per-overlay-type source of truth for overlay states.
+ *
+ * 変更の届け方は 3 プラットフォームで揃えてある。
+ *
+ * - **membership（add / remove）は debounce**。5ms の無入力窓で、イベントが来るたびに
+ *   窓を延長し、件数が閾値に達したら待たずに出す。android-sdk の
+ *   `debounceBatch(5ms, 100/300)`、ios-sdk の `scheduleMembership()` と同じ。
+ * - **in-place 変更は sample**。1 つの state につき 1 窓 1 回、最新の値だけを配る。
+ *   android-sdk の `sample(updateDebounce)`、ios-sdk の `scheduleUpdate()` と同じ。
+ *
+ * どちらの窓でも、コレクション自体の書き換えは同期のまま（`values()` / `get()` は常に
+ * 最新）。遅らせるのは購読者・ハンドラへの通知だけ。
+ */
+declare class OverlayCollector<S extends {
+    id: string;
+}> {
+    private readonly map;
+    private readonly subs;
+    private updateHandler;
+    private readonly updateSubs;
+    private batchDepth;
+    private batchDirty;
+    private pendingAdds;
+    private pendingRemoves;
+    private flushTimer;
+    private readonly pendingUpdates;
+    private updateTimer;
+    /**
+     * `<Marker>` を1つマウントするたびに1回ずつ走っていた composition を、
+     * android-sdk の OverlayCollector と同じ窓でまとめる。
+     *
+     * コレクション自体の書き換えは同期のまま（`values()` / `get()` は常に最新）で、
+     * 遅らせるのは購読者への通知だけ。`applyDiff` / `replaceAll` / `clear` は
+     * もともと1回しか通知しないバルク操作なので、android-sdk と同じくデバウンス対象外。
+     */
+    add(state: S): void;
+    remove(id: string): void;
+    /**
+     * Applies a batch of upserts and removals with a single notification.
+     * Unlike calling add()/remove() in a loop (which notifies subscribers once
+     * per call and can trigger an expensive downstream re-render each time),
+     * subscribers see the final state exactly once.
+     */
+    applyDiff(upserts: S[], removeIds: Iterable<string>): void;
+    /**
+     * Applies a group of collection and state mutations as one composition.
+     *
+     * `<Markers states={...}>` は毎レンダーで「既存 state をその場で書き換える」と
+     * 「新しい id を追加し、消えた id を削除する」を同時にやる。素で走らせると:
+     *
+     * 1. `syncMarkerState` の代入1つごとに state の subject が発火 → `updateHandler` が
+     *    1件ずつ呼ばれる（1000件なら最大1000回）
+     * 2. そのあと `applyDiff` の membership 通知が1回
+     *
+     * つまり **membership より先に in-place 更新が飛ぶ**。まだコレクションに入っていない
+     * マーカーの更新を受け取ることになり、マーカークラスタリングのように「membership を
+     * 見てから作り直す」consumer が壊れる。
+     *
+     * batchChanges の間は:
+     * - in-place 変更は `updateHandler` を呼ばず `batchDirty` を立てるだけ（サンプリング窓
+     *   にも積まない）
+     * - `notify()` も同じく `batchDirty` を立てるだけ
+     * - 抜けるときに dirty なら `notify()` を **1回だけ**
+     *
+     * 結果、N件の in-place 更新 + membership 変化が購読者への通知1回に畳まれる。捨てられた
+     * in-place 更新は失われない: 購読者は通知を受けて `values()` から最新の state を読み直す。
+     */
+    batchChanges(action: () => void): void;
+    replaceAll(states: S[]): void;
+    clear(): void;
+    /**
+     * Mirrors Android's OverlayCollector.setUpdateHandler.
+     * When set, subscribes to each state's asObservable() and calls handler
+     * only when the fingerprint actually changes (distinctUntilChanged) — never
+     * for the value the subscription replays on registration. Membership
+     * changes are delivered to subscribe() listeners, not to this handler.
+     */
+    setUpdateHandler(handler: ((state: S) => void) | null): void;
+    values(): S[];
+    get(id: string): S | undefined;
+    subscribe(fn: (map: ReadonlyMap<string, S>) => void): () => void;
+    private startUpdateSub;
+    /**
+     * 変更を 5ms 窓にためて、窓の終わりに id ごと最新の1件だけ配る。
+     *
+     * debounce ではなく **sample**（最初の変更で窓を開き、以降は窓を延長しない）なのが
+     * 重要で、android-sdk が `sample(updateDebounce)` を使うのと同じ理由。ドラッグは
+     * 同じ state を毎フレーム書き換えるので、debounce だと指が止まるまで窓が延び続けて
+     * 1回も配信されない。sample なら変更が続いている間も1窓に1回は届く。
+     *
+     * 以前はここが素通しで、`position` を1回書き換えるたびにプロバイダの
+     * `update(state)`（＝ネイティブ SDK の再描画）が走っていた。
+     */
+    private scheduleUpdate;
+    private cancelPendingUpdates;
+    private stopUpdateSub;
+    private notify;
+    private notifyDebounced;
+    private cancelFlushTimer;
+    private notifySubscribers;
+}
+
+/**
  * Bridge between the React-side MarkerState collector and a MarkerCapable map controller.
  * Mirrors `MarkerOverlay.kt` in the Android SDK.
  *
@@ -2700,16 +3342,6 @@ interface PreparedMarker {
     anchorY: number;
 }
 
-interface TileRequest {
-    readonly x: number;
-    readonly y: number;
-    readonly z: number;
-}
-
-interface TileProvider {
-    renderTile(request: TileRequest): Uint8Array | null | Promise<Uint8Array | null>;
-}
-
 /**
  * Canvas-based tile renderer for large marker datasets.
  *
@@ -2885,6 +3517,560 @@ declare function createPolygonState(params: {
     extra?: Serializable | null;
     onClick?: OnPolygonEventHandler | null;
 }): PolygonState;
+
+interface CircleFingerPrint {
+    id: number;
+    center: number;
+    radiusMeters: number;
+    clickable: number;
+    geodesic: number;
+    strokeColor: number;
+    strokeWidth: number;
+    fillColor: number;
+    zIndex: number;
+    extra: number;
+}
+interface CircleEvent {
+    state: CircleState;
+    clicked: GeoPoint;
+}
+type OnCircleEventHandler = (event: CircleEvent) => void;
+interface CircleState {
+    readonly id: string;
+    center: GeoPoint;
+    radiusMeters: number;
+    geodesic: boolean;
+    clickable: boolean;
+    strokeColor: string;
+    strokeWidth: number;
+    fillColor: string;
+    extra: Serializable | null;
+    zIndex: number | null;
+    onClick: OnCircleEventHandler | null;
+    fingerPrint(): CircleFingerPrint;
+    copy(opts?: CircleStateCopyParams): CircleState;
+    equals(other: unknown): boolean;
+    hashCode(): number;
+    asObservable(): {
+        subscribe: (fn: (fp: CircleFingerPrint) => void) => () => void;
+    };
+}
+interface CircleStateCopyParams {
+    center?: GeoPoint;
+    radiusMeters?: number;
+    geodesic?: boolean;
+    clickable?: boolean;
+    strokeColor?: string;
+    strokeWidth?: number;
+    fillColor?: string;
+    extra?: Serializable | null;
+    zIndex?: number | null;
+    onClick?: OnCircleEventHandler | null;
+    id?: string | null;
+}
+declare function createCircleState(params: {
+    center: GeoPoint;
+    radiusMeters: number;
+    geodesic?: boolean;
+    clickable?: boolean;
+    strokeColor?: string;
+    strokeWidth?: number;
+    fillColor?: string;
+    extra?: Serializable | null;
+    zIndex?: number | null;
+    onClick?: OnCircleEventHandler | null;
+    id?: string | null;
+}): CircleState;
+
+interface GroundImageFingerPrint {
+    id: number;
+    bounds: number;
+    imageUrl: number;
+    opacity: number;
+    tileSize: number;
+    extra: number;
+}
+interface GroundImageEvent {
+    state: GroundImageState;
+    clicked: GeoPoint | null;
+}
+type OnGroundImageEventHandler = (event: GroundImageEvent) => void;
+interface GroundImageState {
+    readonly id: string;
+    bounds: GeoRectBounds;
+    imageUrl: string;
+    opacity: number;
+    tileSize: number;
+    extra: Serializable | null;
+    onClick: OnGroundImageEventHandler | null;
+    fingerPrint(): GroundImageFingerPrint;
+    copy(opts?: GroundImageStateCopyParams): GroundImageState;
+    equals(other: unknown): boolean;
+    hashCode(): number;
+    asObservable(): {
+        subscribe: (fn: (fp: GroundImageFingerPrint) => void) => () => void;
+    };
+}
+interface GroundImageStateCopyParams {
+    bounds?: GeoRectBounds;
+    imageUrl?: string;
+    opacity?: number;
+    tileSize?: number;
+    extra?: Serializable | null;
+    onClick?: OnGroundImageEventHandler | null;
+    id?: string | null;
+}
+declare const GROUND_IMAGE_DEFAULT_TILE_SIZE = 512;
+declare function createGroundImageState(params: {
+    bounds: GeoRectBounds;
+    imageUrl: string;
+    opacity?: number;
+    tileSize?: number;
+    id?: string | null;
+    extra?: Serializable | null;
+    onClick?: OnGroundImageEventHandler | null;
+}): GroundImageState;
+
+/**
+ * Abstract base class implementing the listener-management contract of MapViewControllerInterface.
+ * Concrete SDK controllers extend this and call notify*() methods when native events fire.
+ *
+ * Mirrors Android BaseMapViewController / iOS MapViewController (base methods).
+ */
+declare abstract class BaseMapViewController {
+    protected cameraMoveStartCallback: OnCameraMoveHandler | null;
+    protected cameraMoveCallback: OnCameraMoveHandler | null;
+    protected cameraMoveEndCallback: OnCameraMoveHandler | null;
+    protected mapClickCallback: OnMapEventHandler | null;
+    protected mapLongClickCallback: OnMapEventHandler | null;
+    protected mapInitializedCallback: OnMapInitializedHandler | null;
+    private mapInitialized;
+    private mapInitializedCallbackDelivered;
+    private readonly overlayControllers;
+    /**
+     * ネイティブ SDK に直接のカメラ範囲制限 API を持たないプロバイダ（HERE/ArcGIS/MapKit/Cesium）が
+     * クランプ方式で使う制限設定。ネイティブ API を持つプロバイダ（Mapbox/MapLibre/MapTiler/
+     * TomTom/Google/Leaflet/OpenLayers/Azure Maps）は `setCameraRestriction` をオーバーライドして
+     * 直接適用するため、この値は使わない。
+     */
+    private cameraRestriction;
+    setCameraRestriction(restriction: CameraRestriction | null): void;
+    protected hasCameraRestriction(): boolean;
+    /**
+     * カメラ位置が `setCameraRestriction` の制限に違反していれば補正後の位置を返す。違反が無ければ null。
+     *
+     * ズームは統一ズーム（Google 準拠）前提。範囲制限はネイティブの
+     * `setLatLngBoundsForCameraTarget` 相当（カメラ中心を矩形内へクランプ）のセマンティクスに揃える。
+     * クランプ方式のプロバイダはカメラ停止時にこれを呼び、返り値があれば `moveCamera` で再適用する。
+     * ε を用いて微小な誤差では補正しないことで、再適用 → イベント → 再補正の無限ループを防ぐ。
+     *
+     * android-sdk の `BaseMapViewController.cameraRestrictionCorrection` の移植。ε の値も同一。
+     */
+    protected cameraRestrictionCorrection(current: MapCameraPosition): MapCameraPosition | null;
+    setCameraMoveStartListener(listener: OnCameraMoveHandler | null): void;
+    setCameraMoveListener(listener: OnCameraMoveHandler | null): void;
+    setCameraMoveEndListener(listener: OnCameraMoveHandler | null): void;
+    setMapClickListener(listener: OnMapEventHandler | null): void;
+    setMapLongClickListener(listener: OnMapEventHandler | null): void;
+    setMapInitializedListener(listener: OnMapInitializedHandler | null): void;
+    /**
+     * オーバーレイコントローラを登録する。
+     *
+     * 登録したコントローラには `notifyMapCameraPosition` からカメラ変更が伝播し、
+     * `destroy()` で一括破棄される。android-sdk の
+     * `BaseMapViewController.registerOverlayController` に対応する。
+     */
+    registerOverlayController(controller: OverlayControllerLike): void;
+    /** 登録を解除する。拡張コンポーネントのアンマウント時に呼ぶ。 */
+    unregisterOverlayController(controller: OverlayControllerLike): void;
+    /**
+     * ラスターレイヤを **children の外から**載せる／外す。
+     *
+     * `compositionRasterLayers` は宣言された集合でまるごと置き換えるので、外から
+     * 足したものは次の再レンダーで消える。{@link RasterLayerController.upsert} は
+     * その掃除から id を外すので、外から載せたいものはここを通す。
+     *
+     * 呼ぶのは 2 つだけ: マーカータイリングと、ベクタースタイルを描けない
+     * バックエンドに渡す「スタイルから描いたタイル」。
+     *
+     * **プロバイダ非依存**。raster コントローラはどのプロバイダも
+     * `registerOverlayController` 済みなので、プロバイダごとの配線は要らない。
+     * android-sdk の `BaseMapViewController.mountRasterLayer` と同じ。
+     */
+    mountRasterLayer(state: RasterLayerState): void;
+    /** {@link mountRasterLayer} で載せたものを外す。無いものを渡しても何も起きない。 */
+    unmountRasterLayer(id: string): void;
+    private rasterLayerMounts;
+    private styleLoadedListeners;
+    /** スタイルが今載っているか。sticky: 聞かれる前に読み終わることがある。 */
+    private styleLoaded;
+    /**
+     * スタイル文書を読み終わるたびに `block` を呼ぶ。既に読み終わっていれば今すぐ 1 回。
+     *
+     * {@link MapViewStyle} が生きたレンダラへ入れたもの（paint プロパティ、足した
+     * レイヤ）は、レンダラが文書を読み直した時点で全部消える——アプリのベースマップ
+     * 切替、デザイン変更、プロバイダのビュー作り直し、理由は何であれ。ここが戻し場所。
+     * 1 本のリスナーではなく登録簿なのは、ミューテーションストアと設置済みスタイルの
+     * **両方**が聞く必要があるため。
+     *
+     * そういう概念を持たないプロバイダ（Google Maps、Leaflet…）は
+     * {@link notifyStyleLoaded} を呼ばない。そこに載ったスタイルはラスター化された
+     * もので、ベースマップ切替では消えない。
+     *
+     * @returns 聞くのをやめる手形。
+     */
+    addStyleLoadedListener(block: () => void): () => void;
+    /**
+     * スタイルが載り、**かつオーバーレイが戻った**時点でプロバイダが呼ぶ。
+     *
+     * 読み込み開始時ではなく、プロバイダが自分のレイヤを戻す前でもない。作り直しの
+     * 途中でパッチを当てるリスナーは、これから置き換わるものにパッチを当てることになる。
+     *
+     * android / iOS では protected。web だけ public なのは、GL 系 3 プロバイダで
+     * `styledata` を聞いているのがコントローラではなく
+     * `useVectorStyleMutationSupport`（共有フック）だから——呼ぶのは依然として
+     * 「プロバイダ側の 1 か所」で、その 1 か所がフックに寄っているだけ。
+     */
+    notifyStyleLoaded(): void;
+    /**
+     * オーバーレイの探索順。既定は {@link CANONICAL_ORDER}。
+     *
+     * 種別を持たないプロバイダ（TomTom の円とグラウンドイメージはネイティブでは
+     * どちらも Polygon）でも順序は同じでよい。判定はコアの Manager が行うので、
+     * ネイティブの実装がどうであれ結果は他プロバイダと揃う。
+     */
+    protected get overlayCascadeOrder(): readonly OverlayKind[];
+    /**
+     * マーカーのヒットテストと配送。既定は「当たらない」。
+     *
+     * マーカーだけコアが既定を持たないのは、判定に画面投影が要り、プロバイダごとに
+     * マーカーの実装方式（DOM 要素 / シンボルレイヤ / タイル）が違うため。
+     *
+     * @returns マーカーがタップを消費したら true。
+     */
+    protected dispatchMarkerTap(_position: GeoPoint): boolean;
+    /**
+     * オーバーレイ（マーカー以外）のタップを、正準順に 1 つだけ配送する。
+     *
+     * マーカーを含まないので、ネイティブのオーバーレイクリックリスナーから
+     * 呼ぶこともできる。
+     *
+     * @returns 何かに当たって配送したら true。
+     */
+    dispatchOverlayTap(position: GeoPoint): boolean;
+    /**
+     * タップの入口。marker → オーバーレイ → 地図クリックの順に 1 つだけ配送する。
+     *
+     * プロバイダは SDK のタップを地理座標に直してこれを呼ぶだけでよい。
+     *
+     * **必ずどれか 1 つだけ**が配送される。オーバーレイに当たったのに地図クリックも
+     * 飛ぶ、という二重配送を防ぐのがこの関数の役目。
+     *
+     * @returns 常に true（タップは必ずどこかで処理される）。
+     */
+    dispatchTap(position: GeoPoint): boolean;
+    /** 地図クリックをアプリへ通知する。 */
+    emitMapClick(point: GeoPoint): void;
+    /** 地図の長押しをアプリへ通知する。 */
+    emitMapLongClick(point: GeoPoint): void;
+    /**
+     * この種別の**主**コントローラ（最初に登録されたもの）。
+     *
+     * `compositionXxx` / `updateXxx` はここへ流す。クラスタリングは同じ marker 種別で
+     * 追加のコントローラを登録するが、composition の受け口は最初の 1 つでよい
+     * （追加分はクラスタリング側が自分で駆動する）。
+     */
+    protected primaryOverlayController(kind: OverlayKind): SlottedOverlayController | null;
+    /** この種別に登録されたすべてのコントローラ。`hasXxx` は「どれかが持っていれば true」。 */
+    protected overlayControllersOf(kind: OverlayKind): SlottedOverlayController[];
+    /** `kind` のいずれかのコントローラがこの id を持っているか。`hasXxx` の既定実装。 */
+    protected hasOverlay(kind: OverlayKind, id: string): boolean;
+    protected compositionOverlays(kind: OverlayKind, data: unknown[]): Promise<void>;
+    protected updateOverlay(kind: OverlayKind, state: unknown): Promise<void>;
+    protected setOverlayClickListener(kind: OverlayKind, listener: unknown): void;
+    compositionMarkers(data: MarkerState[]): Promise<void>;
+    updateMarker(state: MarkerState): Promise<void>;
+    hasMarker(state: MarkerState): boolean;
+    compositionPolylines(data: PolylineState[]): Promise<void>;
+    updatePolyline(state: PolylineState): Promise<void>;
+    hasPolyline(state: PolylineState): boolean;
+    /** @deprecated Use PolylineState.onClick instead. */
+    setOnPolylineClickListener(listener: OnPolylineEventHandler | null): void;
+    compositionPolygons(data: PolygonState[]): Promise<void>;
+    updatePolygon(state: PolygonState): Promise<void>;
+    hasPolygon(state: PolygonState): boolean;
+    /** @deprecated Use PolygonState.onClick instead. */
+    setOnPolygonClickListener(listener: OnPolygonEventHandler | null): void;
+    compositionCircles(data: CircleState[]): Promise<void>;
+    updateCircle(state: CircleState): Promise<void>;
+    hasCircle(state: CircleState): boolean;
+    /** @deprecated Use CircleState.onClick instead. */
+    setOnCircleClickListener(listener: OnCircleEventHandler | null): void;
+    compositionGroundImages(data: GroundImageState[]): Promise<void>;
+    updateGroundImage(state: GroundImageState): Promise<void>;
+    hasGroundImage(state: GroundImageState): boolean;
+    /** @deprecated Use GroundImageState.onClick instead. */
+    setOnGroundImageClickListener(listener: OnGroundImageEventHandler | null): void;
+    compositionRasterLayers(data: RasterLayerState[]): Promise<void>;
+    updateRasterLayer(state: RasterLayerState): Promise<void>;
+    hasRasterLayer(state: RasterLayerState): boolean;
+    protected notifyCameraMoveStart(camera: MapCameraPosition): void;
+    protected notifyCameraMove(camera: MapCameraPosition): void;
+    protected notifyCameraMoveEnd(camera: MapCameraPosition): void;
+    /**
+     * カメラ停止時に制限違反があれば補正位置へ移動し直す。
+     *
+     * ネイティブの範囲制限 API を持たないプロバイダ（HERE / ArcGIS / MapKit / Cesium /
+     * OpenLayers / Longdo）はこの経路で制限が効く。ネイティブ API を持つプロバイダは
+     * `setCameraRestriction` をオーバーライドして `super` を呼ばないため、
+     * ここでは何も起きない（android-sdk と同じ振り分け）。
+     *
+     * 補正したら true。ε による不感帯があるので、再適用 → moveend → 再補正 のループにはならない。
+     */
+    protected applyCameraRestrictionOnIdle(camera: MapCameraPosition): boolean;
+    protected notifyMapClick(point: GeoPoint): void;
+    protected notifyMapLongClick(point: GeoPoint): void;
+    /**
+     * マップ初期化を記録し、リスナーが揃った時点で1回だけ配送する。
+     *
+     * プロバイダのコントローラは、React 側の effect がリスナーを張り終える前に初期化を
+     * 完了させることがある（effect はマウント後に走るため）。sticky にしておくことで、
+     * その隙間で初期化完了が取りこぼされるのを防ぐ。
+     * android-sdk の `notifyMapInitialized` / `deliverMapInitializedCallbackIfReady` の移植。
+     */
+    protected notifyMapInitialized(): void;
+    private deliverMapInitializedCallbackIfReady;
+    /**
+     * カメラ変更を登録済みオーバーレイコントローラへ伝播し、続けて利用者コールバックを呼ぶ。
+     *
+     * android-sdk の `notifyMapCameraPosition` に対応する。プロバイダが個別に
+     * `Promise.all([...onCameraChanged])` を書く必要がなくなり、拡張機能
+     * （marker-clustering 等）も自前でリスナースロットを奪わずにカメラ変更を受け取れる。
+     */
+    protected notifyMapCameraPosition(camera: MapCameraPosition): Promise<void>;
+    destroy(): void;
+}
+
+/**
+ * What a map offers the style installed on it, and the bookkeeping that
+ * keeps it installed.
+ *
+ * One class for every provider. Everything it needs that differs per
+ * backend is reached through seams every provider already fills in — the
+ * service registry for what the map can do, the controller's overlay
+ * controllers for mounting tiles, the controller's style-loaded listeners
+ * for putting an adjustment back after a reload. Adding a provider needs
+ * nothing here.
+ *
+ * android-sdk's `MapViewStyleEffect` and ios-sdk's `MapViewStyleHost` do the
+ * same work; the shape differs because each framework owns its lifecycle
+ * differently.
+ */
+declare class MapViewStyleHost implements MapStyleHost {
+    readonly serviceRegistry: MapServiceRegistry;
+    private readonly controller;
+    private installation;
+    private installedKey;
+    private diagnosticsHandler;
+    /** How many updates in a row the installed style has refused. See {@link apply}. */
+    private refusedUpdates;
+    constructor(serviceRegistry: MapServiceRegistry, controller: BaseMapViewController);
+    /**
+     * Keeps `style` installed on this map.
+     *
+     * Called on every render that reaches the hook, so most calls do
+     * nothing. Three things have to line up and none of them is the render:
+     *
+     * - **A style whose key did not change must be left alone.** A style
+     *   built inline in JSX is a new object on every render — which is
+     *   exactly what a colour picker produces — so comparing objects would
+     *   reinstall on every unrelated state change.
+     * - **A changed style is usually an adjustment, not a new style.**
+     *   Disposing and installing again hands the map a document and reloads
+     *   it, which is the cost this whole design exists to avoid. What is
+     *   installed is offered the new one first and only replaced if it
+     *   refuses.
+     * - **Null means take it off.** An app that stops passing a style gets
+     *   the map it had before, not the one the style left behind.
+     */
+    apply(style: MapViewStyle | null | undefined, onDiagnostics?: ((diagnostics: readonly string[]) => void) | null): void;
+    /** Takes the style off. The hook calls this when the view goes. */
+    dispose(): void;
+    get tileServer(): LocalTileServer;
+    get vectorStyleUrl(): string | undefined;
+    onStyleLoaded(block: () => void): MapStyleInstallation;
+    upsertRaster(state: RasterLayerState): void;
+    removeRaster(id: string): void;
+    report(diagnostics: readonly string[]): void;
+}
+
+/**
+ * The part of a GL-JS map that a style mutation needs.
+ *
+ * Structural on purpose. MapLibre GL JS, Mapbox GL JS and the MapTiler SDK
+ * (which wraps MapLibre) all expose these under the same names, so one
+ * applier serves three providers — and core stays free of all three, which
+ * it has to be: every package in the SDK depends on core and none of them
+ * should pull a renderer in with it.
+ */
+interface StylePatchableMap {
+    /**
+     * Whether the map has a style up to be changed.
+     *
+     * **False is not failure, and must not be reported as one.** A map with
+     * no style loaded yet answers `undefined` to every `getLayer`, so
+     * without this every mutation came back as one the map "cannot" make —
+     * which is how an app got told "N adjustments were not applied" about a
+     * map that was merely still loading, and, under the reloading policy,
+     * had the adjusted document handed to it for no reason. Nothing is lost
+     * by waiting: the store puts the whole set back when the style loads.
+     *
+     * Optional because it is read structurally off whatever map was handed
+     * in; all three GL-JS-family SDKs have it.
+     *
+     * `boolean | void` because MapLibre answers nothing at all before the
+     * style object exists — which is precisely the case this is here for,
+     * so the result is read as falsy rather than compared to `false`.
+     */
+    isStyleLoaded?(): boolean | void;
+    getLayer(id: string): unknown;
+    setPaintProperty(layerId: string, name: string, value: unknown): void;
+    setLayoutProperty(layerId: string, name: string, value: unknown): void;
+    setFilter(layerId: string, filter?: unknown): void;
+    setLayerZoomRange(layerId: string, minzoom: number, maxzoom: number): void;
+    addLayer(layer: unknown, beforeId?: string): void;
+    removeLayer(id: string): void;
+}
+/**
+ * Applies style mutations to a live GL-JS map.
+ *
+ * The body of a provider's {@link VectorStyleMutationSupport}: a provider
+ * wires this into a `StyleMutationStore` and registers that, and the three
+ * MapLibre-family providers then behave identically by construction.
+ *
+ * @returns the mutations it could not apply. A layer the loaded style does
+ *   not have, or a property the renderer rejected: the caller is told
+ *   rather than left to assume the map looks the way the rules asked.
+ *   Nothing is thrown — one bad property must not cost the other three
+ *   hundred. Empty while the map has no style up, because then there is
+ *   nothing it could not do — only something it has not done yet.
+ */
+declare function applyStyleMutations(map: StylePatchableMap, mutations: readonly StyleMutation[]): StyleMutation[];
+/** For a message naming what would not apply. */
+declare function describeStyleMutations(mutations: readonly StyleMutation[]): string;
+
+interface CircleEntity<ActualCircle> {
+    circle: ActualCircle;
+    readonly state: CircleState;
+    readonly fingerPrint: CircleFingerPrint;
+}
+declare const createCircleEntity: <ActualCircle>(params: {
+    circle: ActualCircle;
+    state: CircleState;
+}) => CircleEntity<ActualCircle>;
+
+interface CircleAddParams {
+    readonly state: CircleState;
+}
+interface CircleChangeParams<ActualCircle> {
+    readonly current: CircleEntity<ActualCircle>;
+    readonly prev: CircleEntity<ActualCircle>;
+}
+interface CircleOverlayRenderer<ActualCircle> {
+    onAdd(data: CircleAddParams[]): Promise<(ActualCircle | null)[]>;
+    onChange(data: CircleChangeParams<ActualCircle>[]): Promise<(ActualCircle | null)[]>;
+    onRemove(data: CircleEntity<ActualCircle>[]): Promise<void>;
+    onPostProcess(): Promise<void>;
+}
+
+declare abstract class AbstractCircleOverlayRenderer<MapViewHolderType extends MapViewHolder<unknown, unknown>, ActualCircle> implements CircleOverlayRenderer<ActualCircle> {
+    readonly holder: MapViewHolderType;
+    constructor(holder: MapViewHolderType);
+    abstract removeCircle(entity: CircleEntity<ActualCircle>): Promise<void>;
+    abstract createCircle(state: CircleState): Promise<ActualCircle | null>;
+    abstract updateCircleProperties(params: {
+        circle: ActualCircle;
+        current: CircleEntity<ActualCircle>;
+        prev: CircleEntity<ActualCircle>;
+    }): Promise<ActualCircle | null>;
+    onAdd(data: CircleAddParams[]): Promise<(ActualCircle | null)[]>;
+    onChange(data: CircleChangeParams<ActualCircle>[]): Promise<(ActualCircle | null)[]>;
+    onRemove(data: CircleEntity<ActualCircle>[]): Promise<void>;
+    onPostProcess(): Promise<void>;
+}
+
+interface CircleCapable {
+    compositionCircles(data: CircleState[]): Promise<void>;
+    updateCircle(state: CircleState): Promise<void>;
+    /** @deprecated Use CircleState.onClick instead. */
+    setOnCircleClickListener(listener: OnCircleEventHandler | null): void;
+    hasCircle(state: CircleState): boolean;
+}
+
+interface CircleManagerInterface<ActualCircle> {
+    registerEntity(entity: CircleEntity<ActualCircle>): void;
+    removeEntity(id: string): CircleEntity<ActualCircle> | null;
+    getEntity(id: string): CircleEntity<ActualCircle> | null;
+    hasEntity(id: string): boolean;
+    allEntities(): CircleEntity<ActualCircle>[];
+    clear(): void;
+    find(position: GeoPoint): CircleEntity<ActualCircle> | null;
+    updateEntity(entity: CircleEntity<ActualCircle>): void;
+}
+declare class CircleManager<ActualCircle> implements CircleManagerInterface<ActualCircle> {
+    private readonly entities;
+    getEntity(id: string): CircleEntity<ActualCircle> | null;
+    hasEntity(id: string): boolean;
+    removeEntity(id: string): CircleEntity<ActualCircle> | null;
+    registerEntity(entity: CircleEntity<ActualCircle>): void;
+    updateEntity(entity: CircleEntity<ActualCircle>): void;
+    allEntities(): CircleEntity<ActualCircle>[];
+    clear(): void;
+    find(position: GeoPoint): CircleEntity<ActualCircle> | null;
+}
+
+declare abstract class CircleController<ActualCircle> implements SlottedOverlayController, OverlayController<CircleState, CircleEntity<ActualCircle>, CircleEvent> {
+    readonly zIndex: number;
+    readonly circleManager: CircleManagerInterface<ActualCircle>;
+    readonly renderer: CircleOverlayRenderer<ActualCircle>;
+    clickListener: OnCircleEventHandler | null;
+    private semaphore;
+    constructor({ circleManager, renderer, clickListener, }: {
+        circleManager: CircleManagerInterface<ActualCircle>;
+        renderer: CircleOverlayRenderer<ActualCircle>;
+        clickListener?: OnCircleEventHandler | null;
+    });
+    dispatchClick(event: CircleEvent): void;
+    composition(data: CircleState[]): Promise<void>;
+    has(state: CircleState): boolean;
+    setOnClickListener(listener: OnCircleEventHandler | null): void;
+    add(data: CircleState[]): Promise<void>;
+    update(state: CircleState): Promise<void>;
+    clear(): Promise<void>;
+    find(position: GeoPoint): CircleEntity<ActualCircle> | null;
+    onCameraChanged(_mapCameraPosition: MapCameraPosition): Promise<void>;
+    destroy(): void;
+    readonly kind: OverlayKind;
+    hasId(id: string): boolean;
+    compositionAny(data: unknown[]): Promise<void>;
+    updateAny(state: unknown): Promise<void>;
+    setClickListenerAny(listener: unknown): void;
+    resolveTap(position: GeoPointInterface): OverlayHit | null;
+}
+
+/**
+ * Bridge between the React-side CircleState collector and a CircleCapable map controller.
+ * Mirrors `CircleOverlay.kt` in the Android SDK.
+ *
+ * Register an instance of this class with `MapOverlayRegistry` so that whenever
+ * the circle collection changes, the controller's `compositionCircles()` is called.
+ */
+declare class CircleOverlay implements MapOverlayInterface<CircleState> {
+    private readonly collector;
+    constructor(collector: OverlayCollector<CircleState>);
+    subscribe(fn: (data: ReadonlyMap<string, CircleState>) => void): () => void;
+    render(data: ReadonlyMap<string, CircleState>, controller: MapViewControllerInterface): Promise<void>;
+}
 
 interface PolygonEntity<ActualPolygon> {
     readonly polygon: ActualPolygon;
@@ -3085,58 +4271,6 @@ declare function unionHolesInPlace(state: PolygonState): PolygonState;
  */
 declare function resolveHoles(state: PolygonState): PolygonState;
 
-interface PolylineFingerPrint {
-    id: number;
-    strokeColor: number;
-    strokeWidth: number;
-    geodesic: number;
-    zIndex: number;
-    points: number;
-    extra: number;
-}
-interface PolylineEvent {
-    state: PolylineState;
-    clicked: GeoPoint;
-}
-type OnPolylineEventHandler = (event: PolylineEvent) => void;
-interface PolylineState {
-    readonly id: string;
-    points: GeoPoint[];
-    strokeColor: string;
-    strokeWidth: number;
-    geodesic: boolean;
-    zIndex: number;
-    extra: Serializable | null;
-    onClick: OnPolylineEventHandler | null;
-    fingerPrint(): PolylineFingerPrint;
-    copy(opts?: PolylineStateCopyParams): PolylineState;
-    equals(other: unknown): boolean;
-    hashCode(): number;
-    asObservable(): {
-        subscribe: (fn: (fp: PolylineFingerPrint) => void) => () => void;
-    };
-}
-interface PolylineStateCopyParams {
-    points?: GeoPoint[];
-    id?: string | null;
-    strokeColor?: string;
-    strokeWidth?: number;
-    geodesic?: boolean;
-    zIndex?: number;
-    extra?: Serializable | null;
-    onClick?: OnPolylineEventHandler | null;
-}
-declare function createPolylineState(params: {
-    points: GeoPoint[];
-    id?: string | null;
-    strokeColor?: string;
-    strokeWidth?: number;
-    geodesic?: boolean;
-    zIndex?: number;
-    extra?: Serializable | null;
-    onClick?: OnPolylineEventHandler | null;
-}): PolylineState;
-
 interface PolylineEntity<ActualPolyline> {
     readonly polyline: ActualPolyline;
     readonly state: PolylineState;
@@ -3262,55 +4396,6 @@ declare class PolylineOverlay implements MapOverlayInterface<PolylineState> {
     render(data: ReadonlyMap<string, PolylineState>, controller: MapViewControllerInterface): Promise<void>;
 }
 
-interface GroundImageFingerPrint {
-    id: number;
-    bounds: number;
-    imageUrl: number;
-    opacity: number;
-    tileSize: number;
-    extra: number;
-}
-interface GroundImageEvent {
-    state: GroundImageState;
-    clicked: GeoPoint | null;
-}
-type OnGroundImageEventHandler = (event: GroundImageEvent) => void;
-interface GroundImageState {
-    readonly id: string;
-    bounds: GeoRectBounds;
-    imageUrl: string;
-    opacity: number;
-    tileSize: number;
-    extra: Serializable | null;
-    onClick: OnGroundImageEventHandler | null;
-    fingerPrint(): GroundImageFingerPrint;
-    copy(opts?: GroundImageStateCopyParams): GroundImageState;
-    equals(other: unknown): boolean;
-    hashCode(): number;
-    asObservable(): {
-        subscribe: (fn: (fp: GroundImageFingerPrint) => void) => () => void;
-    };
-}
-interface GroundImageStateCopyParams {
-    bounds?: GeoRectBounds;
-    imageUrl?: string;
-    opacity?: number;
-    tileSize?: number;
-    extra?: Serializable | null;
-    onClick?: OnGroundImageEventHandler | null;
-    id?: string | null;
-}
-declare const GROUND_IMAGE_DEFAULT_TILE_SIZE = 512;
-declare function createGroundImageState(params: {
-    bounds: GeoRectBounds;
-    imageUrl: string;
-    opacity?: number;
-    tileSize?: number;
-    id?: string | null;
-    extra?: Serializable | null;
-    onClick?: OnGroundImageEventHandler | null;
-}): GroundImageState;
-
 interface GroundImageEntity<ActualGroundImage> {
     readonly groundImage: ActualGroundImage;
     readonly state: GroundImageState;
@@ -3423,103 +4508,6 @@ declare class GroundImageOverlay implements MapOverlayInterface<GroundImageState
     subscribe(fn: (data: ReadonlyMap<string, GroundImageState>) => void): () => void;
     render(data: ReadonlyMap<string, GroundImageState>, controller: MapViewControllerInterface): Promise<void>;
 }
-
-declare enum TileScheme {
-    XYZ = "XYZ",
-    TMS = "TMS"
-}
-type RasterAttributionRule = AttributionRule;
-type RasterLayerSource = {
-    type: "UrlTemplate";
-    template: string;
-    tileSize?: number;
-    minZoom?: number | null;
-    maxZoom?: number | null;
-    attributionRules?: AttributionRule[];
-    scheme?: TileScheme;
-} | {
-    type: "TileJson";
-    url: string;
-} | {
-    type: "ArcGisService";
-    serviceUrl: string;
-};
-declare const RasterLayerSource: {
-    DEFAULT_TILE_SIZE: number;
-    UrlTemplate(params: {
-        template: string;
-        tileSize?: number;
-        minZoom?: number | null;
-        maxZoom?: number | null;
-        attributionRules?: AttributionRule[];
-        scheme?: TileScheme;
-    }): RasterLayerSource;
-    TileJson(url: string): RasterLayerSource;
-    ArcGisService(serviceUrl: string): RasterLayerSource;
-};
-declare function resolveRasterAttributions(sources: RasterLayerSource[], camera: MapCameraPosition): string[];
-
-/**
- * 明示指定が無いときの `userAgent`。
- *
- * 「利用者が指定した値かどうか」を判定するために公開している。空ではないので、
- * 既定のままの状態まで「指定あり」として扱うと、ラスタレイヤを 1 枚置いただけで
- * 非対応の警告が出てしまう。android-sdk の `RasterLayerState.DEFAULT_USER_AGENT` /
- * ios-sdk の `RasterLayerState.defaultUserAgent` と同じ値・同じ用途。
- */
-declare const DEFAULT_RASTER_LAYER_USER_AGENT = "MapConductor/RasterLayerAgent(https://mapconductor.com)";
-interface RasterLayerFingerPrint {
-    id: number;
-    source: number;
-    opacity: number;
-    visible: number;
-    zIndex: number;
-    userAgent: number;
-    debug: number;
-    /** `extraHeaders` のハッシュ。中身が extraHeaders しか無いので名前を実態に合わせている。 */
-    extraHeaders: number;
-}
-interface RasterLayerEvent {
-    state: RasterLayerState;
-}
-type OnRasterLayerEventHandler = (event: RasterLayerEvent) => void;
-interface RasterLayerState {
-    readonly id: string;
-    source: RasterLayerSource;
-    opacity: number;
-    visible: boolean;
-    zIndex: number;
-    userAgent: string;
-    debug: boolean;
-    extraHeaders: Record<string, string> | null;
-    fingerPrint(): RasterLayerFingerPrint;
-    copy(opts?: RasterLayerStateCopyParams): RasterLayerState;
-    equals(other: unknown): boolean;
-    hashCode(): number;
-    asObservable(): {
-        subscribe: (fn: (fp: RasterLayerFingerPrint) => void) => () => void;
-    };
-}
-interface RasterLayerStateCopyParams {
-    source?: RasterLayerSource;
-    opacity?: number;
-    visible?: boolean;
-    zIndex?: number;
-    userAgent?: string;
-    debug?: boolean;
-    extraHeaders?: Record<string, string> | null;
-    id?: string | null;
-}
-declare function createRasterLayerState(params: {
-    source: RasterLayerSource;
-    opacity?: number;
-    visible?: boolean;
-    zIndex?: number;
-    userAgent?: string;
-    debug?: boolean;
-    extraHeaders?: Record<string, string> | null;
-    id?: string | null;
-}): RasterLayerState;
 
 /** 「この宛先へのリクエストにはこのヘッダを載せる」という 1 件の規則。 */
 interface RasterHeaderRule {
@@ -3772,175 +4760,6 @@ declare class RasterLayerOverlay implements MapOverlayInterface<RasterLayerState
     render(data: ReadonlyMap<string, RasterLayerState>, controller: MapViewControllerInterface): Promise<void>;
 }
 
-/**
- * What a tile request resolved to.
- *
- * The distinction that matters is **empty** versus **failed**, because a map
- * library remembers them differently. A spot with nothing on it is a real
- * answer — a transparent picture, cacheable, replaced when the data version
- * moves the tile URL. A render that could not be completed right now is not:
- * answering it with a transparent picture paints a hole and caches it, and the
- * library never asks again, so the neighbouring tiles' overhang is cut off at
- * its edge.
- *
- * ios-sdk's `LocalTileServer.TileOutcome` and android-sdk-core's
- * `LocalTileServer.TileOutcome` are the same four cases.
- */
-type TileOutcome = {
-    readonly kind: 'tile';
-    readonly bytes: Uint8Array;
-}
-/** Nothing to draw here. Answer with a transparent tile. */
- | {
-    readonly kind: 'empty';
-}
-/** The provider could not draw it now. The caller should retry, not cache. */
- | {
-    readonly kind: 'failed';
-}
-/** Nothing of that name: an unknown route, or a path that is not a tile. */
- | {
-    readonly kind: 'notFound';
-};
-/**
- * A 1x1 transparent PNG, which scales to whatever the map draws it into.
- *
- * Shared so the several places that answer "empty" all answer with the same
- * bytes; the copies that used to live in each provider said the same thing in
- * seven different arrays.
- */
-declare const TRANSPARENT_TILE_PNG: Uint8Array;
-/**
- * Thrown by the helpers that hand tiles straight to a map library, where the
- * only way to say "this one failed, ask again" is to reject.
- */
-declare class TileRenderFailedError extends Error {
-    constructor(routeId: string, request: {
-        x: number;
-        y: number;
-        z: number;
-    });
-}
-
-/**
- * Browser-side tile server implemented via a Service Worker interceptor.
- *
- * The Service Worker intercepts requests to `/__tiles/{routeId}/{tileSize}/{z}/{x}/{y}.png`
- * and renders registered SW-side tile data with OffscreenCanvas when possible.
- * If SW-side rendering is unavailable, it forwards requests back to the registered
- * TileProvider on the main thread.
- *
- * For CPU-intensive tile rendering, attach a Web Worker via `attachRenderer()` so that
- * `renderTile()` executes off the main thread. The worker should call
- * `createTileWorkerHandler()` from `@mapconductor/js-sdk-core`.
- */
-declare class LocalTileServer {
-    readonly baseUrl: string;
-    private readonly providers;
-    private static instance;
-    private static swRegistered;
-    private workerRenderer;
-    private readonly pendingRequests;
-    private nextRequestId;
-    private constructor();
-    static startServer(): LocalTileServer;
-    /**
-     * Attach a Web Worker that handles tile rendering via `createTileWorkerHandler()`.
-     * When attached, `handleFetch()` delegates `renderTile()` to the worker thread
-     * instead of running it on the main thread.
-     */
-    attachRenderer(worker: Worker): void;
-    /** Detach the renderer worker and fall back to main-thread rendering. */
-    detachRenderer(): void;
-    register(routeId: string, provider: TileProvider): void;
-    unregister(routeId: string): void;
-    /**
-     * Send provider data to the SW and await acknowledgment before returning.
-     * This guarantees the SW can render tiles with OffscreenCanvas before the
-     * caller adds the raster source (which triggers tile requests immediately).
-     *
-     * Falls back (resolves) after 500 ms if the SW does not respond — in that
-     * case the postMessage fallback path in the SW will handle tile requests
-     * using the provider already stored in `this.providers`.
-     */
-    sendSWRegisterAndWait(routeId: string, data: {
-        items: {
-            lat: number;
-            lng: number;
-            iconIndex: number;
-        }[];
-        icons: {
-            bitmap: ImageBitmap;
-            anchor: {
-                x: number;
-                y: number;
-            };
-            size: {
-                width: number;
-                height: number;
-            };
-        }[];
-        zoomScales: number[];
-        extraIconScale: number;
-    }): Promise<void>;
-    private postToSW;
-    urlTemplate({ routeId, tileSize, cacheKey, }: {
-        routeId: string;
-        tileSize: number;
-        cacheKey?: string;
-    }): string;
-    /**
-     * The bytes of one tile, or null when there are none.
-     *
-     * Null is two different things — nothing to draw, and a render that
-     * failed — and callers that can tell a map library "ask again" should use
-     * {@link handleFetchOutcome} or {@link fetchTileOrThrow} instead.
-     */
-    handleFetch(routeId: string, request: TileRequest): Promise<Uint8Array | null>;
-    /**
-     * One tile, said precisely: drawn, empty, failed, or no such route.
-     *
-     * A provider says "empty" by returning null and "failed" by throwing. The
-     * two must not be answered the same way: a transparent tile is cacheable
-     * and correct for an empty spot, and a lie for a failure — it paints a
-     * hole the library keeps, with the neighbouring tiles' overhang cut off at
-     * its edge.
-     */
-    handleFetchOutcome(routeId: string, request: TileRequest): Promise<TileOutcome>;
-    /**
-     * Tile bytes for a map library that has no way to express "empty": an
-     * empty spot comes back as a transparent tile, and a failure throws, which
-     * every library reads as a load it may retry.
-     */
-    fetchTileOrThrow(routeId: string, request: TileRequest): Promise<Uint8Array>;
-    handleFetchDataUrl(routeId: string, request: TileRequest): string | null;
-    private dispatchToWorker;
-    /**
-     * Register a Service Worker that intercepts `/__tiles/` requests and routes them
-     * to `handleFetch()` on the main thread.
-     *
-     * Call once at app startup, before the map is rendered. The page URL template
-     * returned by `urlTemplate()` will then be resolvable by the browser.
-     *
-     * @param swPath Path to the tile service worker script (default: `/tile-sw.js`)
-     */
-    startServiceWorker(swPath?: string): void;
-    hasProvider(routeId: string): boolean;
-    /**
-     * Returns true when Service Workers are available in the current context.
-     * SW requires a secure origin (HTTPS or localhost). On plain HTTP non-localhost
-     * origins (e.g. a local IP like 192.168.x.x), SW is unavailable and tile
-     * rendering must use a provider-specific fallback to avoid unresolvable tile URLs.
-     */
-    static isServiceWorkerSupported(): boolean;
-    /**
-     * Resolves when the Service Worker is controlling the current page.
-     * Returns immediately if the SW already controls the page.
-     * Use this to avoid requesting tiles before the SW intercept is active.
-     */
-    waitForController(): Promise<void>;
-}
-
 declare const TileServerRegistry: {
     private_server: LocalTileServer | null;
     get(): LocalTileServer;
@@ -4158,177 +4977,6 @@ declare abstract class AbstractMarkerController<ActualMarker> implements Slotted
      * （`BaseMapViewController.dispatchMarkerTap`）で扱う。ここでは当たらない。
      */
     resolveTap(_position: GeoPointInterface): OverlayHit | null;
-}
-
-/**
- * Abstract base class implementing the listener-management contract of MapViewControllerInterface.
- * Concrete SDK controllers extend this and call notify*() methods when native events fire.
- *
- * Mirrors Android BaseMapViewController / iOS MapViewController (base methods).
- */
-declare abstract class BaseMapViewController {
-    protected cameraMoveStartCallback: OnCameraMoveHandler | null;
-    protected cameraMoveCallback: OnCameraMoveHandler | null;
-    protected cameraMoveEndCallback: OnCameraMoveHandler | null;
-    protected mapClickCallback: OnMapEventHandler | null;
-    protected mapLongClickCallback: OnMapEventHandler | null;
-    protected mapInitializedCallback: OnMapInitializedHandler | null;
-    private mapInitialized;
-    private mapInitializedCallbackDelivered;
-    private readonly overlayControllers;
-    /**
-     * ネイティブ SDK に直接のカメラ範囲制限 API を持たないプロバイダ（HERE/ArcGIS/MapKit/Cesium）が
-     * クランプ方式で使う制限設定。ネイティブ API を持つプロバイダ（Mapbox/MapLibre/MapTiler/
-     * TomTom/Google/Leaflet/OpenLayers/Azure Maps）は `setCameraRestriction` をオーバーライドして
-     * 直接適用するため、この値は使わない。
-     */
-    private cameraRestriction;
-    setCameraRestriction(restriction: CameraRestriction | null): void;
-    protected hasCameraRestriction(): boolean;
-    /**
-     * カメラ位置が `setCameraRestriction` の制限に違反していれば補正後の位置を返す。違反が無ければ null。
-     *
-     * ズームは統一ズーム（Google 準拠）前提。範囲制限はネイティブの
-     * `setLatLngBoundsForCameraTarget` 相当（カメラ中心を矩形内へクランプ）のセマンティクスに揃える。
-     * クランプ方式のプロバイダはカメラ停止時にこれを呼び、返り値があれば `moveCamera` で再適用する。
-     * ε を用いて微小な誤差では補正しないことで、再適用 → イベント → 再補正の無限ループを防ぐ。
-     *
-     * android-sdk の `BaseMapViewController.cameraRestrictionCorrection` の移植。ε の値も同一。
-     */
-    protected cameraRestrictionCorrection(current: MapCameraPosition): MapCameraPosition | null;
-    setCameraMoveStartListener(listener: OnCameraMoveHandler | null): void;
-    setCameraMoveListener(listener: OnCameraMoveHandler | null): void;
-    setCameraMoveEndListener(listener: OnCameraMoveHandler | null): void;
-    setMapClickListener(listener: OnMapEventHandler | null): void;
-    setMapLongClickListener(listener: OnMapEventHandler | null): void;
-    setMapInitializedListener(listener: OnMapInitializedHandler | null): void;
-    /**
-     * オーバーレイコントローラを登録する。
-     *
-     * 登録したコントローラには `notifyMapCameraPosition` からカメラ変更が伝播し、
-     * `destroy()` で一括破棄される。android-sdk の
-     * `BaseMapViewController.registerOverlayController` に対応する。
-     */
-    registerOverlayController(controller: OverlayControllerLike): void;
-    /** 登録を解除する。拡張コンポーネントのアンマウント時に呼ぶ。 */
-    unregisterOverlayController(controller: OverlayControllerLike): void;
-    /**
-     * オーバーレイの探索順。既定は {@link CANONICAL_ORDER}。
-     *
-     * 種別を持たないプロバイダ（TomTom の円とグラウンドイメージはネイティブでは
-     * どちらも Polygon）でも順序は同じでよい。判定はコアの Manager が行うので、
-     * ネイティブの実装がどうであれ結果は他プロバイダと揃う。
-     */
-    protected get overlayCascadeOrder(): readonly OverlayKind[];
-    /**
-     * マーカーのヒットテストと配送。既定は「当たらない」。
-     *
-     * マーカーだけコアが既定を持たないのは、判定に画面投影が要り、プロバイダごとに
-     * マーカーの実装方式（DOM 要素 / シンボルレイヤ / タイル）が違うため。
-     *
-     * @returns マーカーがタップを消費したら true。
-     */
-    protected dispatchMarkerTap(_position: GeoPoint): boolean;
-    /**
-     * オーバーレイ（マーカー以外）のタップを、正準順に 1 つだけ配送する。
-     *
-     * マーカーを含まないので、ネイティブのオーバーレイクリックリスナーから
-     * 呼ぶこともできる。
-     *
-     * @returns 何かに当たって配送したら true。
-     */
-    dispatchOverlayTap(position: GeoPoint): boolean;
-    /**
-     * タップの入口。marker → オーバーレイ → 地図クリックの順に 1 つだけ配送する。
-     *
-     * プロバイダは SDK のタップを地理座標に直してこれを呼ぶだけでよい。
-     *
-     * **必ずどれか 1 つだけ**が配送される。オーバーレイに当たったのに地図クリックも
-     * 飛ぶ、という二重配送を防ぐのがこの関数の役目。
-     *
-     * @returns 常に true（タップは必ずどこかで処理される）。
-     */
-    dispatchTap(position: GeoPoint): boolean;
-    /** 地図クリックをアプリへ通知する。 */
-    emitMapClick(point: GeoPoint): void;
-    /** 地図の長押しをアプリへ通知する。 */
-    emitMapLongClick(point: GeoPoint): void;
-    /**
-     * この種別の**主**コントローラ（最初に登録されたもの）。
-     *
-     * `compositionXxx` / `updateXxx` はここへ流す。クラスタリングは同じ marker 種別で
-     * 追加のコントローラを登録するが、composition の受け口は最初の 1 つでよい
-     * （追加分はクラスタリング側が自分で駆動する）。
-     */
-    protected primaryOverlayController(kind: OverlayKind): SlottedOverlayController | null;
-    /** この種別に登録されたすべてのコントローラ。`hasXxx` は「どれかが持っていれば true」。 */
-    protected overlayControllersOf(kind: OverlayKind): SlottedOverlayController[];
-    /** `kind` のいずれかのコントローラがこの id を持っているか。`hasXxx` の既定実装。 */
-    protected hasOverlay(kind: OverlayKind, id: string): boolean;
-    protected compositionOverlays(kind: OverlayKind, data: unknown[]): Promise<void>;
-    protected updateOverlay(kind: OverlayKind, state: unknown): Promise<void>;
-    protected setOverlayClickListener(kind: OverlayKind, listener: unknown): void;
-    compositionMarkers(data: MarkerState[]): Promise<void>;
-    updateMarker(state: MarkerState): Promise<void>;
-    hasMarker(state: MarkerState): boolean;
-    compositionPolylines(data: PolylineState[]): Promise<void>;
-    updatePolyline(state: PolylineState): Promise<void>;
-    hasPolyline(state: PolylineState): boolean;
-    /** @deprecated Use PolylineState.onClick instead. */
-    setOnPolylineClickListener(listener: OnPolylineEventHandler | null): void;
-    compositionPolygons(data: PolygonState[]): Promise<void>;
-    updatePolygon(state: PolygonState): Promise<void>;
-    hasPolygon(state: PolygonState): boolean;
-    /** @deprecated Use PolygonState.onClick instead. */
-    setOnPolygonClickListener(listener: OnPolygonEventHandler | null): void;
-    compositionCircles(data: CircleState[]): Promise<void>;
-    updateCircle(state: CircleState): Promise<void>;
-    hasCircle(state: CircleState): boolean;
-    /** @deprecated Use CircleState.onClick instead. */
-    setOnCircleClickListener(listener: OnCircleEventHandler | null): void;
-    compositionGroundImages(data: GroundImageState[]): Promise<void>;
-    updateGroundImage(state: GroundImageState): Promise<void>;
-    hasGroundImage(state: GroundImageState): boolean;
-    /** @deprecated Use GroundImageState.onClick instead. */
-    setOnGroundImageClickListener(listener: OnGroundImageEventHandler | null): void;
-    compositionRasterLayers(data: RasterLayerState[]): Promise<void>;
-    updateRasterLayer(state: RasterLayerState): Promise<void>;
-    hasRasterLayer(state: RasterLayerState): boolean;
-    protected notifyCameraMoveStart(camera: MapCameraPosition): void;
-    protected notifyCameraMove(camera: MapCameraPosition): void;
-    protected notifyCameraMoveEnd(camera: MapCameraPosition): void;
-    /**
-     * カメラ停止時に制限違反があれば補正位置へ移動し直す。
-     *
-     * ネイティブの範囲制限 API を持たないプロバイダ（HERE / ArcGIS / MapKit / Cesium /
-     * OpenLayers / Longdo）はこの経路で制限が効く。ネイティブ API を持つプロバイダは
-     * `setCameraRestriction` をオーバーライドして `super` を呼ばないため、
-     * ここでは何も起きない（android-sdk と同じ振り分け）。
-     *
-     * 補正したら true。ε による不感帯があるので、再適用 → moveend → 再補正 のループにはならない。
-     */
-    protected applyCameraRestrictionOnIdle(camera: MapCameraPosition): boolean;
-    protected notifyMapClick(point: GeoPoint): void;
-    protected notifyMapLongClick(point: GeoPoint): void;
-    /**
-     * マップ初期化を記録し、リスナーが揃った時点で1回だけ配送する。
-     *
-     * プロバイダのコントローラは、React 側の effect がリスナーを張り終える前に初期化を
-     * 完了させることがある（effect はマウント後に走るため）。sticky にしておくことで、
-     * その隙間で初期化完了が取りこぼされるのを防ぐ。
-     * android-sdk の `notifyMapInitialized` / `deliverMapInitializedCallbackIfReady` の移植。
-     */
-    protected notifyMapInitialized(): void;
-    private deliverMapInitializedCallbackIfReady;
-    /**
-     * カメラ変更を登録済みオーバーレイコントローラへ伝播し、続けて利用者コールバックを呼ぶ。
-     *
-     * android-sdk の `notifyMapCameraPosition` に対応する。プロバイダが個別に
-     * `Promise.all([...onCameraChanged])` を書く必要がなくなり、拡張機能
-     * （marker-clustering 等）も自前でリスナースロットを奪わずにカメラ変更を受け取れる。
-     */
-    protected notifyMapCameraPosition(camera: MapCameraPosition): Promise<void>;
-    destroy(): void;
 }
 
 interface ChangeParamsInterface<EntityType> {
@@ -4713,4 +5361,4 @@ declare function segmentIntersectsRegion({ start, end, region, geodesic, }: {
 
 declare function splitByMeridian(points: GeoPoint[], geodesic: boolean): GeoPoint[][];
 
-export { AbstractCircleOverlayRenderer, AbstractGroundImageOverlayRenderer, AbstractMarkerController, AbstractMarkerIcon, AbstractMarkerOverlayRenderer, AbstractMarkerRenderingStrategy, AbstractPolygonOverlayRenderer, AbstractPolylineOverlayRenderer, AbstractViewportStrategy, AbstractZoomAltitudeConverter, type AddParams, type AnyMarkerRenderingSupport, type AttributionRule, BLANK_MAP_STYLE, BLANK_MAP_STYLE_URL, BaseMapViewController, type BitmapIcon, CANONICAL_ORDER, type CameraOptions, type CameraRestriction, type ChangeParams, type ChangeParamsInterface, type CircleAddParams, type CircleCapable, type CircleChangeParams, CircleController, type CircleEntity, type CircleEvent, type CircleFingerPrint, CircleManager, type CircleManagerInterface, type CircleOptions, CircleOverlay, type CircleOverlayRenderer, type CircleState, type CircleStateCopyParams, CollectorMarkerOverlayRenderer, ColorDefaultIcon, type CreateMarkerStateParams, DEFAULT_CIRCLE_SEGMENTS, DEFAULT_RASTER_LAYER_USER_AGENT, DefaultMarkerEventController, DefaultMarkerIcon, type DefaultMarkerIconOptions, Direction6, Direction6Delta, DriverConformanceViolation, Earth, EmptyMapServiceRegistry, type FitBoundsCameraResult, GROUND_IMAGE_DEFAULT_TILE_SIZE, GeoGridIndex, GeoPoint, type GeoPointInterface, type GeoRectBounds, type GlGestureHandler, type GlGestureHandlers, type GlMarkerDragMap, type GlTouchZoomRotateHandler, type GroundImageAddParams, type GroundImageCapable, type GroundImageChangeParams, GroundImageController, type GroundImageEntity, type GroundImageEvent, type GroundImageFingerPrint, GroundImageManager, type GroundImageManagerInterface, GroundImageOverlay, type GroundImageOverlayRenderer, type GroundImageState, type GroundImageStateCopyParams, type GroundOverlayOptions, GroundScaleZoomAltitudeConverter, type HexCell, HexCellRegistry, type HexCellWithDistance, type HexCoord, type HexGeocell, HexGeocellImpl, type HexGeocell as HexGeocellInterface, IconImageCache, type IdentifiedHexCell, ImageDefaultIcon, type ImageDefaultIconOptions, ImageIcon, type ImageIconOptions, type ImageSource, type InfoBubbleEntry, InitState, KDTree, type KDTreeStats, LocalTileServer, MAP_CAPABILITIES, MARKER_HIT_RADIUS_MOUSE_PX, MARKER_HIT_RADIUS_TOUCH_PX, MARKER_RENDER_BATCH_SIZE, MapCameraPosition, type MapCameraPositionCopyParams, type MapCameraPositionInterface, type MapCapability, MapCapabilityStatus, type MapConfig, type MapDesignTypeInterface, type MapDiagnosticLevel, MapDiagnostics, type MapDiagnosticsSink, MapDriverConformance, type MapGesture, type MapOverlayInterface, MapOverlayRegistry, MapPaddings, type MapPaddingsInterface, MapProjection, MapProvider, MapProviderType, type MapServiceKey, type MapServiceRegistration, MapServiceRegistrations, type MapServiceRegistry, MapUISettings, MapUISettingsDiagnostics, MapViewBase, type MapViewBaseProps, type MapViewControllerInterface, type MapViewHolder, MapViewHolderBase, MapViewState, type MapViewStateInterface, type MapViewStateInternal, type MapViewStateOptions, MarkerAnimation, type MarkerAnimationOverlayEntry, type MarkerAnimationOverlayHost, type MarkerCapable, type MarkerEntity, type MarkerEventController, type MarkerEventHost, type MarkerFingerPrint, MarkerGrid, type MarkerIcon, MarkerIconSize, type MarkerIngestionResult, MarkerManager, type MarkerManagerStats, type MarkerOptions, MarkerOverlay, type MarkerOverlayRenderer, type MarkerRenderingStrategy, type MarkerRenderingSupport, MarkerRenderingSupportKey, type MarkerState, type MarkerStateCopyParams, MarkerTileRenderer, MarkerTilingOptions, MutableMapServiceRegistry, Mutex, type NativeMapExtensionCapable, type NativeMapExtensionDescriptor, type NativeMapExtensionEvent, type NativeMapExtensionEventHandler, NoCameraRestriction, OVERLAY_KINDS, type Offset, type OnCameraMoveHandler, type OnCircleEventHandler, type OnGroundImageEventHandler, type OnMapEventHandler, type OnMapInitializedHandler, type OnMapLoadedHandler, type OnMarkerEventHandler, type OnPolygonEventHandler, type OnPolylineEventHandler, type OnRasterLayerEventHandler, OverlayCollector, type OverlayController, type OverlayControllerLike, OverlayGeoJson, type OverlayHit, OverlayHitResolver, type OverlayKind, type OverlayRendererInterface, Planar, type PolygonAddParams, type PolygonCapable, type PolygonChangeParams, PolygonController, type PolygonEntity, type PolygonEvent, type PolygonFingerPrint, PolygonManager, type PolygonManagerInterface, type PolygonOptions, PolygonOverlay, type PolygonOverlayRenderer, type PolygonRings, type PolygonState, type PolygonStateCopyParams, type PolylineAddParams, type PolylineCapable, type PolylineChangeParams, PolylineController, type PolylineEntity, type PolylineEvent, type PolylineFingerPrint, type PolylineHitResult, PolylineManager, type PolylineManagerInterface, type PolylineOptions, PolylineOverlay, type PolylineOverlayRenderer, type PolylineState, type PolylineStateCopyParams, type PreparedMarker, type Projection, type RasterAttributionRule, type RasterHeaderRule, RasterHeaderRuleSet, type RasterHeaderSupport, type RasterLayerAddParams, type RasterLayerCapable, type RasterLayerChangeParams, RasterLayerController, type RasterLayerEntity, type RasterLayerEvent, type RasterLayerFingerPrint, RasterLayerManager, type RasterLayerManagerInterface, RasterLayerOverlay, type RasterLayerOverlayRenderer, RasterLayerSource, type RasterLayerState, type RasterLayerStateCopyParams, type RasterRequestParameters, type RasterTilePreference, RasterTilePreferenceKey, type RasterTransformRequest, type RegistryStats, type ScreenOffsetResult, ScreenProjectionRequirement, type Serializable, Settings, type SlottedOverlayController, type SpatialIndex, type SpatialIndexConfig, Spherical, StrategyMarkerController, TRANSPARENT_TILE_PNG, type TileOutcome, type TileProvider, TileRenderFailedError, type TileRenderRequest, type TileRenderResponse, type TileRequest, TileScheme, TileServerRegistry, type ViewportSize, type VisibleRegion, WEB_MERCATOR_MAX_EXTENT_METERS, WEB_MERCATOR_MAX_LATITUDE, WGS84, WGS84Geodesic, WebMercator, WebMercatorZoomAltitudeConverter, applyGlMapUISettings, bearingFromNativeHeading, bearingFromNativeRotation, bounceInterpolation, bridgeHolesIntoSingleRing, bridgeHolesIntoSingleRingWrapAware, buildPolygonRings, buildPolylineSegments, buildUnwrappedPolygonRings, buildUnwrappedPolylinePath, buildVisibleRegion, calculateMetersPerPixel, capabilityOfGesture, circleToRing, closeRing, closestPointOnSegment, combineHash, computeArea$1 as computeArea, computeDistanceBetween$1 as computeDistanceBetween, computeFitBoundsCameraPosition, computeHeading$1 as computeHeading, computeLength$1 as computeLength, computeOffset$1 as computeOffset, computeOffsetOrigin$1 as computeOffsetOrigin, computeSignedArea$1 as computeSignedArea, computeDistanceBetween as computeWGS84DistanceBetween, createCircleEntity, createCircleState, createCollectorMarkerRenderingSupport, createDefaultIcon, createFingerPrint, createGeoPoint, createGeoRectBounds, createGroundImageEntity, createGroundImageState, createHexCell, createHexCellWithDistance, createHexCoord, createIdentifiedHexCell, createMapCameraPosition, createMapServiceKey, createMarkerEntity, createMarkerFingerPrint, createMarkerState, createOffset, createOppositeMeridianPoint, createOverlayHit, createPolygonEntity, createPolygonState, createPolylineEntity, createPolylineState, createRandomId, createRasterLayerEntity, createRasterLayerState, createSegmentBounds, createSubject, createTileWorkerHandler, densifyAndNormalize, expandBounds, fingerPrintEquals, fromGeoPoint, fromLatLng, fromLatLong, fromLngLat, fromLongLat, generateIdFromHashes, getNeighbors, hashBool, hashDefaultMarkerIcon, hashGeoPoint, hashNullable, hashNum, hashObj, hashStr, hexCellToIdPrefix, hexCoordToString, ingestMarkers, interpolate$1 as interpolate, interpolateAtMeridianGeodesic, interpolateAtMeridianLinear, interpolate as interpolateWGS84, isEmptyCameraRestriction, isFullySupported, isKnownUnsupported, isNativeMapExtensionCapable, isSlottedOverlayController, isUsable, longHashCode, mapCapabilityFromId, mapViewStateInternal, markerIconHashCode, normalizeLngDegrees, resolveAttributionRules, resolveCameraRestriction, resolveHoles, resolveMapUISettings, resolveRasterAttributions, segmentIntersectsRegion, splitByMeridian, splitRingByMeridian, toDegrees, toInt, toNativeHeading, toNativeRotation, toRadians, unionHoleRings, unionHoles, unionHolesInPlace, viewportSizeOf, withRasterHeaderTransform, wrapClickedPoint };
+export { AbstractCircleOverlayRenderer, AbstractGroundImageOverlayRenderer, AbstractMarkerController, AbstractMarkerIcon, AbstractMarkerOverlayRenderer, AbstractMarkerRenderingStrategy, AbstractPolygonOverlayRenderer, AbstractPolylineOverlayRenderer, AbstractViewportStrategy, AbstractZoomAltitudeConverter, type AddParams, type AnyMarkerRenderingSupport, type AttributionRule, BLANK_MAP_STYLE, BLANK_MAP_STYLE_URL, BaseMapViewController, type BitmapIcon, CANONICAL_ORDER, type CameraOptions, type CameraRestriction, type ChangeParams, type ChangeParamsInterface, type CircleAddParams, type CircleCapable, type CircleChangeParams, CircleController, type CircleEntity, type CircleEvent, type CircleFingerPrint, CircleManager, type CircleManagerInterface, type CircleOptions, CircleOverlay, type CircleOverlayRenderer, type CircleState, type CircleStateCopyParams, CollectorMarkerOverlayRenderer, ColorDefaultIcon, type CreateMarkerStateParams, DEFAULT_CIRCLE_SEGMENTS, DEFAULT_RASTER_LAYER_USER_AGENT, DefaultMarkerEventController, DefaultMarkerIcon, type DefaultMarkerIconOptions, Direction6, Direction6Delta, DriverConformanceViolation, Earth, EmptyMapServiceRegistry, type FitBoundsCameraResult, GROUND_IMAGE_DEFAULT_TILE_SIZE, GeoGridIndex, GeoPoint, type GeoPointInterface, type GeoRectBounds, type GlGestureHandler, type GlGestureHandlers, type GlMarkerDragMap, type GlTouchZoomRotateHandler, type GroundImageAddParams, type GroundImageCapable, type GroundImageChangeParams, GroundImageController, type GroundImageEntity, type GroundImageEvent, type GroundImageFingerPrint, GroundImageManager, type GroundImageManagerInterface, GroundImageOverlay, type GroundImageOverlayRenderer, type GroundImageState, type GroundImageStateCopyParams, type GroundOverlayOptions, GroundScaleZoomAltitudeConverter, type HexCell, HexCellRegistry, type HexCellWithDistance, type HexCoord, type HexGeocell, HexGeocellImpl, type HexGeocell as HexGeocellInterface, IconImageCache, type IdentifiedHexCell, ImageDefaultIcon, type ImageDefaultIconOptions, ImageIcon, type ImageIconOptions, type ImageSource, type InfoBubbleEntry, InitState, KDTree, type KDTreeStats, LocalTileServer, MAP_CAPABILITIES, MARKER_HIT_RADIUS_MOUSE_PX, MARKER_HIT_RADIUS_TOUCH_PX, MARKER_RENDER_BATCH_SIZE, MapCameraPosition, type MapCameraPositionCopyParams, type MapCameraPositionInterface, type MapCapability, MapCapabilityStatus, type MapConfig, type MapDesignTypeInterface, type MapDiagnosticLevel, MapDiagnostics, type MapDiagnosticsSink, MapDriverConformance, type MapGesture, type MapOverlayInterface, MapOverlayRegistry, MapPaddings, type MapPaddingsInterface, MapProjection, MapProvider, MapProviderType, type MapServiceKey, type MapServiceRegistration, MapServiceRegistrations, type MapServiceRegistry, type MapStyleHost, type MapStyleInstallation, MapUISettings, MapUISettingsDiagnostics, MapViewBase, type MapViewBaseProps, type MapViewControllerInterface, type MapViewHolder, MapViewHolderBase, MapViewState, type MapViewStateInterface, type MapViewStateInternal, type MapViewStateOptions, type MapViewStyle, MapViewStyleHost, MarkerAnimation, type MarkerAnimationOverlayEntry, type MarkerAnimationOverlayHost, type MarkerCapable, type MarkerEntity, type MarkerEventController, type MarkerEventHost, type MarkerFingerPrint, MarkerGrid, type MarkerIcon, MarkerIconSize, type MarkerIngestionResult, MarkerManager, type MarkerManagerStats, type MarkerOptions, MarkerOverlay, type MarkerOverlayRenderer, type MarkerRenderingStrategy, type MarkerRenderingSupport, MarkerRenderingSupportKey, type MarkerState, type MarkerStateCopyParams, MarkerTileRenderer, MarkerTilingOptions, MutableMapServiceRegistry, Mutex, type NativeDescribableStyle, type NativeMapExtensionCapable, type NativeMapExtensionDescriptor, type NativeMapExtensionEvent, type NativeMapExtensionEventHandler, type NativeStyleDescriptor, NoCameraRestriction, OVERLAY_KINDS, type Offset, type OnCameraMoveHandler, type OnCircleEventHandler, type OnGroundImageEventHandler, type OnMapEventHandler, type OnMapInitializedHandler, type OnMapLoadedHandler, type OnMarkerEventHandler, type OnPolygonEventHandler, type OnPolylineEventHandler, type OnRasterLayerEventHandler, OverlayCollector, type OverlayController, type OverlayControllerLike, OverlayGeoJson, type OverlayHit, OverlayHitResolver, type OverlayKind, type OverlayRendererInterface, Planar, type PolygonAddParams, type PolygonCapable, type PolygonChangeParams, PolygonController, type PolygonEntity, type PolygonEvent, type PolygonFingerPrint, PolygonManager, type PolygonManagerInterface, type PolygonOptions, PolygonOverlay, type PolygonOverlayRenderer, type PolygonRings, type PolygonState, type PolygonStateCopyParams, type PolylineAddParams, type PolylineCapable, type PolylineChangeParams, PolylineController, type PolylineEntity, type PolylineEvent, type PolylineFingerPrint, type PolylineHitResult, PolylineManager, type PolylineManagerInterface, type PolylineOptions, PolylineOverlay, type PolylineOverlayRenderer, type PolylineState, type PolylineStateCopyParams, type PreparedMarker, type Projection, type RasterAttributionRule, type RasterHeaderRule, RasterHeaderRuleSet, type RasterHeaderSupport, type RasterLayerAddParams, type RasterLayerCapable, type RasterLayerChangeParams, RasterLayerController, type RasterLayerEntity, type RasterLayerEvent, type RasterLayerFingerPrint, RasterLayerManager, type RasterLayerManagerInterface, type RasterLayerMounting, RasterLayerOverlay, type RasterLayerOverlayRenderer, RasterLayerSource, type RasterLayerState, type RasterLayerStateCopyParams, type RasterRequestParameters, type RasterTilePreference, RasterTilePreferenceKey, type RasterTransformRequest, type RegistryStats, type ScreenOffsetResult, ScreenProjectionRequirement, type Serializable, Settings, type SlottedOverlayController, type SpatialIndex, type SpatialIndexConfig, Spherical, StrategyMarkerController, type StyleMutation, StyleMutationStore, type StylePatchableMap, TRANSPARENT_TILE_PNG, type TileOutcome, type TileProvider, TileRenderFailedError, type TileRenderRequest, type TileRenderResponse, type TileRequest, TileScheme, TileServerRegistry, VectorStyleAsDesign, type VectorStyleMutationSupport, VectorStyleMutationSupportKey, type VectorStyleSupport, VectorStyleSupportKey, type ViewportSize, type VisibleRegion, WEB_MERCATOR_MAX_EXTENT_METERS, WEB_MERCATOR_MAX_LATITUDE, WGS84, WGS84Geodesic, WebMercator, WebMercatorZoomAltitudeConverter, applyGlMapUISettings, applyStyleMutations, bearingFromNativeHeading, bearingFromNativeRotation, bounceInterpolation, bridgeHolesIntoSingleRing, bridgeHolesIntoSingleRingWrapAware, buildPolygonRings, buildPolylineSegments, buildUnwrappedPolygonRings, buildUnwrappedPolylinePath, buildVisibleRegion, calculateMetersPerPixel, capabilityOfGesture, circleToRing, closeRing, closestPointOnSegment, combineHash, computeArea$1 as computeArea, computeDistanceBetween$1 as computeDistanceBetween, computeFitBoundsCameraPosition, computeHeading$1 as computeHeading, computeLength$1 as computeLength, computeOffset$1 as computeOffset, computeOffsetOrigin$1 as computeOffsetOrigin, computeSignedArea$1 as computeSignedArea, computeDistanceBetween as computeWGS84DistanceBetween, createCircleEntity, createCircleState, createCollectorMarkerRenderingSupport, createDefaultIcon, createFingerPrint, createGeoPoint, createGeoRectBounds, createGroundImageEntity, createGroundImageState, createHexCell, createHexCellWithDistance, createHexCoord, createIdentifiedHexCell, createMapCameraPosition, createMapServiceKey, createMarkerEntity, createMarkerFingerPrint, createMarkerState, createOffset, createOppositeMeridianPoint, createOverlayHit, createPolygonEntity, createPolygonState, createPolylineEntity, createPolylineState, createRandomId, createRasterLayerEntity, createRasterLayerState, createSegmentBounds, createSubject, createTileWorkerHandler, densifyAndNormalize, describeStyleMutations, expandBounds, fingerPrintEquals, fromGeoPoint, fromLatLng, fromLatLong, fromLngLat, fromLongLat, generateIdFromHashes, getNeighbors, hashBool, hashDefaultMarkerIcon, hashGeoPoint, hashNullable, hashNum, hashObj, hashStr, hexCellToIdPrefix, hexCoordToString, ingestMarkers, interpolate$1 as interpolate, interpolateAtMeridianGeodesic, interpolateAtMeridianLinear, interpolate as interpolateWGS84, isEmptyCameraRestriction, isFullySupported, isKnownUnsupported, isNativeDescribableStyle, isNativeMapExtensionCapable, isSlottedOverlayController, isUsable, longHashCode, mapCapabilityFromId, mapViewStateInternal, markerIconHashCode, normalizeLngDegrees, parseStyleMutations, resolveAttributionRules, resolveCameraRestriction, resolveHoles, resolveMapUISettings, resolveRasterAttributions, reverseStyleMutation, segmentIntersectsRegion, splitByMeridian, splitRingByMeridian, styleMutationLayerId, styleMutationProperty, styleMutationTarget, toDegrees, toInt, toNativeHeading, toNativeRotation, toRadians, unionHoleRings, unionHoles, unionHolesInPlace, vectorStyleKey, viewportSizeOf, withRasterHeaderTransform, wrapClickedPoint };

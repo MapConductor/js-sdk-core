@@ -39,6 +39,21 @@ export interface VectorStyleSupport {
      * alone.
      */
     clearStyle(): void;
+
+    /**
+     * Where the style the map is drawing came from, when that is knowable.
+     *
+     * This is what lets a rule set adjust *whatever is showing* rather than
+     * a style the app had to name: the document has to be read before a rule
+     * can be matched against its layers, and only the provider knows where
+     * it came from.
+     *
+     * Undefined when it is not a URL anything can fetch — a provider's own
+     * named design, a style that needs a key this does not have. A caller
+     * that wanted it says so and leaves the map alone rather than showing
+     * something unstyled.
+     */
+    readonly currentStyleUrl?: string;
 }
 
 /**
@@ -89,6 +104,8 @@ export function vectorStyleKey(style: string | object): string {
 export class VectorStyleAsDesign<D extends MapDesignTypeInterface<string>> implements VectorStyleSupport {
     private installed: D | null = null;
     private installedKey: string | null = null;
+    /** Set only when the style was handed over as a URL; a parsed object has none. */
+    private installedUrl: string | null = null;
     private previous: D | null = null;
     private pendingClear: ReturnType<typeof setTimeout> | null = null;
 
@@ -99,7 +116,24 @@ export class VectorStyleAsDesign<D extends MapDesignTypeInterface<string>> imple
             key: string,
             attributionRules: readonly AttributionRule[],
         ) => D,
+        /**
+         * Where this provider's design points, when it points at a plain
+         * style document. Only some providers and only some designs do.
+         */
+        private readonly urlOf?: (design: D) => string | undefined,
     ) {}
+
+    /**
+     * The URL this put up, or else what the design the app chose points at.
+     *
+     * The first case is the one that matters: a style already installed here
+     * came from somewhere reachable, so a rule set asking for "whatever is
+     * showing" can fetch it too.
+     */
+    get currentStyleUrl(): string | undefined {
+        if (this.installedUrl !== null) return this.installedUrl;
+        return this.urlOf?.(this.state.mapDesignType);
+    }
 
     showStyle(style: string | object, attributionRules: readonly AttributionRule[] = []): void {
         if (this.pendingClear !== null) {
@@ -119,6 +153,7 @@ export class VectorStyleAsDesign<D extends MapDesignTypeInterface<string>> imple
         if (!this.installed) this.previous = this.state.mapDesignType;
         this.installed = design;
         this.installedKey = key;
+        this.installedUrl = typeof style === 'string' ? style : null;
         this.state.mapDesignType = design;
     }
 
@@ -131,6 +166,7 @@ export class VectorStyleAsDesign<D extends MapDesignTypeInterface<string>> imple
             const restore = this.previous;
             this.installed = null;
             this.installedKey = null;
+            this.installedUrl = null;
             this.previous = null;
             if (current && restore && this.state.mapDesignType.id === current.id) {
                 this.state.mapDesignType = restore;

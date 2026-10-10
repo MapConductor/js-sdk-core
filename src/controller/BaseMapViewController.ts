@@ -15,6 +15,7 @@ import type { OnPolylineEventHandler, PolylineState } from '../polyline/Polyline
 import type { OnPolygonEventHandler, PolygonState } from '../polygon/PolygonState';
 import type { OnCircleEventHandler, CircleState } from '../circle/CircleState';
 import type { OnGroundImageEventHandler, GroundImageState } from '../groundimage/GroundImageState';
+import type { RasterLayerMounting } from '../map/MapViewStyle';
 import type { RasterLayerState } from '../raster/RasterLayerState';
 
 // 統一ズーム（Google 準拠）での許容誤差。これ未満の差では補正しない。
@@ -153,6 +154,82 @@ export abstract class BaseMapViewController {
   unregisterOverlayController(controller: OverlayControllerLike): void {
     const index = this.overlayControllers.indexOf(controller);
     if (index >= 0) this.overlayControllers.splice(index, 1);
+  }
+
+  /**
+   * ラスターレイヤを **children の外から**載せる／外す。
+   *
+   * `compositionRasterLayers` は宣言された集合でまるごと置き換えるので、外から
+   * 足したものは次の再レンダーで消える。{@link RasterLayerController.upsert} は
+   * その掃除から id を外すので、外から載せたいものはここを通す。
+   *
+   * 呼ぶのは 2 つだけ: マーカータイリングと、ベクタースタイルを描けない
+   * バックエンドに渡す「スタイルから描いたタイル」。
+   *
+   * **プロバイダ非依存**。raster コントローラはどのプロバイダも
+   * `registerOverlayController` 済みなので、プロバイダごとの配線は要らない。
+   * android-sdk の `BaseMapViewController.mountRasterLayer` と同じ。
+   */
+  mountRasterLayer(state: RasterLayerState): void {
+    for (const controller of this.rasterLayerMounts()) void controller.upsert(state);
+  }
+
+  /** {@link mountRasterLayer} で載せたものを外す。無いものを渡しても何も起きない。 */
+  unmountRasterLayer(id: string): void {
+    for (const controller of this.rasterLayerMounts()) void controller.removeById(id);
+  }
+
+  private rasterLayerMounts(): RasterLayerMounting[] {
+    return this.overlayControllers.filter(
+      (controller): controller is OverlayControllerLike & RasterLayerMounting =>
+        isSlottedOverlayController(controller) &&
+        controller.kind === 'rasterLayer' &&
+        typeof (controller as Partial<RasterLayerMounting>).upsert === 'function' &&
+        typeof (controller as Partial<RasterLayerMounting>).removeById === 'function',
+    );
+  }
+
+  // ── スタイル読み込みの通知 ────────────────────────────────────────────
+
+  private styleLoadedListeners = new Set<() => void>();
+  /** スタイルが今載っているか。sticky: 聞かれる前に読み終わることがある。 */
+  private styleLoaded = false;
+
+  /**
+   * スタイル文書を読み終わるたびに `block` を呼ぶ。既に読み終わっていれば今すぐ 1 回。
+   *
+   * {@link MapViewStyle} が生きたレンダラへ入れたもの（paint プロパティ、足した
+   * レイヤ）は、レンダラが文書を読み直した時点で全部消える——アプリのベースマップ
+   * 切替、デザイン変更、プロバイダのビュー作り直し、理由は何であれ。ここが戻し場所。
+   * 1 本のリスナーではなく登録簿なのは、ミューテーションストアと設置済みスタイルの
+   * **両方**が聞く必要があるため。
+   *
+   * そういう概念を持たないプロバイダ（Google Maps、Leaflet…）は
+   * {@link notifyStyleLoaded} を呼ばない。そこに載ったスタイルはラスター化された
+   * もので、ベースマップ切替では消えない。
+   *
+   * @returns 聞くのをやめる手形。
+   */
+  addStyleLoadedListener(block: () => void): () => void {
+    this.styleLoadedListeners.add(block);
+    if (this.styleLoaded) block();
+    return () => this.styleLoadedListeners.delete(block);
+  }
+
+  /**
+   * スタイルが載り、**かつオーバーレイが戻った**時点でプロバイダが呼ぶ。
+   *
+   * 読み込み開始時ではなく、プロバイダが自分のレイヤを戻す前でもない。作り直しの
+   * 途中でパッチを当てるリスナーは、これから置き換わるものにパッチを当てることになる。
+   *
+   * android / iOS では protected。web だけ public なのは、GL 系 3 プロバイダで
+   * `styledata` を聞いているのがコントローラではなく
+   * `useVectorStyleMutationSupport`（共有フック）だから——呼ぶのは依然として
+   * 「プロバイダ側の 1 か所」で、その 1 か所がフックに寄っているだけ。
+   */
+  notifyStyleLoaded(): void {
+    this.styleLoaded = true;
+    for (const listener of [...this.styleLoadedListeners]) listener();
   }
 
   // ── タップのカスケード ────────────────────────────────────────────────
