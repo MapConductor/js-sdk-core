@@ -19,6 +19,21 @@ import { createMapServiceKey, type MapServiceKey } from '../map/MapServiceRegist
 export interface RasterTilePreference {
     /** この SDK に渡してほしいタイルの一辺（CSS px）。 */
     readonly preferredTileSize: number;
+    /**
+     * この SDK がラスタータイルを **device px** でレイアウトするなら true。
+     *
+     * 地図 SDK には 2 つの流儀がある。Google Maps や Leaflet は宣言された
+     * 一辺を CSS px として敷き、HERE は device px として敷く。2x の画面で
+     * 「512」と宣言すると、前者は 512 CSS px、後者は 256 CSS px しか覆わず、
+     * HERE は 1 段深いズームを要求してスタイルをそこで読む — ラベルは半分、
+     * 道路は倍の密度になる。供給側（ベクタータイルのラスタライザ）はこの
+     * 流儀を知りようがないので、プロバイダが言う。
+     *
+     * true のとき、供給側は {@link preferredTileSize} × devicePixelRatio を
+     * 宣言し、描画は同じピクセル数で行い、スタイルには
+     * {@link preferredTileSize} CSS px として読ませる。省略時は false。
+     */
+    readonly layoutInDevicePixels?: boolean;
 }
 
 /**
