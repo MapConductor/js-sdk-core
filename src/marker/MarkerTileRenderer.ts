@@ -20,16 +20,17 @@ function toWorldPixel(lat: number, lng: number, z: number): { wx: number; wy: nu
     return { wx, wy };
 }
 
-function tileToGeoBounds(x: number, y: number, z: number, tileSize: number): {
+function tileToGeoBounds(x: number, y: number, z: number, tileSize: number, paddingPx = 0): {
     north: number; south: number; west: number; east: number;
 } {
     const n = Math.pow(2, z);
     const tilesPerWorld = (256 / tileSize) * n; // in case tileSize !== 256, keep it in "256-equivalent" tile units
-    const west = (x / tilesPerWorld) * 360 - 180;
-    const east = ((x + 1) / tilesPerWorld) * 360 - 180;
+    const pad = paddingPx / tileSize;
+    const west = ((x - pad) / tilesPerWorld) * 360 - 180;
+    const east = ((x + 1 + pad) / tilesPerWorld) * 360 - 180;
     const latRad = (y: number) => Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / tilesPerWorld)));
-    const north = (latRad(y) * 180) / Math.PI;
-    const south = (latRad(y + 1) * 180) / Math.PI;
+    const north = (latRad(y - pad) * 180) / Math.PI;
+    const south = (latRad(y + 1 + pad) * 180) / Math.PI;
     return { north, south, west, east };
 }
 
@@ -66,6 +67,8 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
     private readonly defaultBitmapIcon: BitmapIcon = createDefaultIcon().toBitmapIcon();
     /** Per-instance tile output cache; each sync creates a fresh renderer instance, so no invalidation is needed. */
     private readonly tileCache = new Map<string, Uint8Array | null>();
+    // Like tileCache, these bounds belong to one immutable rendering snapshot.
+    private readonly queryPaddingByZoom = new Map<number, number>();
 
     // android-sdk / ios-sdk の MarkerTileRenderer と同じく位置引数で受ける
     // （名前付きオプション型は持たない）。
@@ -108,16 +111,33 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
     }
 
     private queryCandidates(z: number, x: number, y: number, paddingPx: number): T[] {
-        const { north, south, west, east } = tileToGeoBounds(x, y, z, this.tileSize);
-        // Approximate degrees-per-pixel padding using the tile's own lat span;
-        // generous but cheap, matching the "conservative first pass" idea from
-        // the Android/iOS renderer without needing a full projection inverse.
-        const latSpan = north - south;
-        const lonSpan = east - west || 1e-9;
-        const padNorm = paddingPx / this.tileSize;
-        const latPad = latSpan * padNorm;
-        const lonPad = lonSpan * padNorm;
-        return this.grid.queryBounds(south - latPad, north + latPad, west - lonPad, east + lonPad);
+        const { north, south, west, east } = tileToGeoBounds(x, y, z, this.tileSize, paddingPx);
+        return this.grid.queryBounds(south, north, west, east);
+    }
+
+    private queryPaddingPx(z: number): number {
+        const cached = this.queryPaddingByZoom.get(z);
+        if (cached !== undefined) return cached;
+        // Determine the bound BEFORE the spatial query. Expanding from the first
+        // candidates misses a large icon whose anchor lies outside that query.
+        // Cache once per zoom, rather than scanning all markers for every tile.
+        const bitmaps = new Map<MarkerIcon, BitmapIcon>();
+        let extent = 0;
+        for (const item of this.items) {
+            let bitmap = this.defaultBitmapIcon;
+            if (item.icon) {
+                bitmap = bitmaps.get(item.icon) ?? item.icon.toBitmapIcon();
+                bitmaps.set(item.icon, bitmap);
+            }
+            const scale = Math.max(Math.max(this.iconScale(item, z), 0) * this.extraIconScale, 0);
+            const { width, height } = markerTileDrawSize(bitmap, scale);
+            extent = Math.max(extent,
+                width * Math.max(Math.abs(bitmap.anchor.x), Math.abs(1 - bitmap.anchor.x)),
+                height * Math.max(Math.abs(bitmap.anchor.y), Math.abs(1 - bitmap.anchor.y)));
+        }
+        const padding = Math.ceil(extent) + 2;
+        this.queryPaddingByZoom.set(z, padding);
+        return padding;
     }
 
     private prepareMarkers(
@@ -138,9 +158,6 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
             const { wx, wy } = toWorldPixel(item.position.latitude, item.position.longitude, z);
             const centerNormX = wx - tileOriginWx;
             const centerNormY = wy - tileOriginWy;
-            if (centerNormX < -tilePx || centerNormX > 2 * tilePx || centerNormY < -tilePx || centerNormY > 2 * tilePx) {
-                continue;
-            }
 
             const callbackScale = Math.max(this.iconScale(item, z), 0);
             const scale = Math.max(callbackScale * this.extraIconScale, 0);
@@ -149,6 +166,8 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
             const drawH = drawSize.height;
             const anchorX = bitmapIcon.anchor.x;
             const anchorY = bitmapIcon.anchor.y;
+            if (centerNormX - drawW * anchorX > tilePx || centerNormX + drawW * (1 - anchorX) < 0 ||
+                centerNormY - drawH * anchorY > tilePx || centerNormY + drawH * (1 - anchorY) < 0) continue;
 
             const halfX = Math.max(Math.abs(drawW * anchorX), Math.abs(drawW * (1 - anchorX)));
             const halfY = Math.max(Math.abs(drawH * anchorY), Math.abs(drawH * (1 - anchorY)));
@@ -252,9 +271,7 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
 
         const { x, y, z } = req;
         const tilePx = this.tileSize;
-        const assumedHalfExtentPx = 32;
-
-        let candidates = this.queryCandidates(z, x, y, assumedHalfExtentPx);
+        const candidates = this.queryCandidates(z, x, y, this.queryPaddingPx(z));
         if (candidates.length === 0) {
             this.cacheTile(key, null);
             return null;
@@ -267,12 +284,7 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         const tileOriginWx = x * tilePx;
         const tileOriginWy = y * tilePx;
 
-        let { markers, maxHalfExtentPx } = this.prepareMarkers(candidates, tileOriginWx, tileOriginWy, z, tilePx);
-        if (maxHalfExtentPx > assumedHalfExtentPx + 1) {
-            candidates = this.queryCandidates(z, x, y, maxHalfExtentPx);
-            await Promise.all([...new Set(candidates.map((c) => this.bitmapIconOf(c).url))].map((url) => this.icons.ensure(url)));
-            ({ markers, maxHalfExtentPx } = this.prepareMarkers(candidates, tileOriginWx, tileOriginWy, z, tilePx));
-        }
+        const { markers, maxHalfExtentPx } = this.prepareMarkers(candidates, tileOriginWx, tileOriginWy, z, tilePx);
 
         if (markers.length === 0) {
             this.cacheTile(key, null);
@@ -296,9 +308,7 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
     renderTileDataUrl(req: TileRequest): string | null {
         const { x, y, z } = req;
         const tilePx = this.tileSize;
-        const assumedHalfExtentPx = 32;
-
-        const candidates = this.queryCandidates(z, x, y, assumedHalfExtentPx);
+        const candidates = this.queryCandidates(z, x, y, this.queryPaddingPx(z));
         if (candidates.length === 0) return null;
         this.warmIcons(candidates);
 
