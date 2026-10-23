@@ -23,7 +23,13 @@ import {
 
 // オプション型は DefaultIconTypes.ts にある。以前からこのモジュール名で公開しているので、
 // そのまま再エクスポートして import 元を変えずに済ませる。
-export type { DefaultMarkerIconOptions, ImageDefaultIconOptions } from "./DefaultIconTypes";
+export type {
+    DefaultMarkerIconOptions,
+    ImageDefaultIconOptions,
+    MarkerLabelHorizontalPosition,
+    MarkerLabelPosition,
+    MarkerLabelVerticalPosition,
+} from "./DefaultIconTypes";
 
 /**
  * 単色で塗る既定アイコン。`DefaultMarkerIcon` はこれの別名。
@@ -48,7 +54,8 @@ export class ColorDefaultIcon extends AbstractDefaultIcon {
             labelTextSize: this.labelTextSize,
             labelTypeFace: this.labelTypeFace,
             labelStrokeColor: this.labelStrokeColor,
-            infoAnchor: this.infoAnchor,
+            labelPosition: this.labelPosition,
+            infoAnchor: this.baseProperties.infoAnchor,
             iconSize: this.iconSize,
             debug: this.debug,
             ...options,
@@ -89,7 +96,8 @@ export class ImageDefaultIcon extends AbstractDefaultIcon {
             labelTextSize: this.labelTextSize,
             labelTypeFace: this.labelTypeFace,
             labelStrokeColor: this.labelStrokeColor,
-            infoAnchor: this.infoAnchor,
+            labelPosition: this.labelPosition,
+            infoAnchor: this.baseProperties.infoAnchor,
             iconSize: this.iconSize,
             debug: this.debug,
             ...options,
@@ -114,7 +122,7 @@ export class ImageDefaultIcon extends AbstractDefaultIcon {
 
     private toCanvasBitmapIcon(img: HTMLImageElement): BitmapIcon {
         const layout = this.computeLayout();
-        const { markerSize, bitmapWidth, bitmapHeight, markerOffsetX } = layout;
+        const { markerSize, bitmapWidth, bitmapHeight, markerOffsetX, markerOffsetY } = layout;
         const canvas = document.createElement("canvas");
         canvas.width = bitmapWidth;
         canvas.height = bitmapHeight;
@@ -123,13 +131,13 @@ export class ImageDefaultIcon extends AbstractDefaultIcon {
 
         // ピクセル空間で描画（createSvg と同じ座標系）
         const markerPath = new Path2D(
-            createMarkerPathData(markerSize, this.scale, this.strokeWidth, markerOffsetX),
+            createMarkerPathData(markerSize, this.scale, this.strokeWidth, markerOffsetX, markerOffsetY),
         );
 
         // マーカー形状でクリップし、正方形領域へ画像をセンタークロップ（cover）
         ctx.save();
         ctx.clip(markerPath);
-        drawImageCover(ctx, img, markerOffsetX, 0, markerSize, markerSize);
+        drawImageCover(ctx, img, markerOffsetX, markerOffsetY, markerSize, markerSize);
         ctx.restore();
 
         // ストローク（createSvg と同じ計算式）
@@ -140,7 +148,7 @@ export class ImageDefaultIcon extends AbstractDefaultIcon {
         ctx.lineCap = "round";
         ctx.stroke(markerPath);
 
-        // ラベル（createLabelSvg と同じロジック：円形部分の中心・通常ウェイト・絶対サイズ）
+        // ラベル（createLabelSvg と同じロジック：位置は computeLayout・通常ウェイト・絶対サイズ）
         if (this.label) {
             const fontSize = Math.max(1, this.labelTextSize);
             ctx.font = `${fontSize}px ${this.labelTypeFace}`;
@@ -150,11 +158,9 @@ export class ImageDefaultIcon extends AbstractDefaultIcon {
             ctx.lineCap = "round";
             ctx.strokeStyle = this.labelStrokeColor;
             ctx.lineWidth = layout.outlineStroke;
-            const cx = markerOffsetX + markerSize / 2;
-            const cy = markerSize * 0.35;
-            ctx.strokeText(this.label, cx, cy);
+            ctx.strokeText(this.label, layout.labelCenterX, layout.labelCenterY);
             ctx.fillStyle = this.labelTextColor ?? "#000000";
-            ctx.fillText(this.label, cx, cy);
+            ctx.fillText(this.label, layout.labelCenterX, layout.labelCenterY);
         }
 
         if (this.debug) {
@@ -168,12 +174,17 @@ export class ImageDefaultIcon extends AbstractDefaultIcon {
         };
     }
 
-    protected createFillSvg(markerPath: string, markerSize: number, markerOffsetX: number): string {
+    protected createFillSvg(
+        markerPath: string,
+        markerSize: number,
+        markerOffsetX: number,
+        markerOffsetY: number,
+    ): string {
         const href = escapeXml(this.imageSourceUrl());
         const clipId = `marker-fill-${(imageClipCounter += 1)}`;
         return [
             `<defs><clipPath id="${clipId}"><path d="${markerPath}"/></clipPath></defs>`,
-            `<image href="${href}" x="${fmt(markerOffsetX)}" y="0" width="${markerSize}" height="${markerSize}" preserveAspectRatio="xMidYMid slice" clip-path="url(#${clipId})"/>`,
+            `<image href="${href}" x="${fmt(markerOffsetX)}" y="${fmt(markerOffsetY)}" width="${markerSize}" height="${markerSize}" preserveAspectRatio="xMidYMid slice" clip-path="url(#${clipId})"/>`,
         ].join("");
     }
 

@@ -8,6 +8,23 @@ import { Offset } from "../types";
  */
 
 /**
+ * ラベルをピンに対してどこへ置くか。CSS の `background-position` と同じ書き方で、
+ * 横（left / center / right）と縦（top / center / bottom）のキーワードを空白区切りで並べる。
+ * 順序は問わず、片方だけなら残りは `center`。
+ *
+ * - `left` / `right` はピンの外側に置き、縦はピンの上端・頭の中心・先端に揃える。
+ * - `center` 列の `top` / `bottom` はピンの上・下の外側に置く。
+ * - `"center center"`（既定）はピンの頭の中に重ねる（従来どおり）。
+ */
+export type MarkerLabelHorizontalPosition = "left" | "center" | "right";
+export type MarkerLabelVerticalPosition = "top" | "center" | "bottom";
+export type MarkerLabelPosition =
+    | MarkerLabelHorizontalPosition
+    | MarkerLabelVerticalPosition
+    | `${MarkerLabelHorizontalPosition} ${MarkerLabelVerticalPosition}`
+    | `${MarkerLabelVerticalPosition} ${MarkerLabelHorizontalPosition}`;
+
+/**
  * 既定マーカーアイコンの見た目を決めるオプションと、その既定値。
  *
  * `BaseIconProperties` は「ピンの形と共通の装飾」を表し、塗り方（単色か画像か）だけが
@@ -23,6 +40,7 @@ export interface DefaultMarkerIconOptions {
     labelTextSize?: number;
     labelTypeFace?: string;
     labelStrokeColor?: string;
+    labelPosition?: MarkerLabelPosition;
     infoAnchor?: Offset;
     iconSize?: number;
     debug?: boolean;
@@ -42,6 +60,7 @@ export interface BaseIconProperties {
     labelTextSize: number;
     labelTypeFace: string;
     labelStrokeColor: string;
+    labelPosition: MarkerLabelPosition;
     infoAnchor: Offset;
     iconSize: number;
     debug: boolean;
@@ -59,6 +78,7 @@ export const DEFAULT_BASE_PROPERTIES: BaseIconProperties = {
     labelTextSize: 18,
     labelTypeFace: DEFAULT_LABEL_TYPE_FACE,
     labelStrokeColor: "#FFFFFF",
+    labelPosition: "center center",
     infoAnchor: { x: 0.5, y: 0 },
     iconSize: Settings.Default.iconSize,
     debug: false,

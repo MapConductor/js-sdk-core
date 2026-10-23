@@ -7,6 +7,8 @@ import type { OverlayController } from "../controller/OverlayController";
 import { MapCameraPosition, Offset } from "../types";
 import { Settings } from "../settings";
 import { Mutex } from "../base/Mutex";
+import { markerIconExtentPx } from "./MarkerIconExtent";
+import { markerSearchBounds, pickMarkerHit } from "./MarkerHitPick";
 import { createDefaultIcon } from "./ColorDefaultIcon";
 import { MarkerEntity } from "./MarkerEntity";
 import { MarkerManager } from "./MarkerManager";
@@ -129,42 +131,41 @@ export class StrategyMarkerController<ActualMarker>
     }
 
     find(position: GeoPoint): MarkerEntity<ActualMarker> | null {
-        const nearest = this.strategy.markerManager.findNearest(position);
-        if (nearest == null) return null;
-
         const holder = this.renderer.holder;
-        if (holder == null) return nearest;
+        if (holder == null) return this.strategy.markerManager.findNearest(position);
 
         const touchScreen = this.resolveSyncOffset(holder.toScreenOffset(position));
-        const markerScreen =
-            touchScreen === undefined
-                ? undefined
-                : this.resolveSyncOffset(holder.toScreenOffset(nearest.state.position));
         // Screen projection only resolves asynchronously on this holder; the
         // native icon-bounds hit test needs synchronous offsets, so degrade to
         // the geo-nearest result instead of dropping the hit entirely.
-        if (touchScreen === undefined || markerScreen === undefined) return nearest;
-        if (touchScreen === null || markerScreen === null) return null;
+        if (touchScreen === undefined) return this.strategy.markerManager.findNearest(position);
+        if (touchScreen === null) return null;
+
+        // android-sdk / ios-sdk の StrategyMarkerController.find と同じ。タップ点の周りのマーカーを
+        // 候補にし、指の下にアイコン（ラベル込み）が描かれているものを優先する（pickMarkerHit）。
+        const project = (p: GeoPointInterface): Offset | null =>
+            this.resolveSyncOffset(holder.toScreenOffset(p as GeoPoint)) ?? null;
+        const bounds = markerSearchBounds(position, touchScreen, project);
+        if (!bounds) return null;
 
         // Native multiplies tapTolerance (dp) by the display density; on the
         // web both tolerance and offsets are CSS pixels, so no scaling applies.
         const tolerancePx = Settings.Default.tapTolerance;
-        const icon = nearest.state.icon ?? createDefaultIcon();
-
-        const iconWidthPx = icon.iconSize * icon.scale;
-        const iconHeightPx = icon.iconSize * icon.scale;
-        const anchorX = icon.anchor.x;
-        const anchorY = icon.anchor.y;
-
-        const dx = touchScreen.x - markerScreen.x;
-        const dy = touchScreen.y - markerScreen.y;
-
-        const left = -anchorX * iconWidthPx - tolerancePx;
-        const right = (1.0 - anchorX) * iconWidthPx + tolerancePx;
-        const top = -anchorY * iconHeightPx - tolerancePx;
-        const bottom = (1.0 - anchorY) * iconHeightPx + tolerancePx;
-
-        return dx >= left && dx <= right && dy >= top && dy <= bottom ? nearest : null;
+        const hit = pickMarkerHit(
+            touchScreen,
+            this.strategy.markerManager.findMarkersInBounds(bounds),
+            entity => {
+                const anchorScreen = project(entity.state.position);
+                if (!anchorScreen) return null;
+                const icon = entity.state.icon ?? createDefaultIcon();
+                // 既定アイコンはラベルの分だけビットマップがピン本体より広い。anchor はその
+                // ビットマップに対する割合なので、矩形も実寸で取る（android / iOS の MarkerHitTest と同じ）。
+                const extent = markerIconExtentPx(icon);
+                return { anchorScreen, width: extent.width, height: extent.height, anchor: icon.anchor };
+            },
+            tolerancePx,
+        );
+        return hit?.item ?? null;
     }
 
     /** `undefined` means the holder projects asynchronously (no sync value available). */
