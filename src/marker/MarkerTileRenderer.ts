@@ -1,4 +1,5 @@
 import { copyIconBitmap } from './swIconBitmaps';
+import { MARKER_HIT_SEARCH_RADIUS_PX, pickMarkerHit, type MarkerHit } from './MarkerHitPick';
 import type { TileProvider } from '../tileserver/TileProvider';
 import type { TileRequest } from '../tileserver/TileRequest';
 import type { GeoPoint } from '../features';
@@ -390,23 +391,31 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
     }
 
     /**
-     * Find the nearest item to `click` within `hitRadiusPx` pixels at the given zoom level.
+     * Find the item under `click` at the given zoom level, or the nearest one within `hitRadiusPx`.
      *
      * Use `MARKER_HIT_RADIUS_TOUCH_PX` for finger taps and `MARKER_HIT_RADIUS_MOUSE_PX`
      * for mouse/pen, or supply a custom radius. Returns `null` when nothing is close enough.
      */
     findNearest(click: GeoPoint, hitRadiusPx: number, zoom: number): T | null {
+        return this.findHit(click, hitRadiusPx, zoom)?.item ?? null;
+    }
+
+    /**
+     * {@link findNearest} の判定結果つき版。通常マーカーの結果と {@link preferMarkerHit} で
+     * 比べるために、矩形そのものに入ったか（`exact`）と距離も返す。
+     *
+     * 選び方はコアの {@link pickMarkerHit} と同じ。描かれた（ラベル込みの）アイコンの矩形に
+     * タップ点が入っているものを、先端の近い別のマーカーより優先する。
+     *
+     * @internal
+     */
+    findHit(click: GeoPoint, hitRadiusPx: number, zoom: number): MarkerHit<T> | null {
         const cosLat = Math.cos((click.latitude * Math.PI) / 180);
         const metersPerPx = (156543.03392 * cosLat) / Math.pow(2, zoom);
         if (!(metersPerPx > 0)) return null;
         const metersPerLatDeg = 111111;
         const metersPerLngDeg = 111111 * Math.max(cosLat, 1e-6);
 
-        // A marker is "hit" when the click falls inside its ICON's on-screen
-        // rectangle (anchor-adjusted) plus the tap tolerance — the same rule the
-        // providers' native `find()` uses. Testing only a fixed radius around the
-        // anchor made a large icon clickable only near its center, so taps that
-        // visually landed on the marker missed.
         const drawSizeOf = (item: T): { drawW: number; drawH: number; bitmapIcon: BitmapIcon } => {
             const bitmapIcon = this.bitmapIconOf(item);
             const scale = Math.max(Math.max(this.iconScale(item, zoom), 0) * this.extraIconScale, 0);
@@ -414,10 +423,10 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
             return { drawW, drawH, bitmapIcon };
         };
 
-        // Pad the spatial query by the largest icon half-extent so no marker whose
-        // icon covers the click is excluded. Estimated from a representative item
-        // (icons are uniform in practice); the exact per-candidate test still filters.
-        let maxHalfPx = hitRadiusPx;
+        // Pad the spatial query so no marker whose icon covers the click is excluded. Icons with a
+        // label beside the pin can be much wider than `items[0]`, so never pad by less than the
+        // shared search radius; the exact per-candidate test still filters.
+        let maxHalfPx = Math.max(hitRadiusPx, MARKER_HIT_SEARCH_RADIUS_PX);
         if (this.items.length > 0) {
             const { drawW, drawH } = drawSizeOf(this.items[0]);
             maxHalfPx = Math.max(maxHalfPx, drawW, drawH);
@@ -433,25 +442,23 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
             click.longitude + padLngDeg,
         );
 
-        let nearest: T | null = null;
-        let minDist = Infinity;
-        for (const item of candidates) {
-            const { drawW, drawH, bitmapIcon } = drawSizeOf(item);
-            // Click position relative to the marker's anchor, in screen pixels (y down).
-            const dxPx = ((click.longitude - item.position.longitude) * metersPerLngDeg) / metersPerPx;
-            const dyPx = ((item.position.latitude - click.latitude) * metersPerLatDeg) / metersPerPx;
-            const left = -bitmapIcon.anchor.x * drawW - hitRadiusPx;
-            const right = (1 - bitmapIcon.anchor.x) * drawW + hitRadiusPx;
-            const top = -bitmapIcon.anchor.y * drawH - hitRadiusPx;
-            const bottom = (1 - bitmapIcon.anchor.y) * drawH + hitRadiusPx;
-            if (dxPx >= left && dxPx <= right && dyPx >= top && dyPx <= bottom) {
-                const d = dxPx * dxPx + dyPx * dyPx;
-                if (d < minDist) {
-                    minDist = d;
-                    nearest = item;
-                }
-            }
-        }
-        return nearest;
+        // Click position relative to each marker's anchor, in screen pixels (y down). The click
+        // itself sits at the origin, so each anchor is placed at minus that offset.
+        return pickMarkerHit(
+            { x: 0, y: 0 },
+            candidates,
+            item => {
+                const { drawW, drawH, bitmapIcon } = drawSizeOf(item);
+                const dxPx = ((click.longitude - item.position.longitude) * metersPerLngDeg) / metersPerPx;
+                const dyPx = ((item.position.latitude - click.latitude) * metersPerLatDeg) / metersPerPx;
+                return {
+                    anchorScreen: { x: -dxPx, y: -dyPx },
+                    width: drawW,
+                    height: drawH,
+                    anchor: bitmapIcon.anchor,
+                };
+            },
+            hitRadiusPx,
+        );
     }
 }
