@@ -16,19 +16,22 @@ import { DEFAULT_BASE_PROPERTIES, type BaseIconProperties, type DefaultMarkerIco
 export const MARKER_ORIGINAL_SIZE = { width: 23.5, height: 25.6 } as const;
 
 /**
- * Android AbstractDefaultIcon.createMarkerPath() の移植。
- *
- * @param canvasSize   描画座標系のサイズ（SVG viewBox の場合は 48）
- * @param iconScale    アイコン全体のスケール（this.scale に対応）
- * @param strokeWidth  ストローク幅（スケール適用前の値 this.strokeWidth に対応）
- * @param horizontalOffset  水平オフセット（複数マーカー並置時に使用）
+ * ピン形を canvasSize の正方形へ収めたときの倍率と原点。
+ * `createMarkerPathData` と、ラベルをピンの輪郭に沿わせる `computeLayout` が共有する。
  */
-export function createMarkerPathData(
+export interface MarkerPinMetrics {
+    /** 設計座標 1 単位あたりの px。 */
+    s: number;
+    /** 設計座標の原点（パス外接箱の左上）。 */
+    ox: number;
+    oy: number;
+}
+
+export function computeMarkerPinMetrics(
     canvasSize: number,
     iconScale: number,
     strokeWidth: number,
-    horizontalOffset: number = 0,
-): string {
+): MarkerPinMetrics {
     // Android: scaledStrokeWidth = dpToPx(strokeWidth * iconScale)
     const scaledStrokeWidth = strokeWidth * iconScale;
     const epsilon = 0.75;
@@ -48,8 +51,44 @@ export function createMarkerPathData(
     // Android: offsetX = (canvasSize - scaledWidth) / 2 + horizontalOffset
     //          offsetY = (canvasSize - scaledHeight + strokeWidth.value * markerScale) / 2
     //          strokeWidth.value はスケール前の dp 値（TypeScript では strokeWidth に対応）
-    const ox = (canvasSize - scaledWidth) / 2 + horizontalOffset;
+    const ox = (canvasSize - scaledWidth) / 2;
     const oy = (canvasSize - scaledHeight + strokeWidth * s) / 2;
+    return { s, ox, oy };
+}
+
+/**
+ * ピンの見えている輪郭（設計座標で x: 4〜20, y: 0〜24）を px で返す。
+ * 外接箱（23.5 × 25.6）より細いので、ラベルを横に置くときはこちらに沿わせる。
+ */
+export function computeMarkerPinBounds(
+    canvasSize: number,
+    iconScale: number,
+    strokeWidth: number,
+): { left: number; right: number; top: number; bottom: number } {
+    const { s, ox, oy } = computeMarkerPinMetrics(canvasSize, iconScale, strokeWidth);
+    return { left: ox + 4 * s, right: ox + 20 * s, top: oy, bottom: oy + 24 * s };
+}
+
+/**
+ * Android AbstractDefaultIcon.createMarkerPath() の移植。
+ *
+ * @param canvasSize   描画座標系のサイズ（SVG viewBox の場合は 48）
+ * @param iconScale    アイコン全体のスケール（this.scale に対応）
+ * @param strokeWidth  ストローク幅（スケール適用前の値 this.strokeWidth に対応）
+ * @param horizontalOffset  水平オフセット（ラベルの分だけビットマップを広げたときに使用）
+ * @param verticalOffset    垂直オフセット（ラベルをピンの上に置いたときに使用）
+ */
+export function createMarkerPathData(
+    canvasSize: number,
+    iconScale: number,
+    strokeWidth: number,
+    horizontalOffset: number = 0,
+    verticalOffset: number = 0,
+): string {
+    const metrics = computeMarkerPinMetrics(canvasSize, iconScale, strokeWidth);
+    const s = metrics.s;
+    const ox = metrics.ox + horizontalOffset;
+    const oy = metrics.oy + verticalOffset;
 
     let cx = 12 * s + ox;
     let cy = oy;
@@ -123,10 +162,31 @@ export interface IconLayout {
     bitmapWidth: number;
     /** ビットマップ高さ（= markerSize）。 */
     bitmapHeight: number;
-    /** マーカーを中央寄せするための水平オフセット。 */
+    /** ビットマップ内でのマーカー本体の左上。 */
     markerOffsetX: number;
+    markerOffsetY: number;
     /** ラベルのアウトライン幅（Android: max(1*scale, 2)）。 */
     outlineStroke: number;
+    /** ラベル文字列の中心（text-anchor="middle" / dominant-baseline="central" で描く）。 */
+    labelCenterX: number;
+    labelCenterY: number;
+}
+
+/**
+ * `labelPosition` を横・縦それぞれ -1 / 0 / 1 に読み替える。CSS の background-position と
+ * 同じく、キーワードの順序は問わず、片方だけなら残りは center。読めない値は中央扱い。
+ */
+export function parseLabelPosition(position: string): { h: -1 | 0 | 1; v: -1 | 0 | 1 } {
+    const words = position.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    let h: -1 | 0 | 1 | undefined;
+    let v: -1 | 0 | 1 | undefined;
+    for (const word of words) {
+        if (word === "left") h = -1;
+        else if (word === "right") h = 1;
+        else if (word === "top") v = -1;
+        else if (word === "bottom") v = 1;
+    }
+    return { h: h ?? 0, v: v ?? 0 };
 }
 
 // ラベル幅測定用の使い回しキャンバス（ブラウザのみ）。
@@ -192,6 +252,7 @@ export const createBaseProperties = (options: DefaultMarkerIconOptions = {}): Ba
     labelTextSize: options.labelTextSize ?? DEFAULT_BASE_PROPERTIES.labelTextSize,
     labelTypeFace: options.labelTypeFace ?? DEFAULT_BASE_PROPERTIES.labelTypeFace,
     labelStrokeColor: normalizeHexColor(options.labelStrokeColor ?? DEFAULT_BASE_PROPERTIES.labelStrokeColor),
+    labelPosition: options.labelPosition ?? DEFAULT_BASE_PROPERTIES.labelPosition,
     infoAnchor: options.infoAnchor ?? DEFAULT_BASE_PROPERTIES.infoAnchor,
     iconSize: options.iconSize ?? DEFAULT_BASE_PROPERTIES.iconSize,
     debug: options.debug ?? DEFAULT_BASE_PROPERTIES.debug,

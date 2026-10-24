@@ -141,6 +141,7 @@ self.addEventListener('message', (event) => {
             zoomScales: msg.zoomScales,
             extraIconScale: msg.extraIconScale ?? 1.0,
             grid: buildGrid(msg.items),
+            queryPaddingByZoom: new Map(),
         });
         // A re-registration means the markers changed, so anything already
         // drawn for this route is wrong.
@@ -171,14 +172,15 @@ function toWorldPixel(lat, lng, z) {
     return { wx, wy };
 }
 
-function tileToGeoBounds(x, y, z, tileSize) {
+function tileToGeoBounds(x, y, z, tileSize, paddingPx = 0) {
     const n = Math.pow(2, z);
     const tilesPerWorld = (256 / tileSize) * n;
-    const west = (x / tilesPerWorld) * 360 - 180;
-    const east = ((x + 1) / tilesPerWorld) * 360 - 180;
+    const pad = paddingPx / tileSize;
+    const west = ((x - pad) / tilesPerWorld) * 360 - 180;
+    const east = ((x + 1 + pad) / tilesPerWorld) * 360 - 180;
     const latRad = (yy) => Math.atan(Math.sinh(Math.PI * (1 - (2 * yy) / tilesPerWorld)));
-    const north = (latRad(y) * 180) / Math.PI;
-    const south = (latRad(y + 1) * 180) / Math.PI;
+    const north = (latRad(y - pad) * 180) / Math.PI;
+    const south = (latRad(y + 1 + pad) * 180) / Math.PI;
     return { north, south, west, east };
 }
 
@@ -193,18 +195,33 @@ function canRenderOffscreen() {
 }
 
 function queryCandidates(provider, x, y, z, tileSize, paddingPx) {
-    const { north, south, west, east } = tileToGeoBounds(x, y, z, tileSize);
-    const latSpan = north - south;
-    const lonSpan = east - west || 1e-9;
-    const padNorm = paddingPx / tileSize;
+    const { north, south, west, east } = tileToGeoBounds(x, y, z, tileSize, paddingPx);
     return queryGrid(
         provider.grid,
         provider.items,
-        south - latSpan * padNorm,
-        north + latSpan * padNorm,
-        west - lonSpan * padNorm,
-        east + lonSpan * padNorm,
+        south, north, west, east,
     );
+}
+
+function queryPaddingPx(provider, z) {
+    const cached = provider.queryPaddingByZoom.get(z);
+    if (cached !== undefined) return cached;
+    const zoomScale = provider.zoomScales?.[Math.min(22, Math.floor(z))] ?? 1;
+    const scale = Math.max(zoomScale * provider.extraIconScale, 0);
+    let extent = 0;
+    // Bounds must include icons whose anchors lie outside the first query.
+    // Icons are deduplicated; cache the bound per zoom until re-registration.
+    for (const icon of provider.icons) {
+        if (!icon) continue;
+        const width = Math.max(icon.size.width * scale, 1);
+        const height = Math.max(icon.size.height * scale, 1);
+        extent = Math.max(extent,
+            width * Math.max(Math.abs(icon.anchor.x), Math.abs(1 - icon.anchor.x)),
+            height * Math.max(Math.abs(icon.anchor.y), Math.abs(1 - icon.anchor.y)));
+    }
+    const padding = Math.ceil(extent) + 2;
+    provider.queryPaddingByZoom.set(z, padding);
+    return padding;
 }
 
 function prepareMarkers(provider, candidates, tileOriginX, tileOriginY, z, tilePx) {
@@ -222,12 +239,13 @@ function prepareMarkers(provider, candidates, tileOriginX, tileOriginY, z, tileP
         const { wx, wy } = toWorldPixel(item.lat, item.lng, z);
         const centerX = wx - tileOriginX;
         const centerY = wy - tileOriginY;
-        if (centerX < -tilePx || centerX > 2 * tilePx || centerY < -tilePx || centerY > 2 * tilePx) continue;
 
         const drawW = Math.max(icon.size.width * scale, 1);
         const drawH = Math.max(icon.size.height * scale, 1);
         const anchorX = icon.anchor.x;
         const anchorY = icon.anchor.y;
+        if (centerX - drawW * anchorX > tilePx || centerX + drawW * (1 - anchorX) < 0 ||
+            centerY - drawH * anchorY > tilePx || centerY + drawH * (1 - anchorY) < 0) continue;
         const halfX = Math.max(Math.abs(drawW * anchorX), Math.abs(drawW * (1 - anchorX)));
         const halfY = Math.max(Math.abs(drawH * anchorY), Math.abs(drawH * (1 - anchorY)));
         maxHalfExtentPx = Math.max(maxHalfExtentPx, halfX, halfY);
@@ -241,9 +259,7 @@ function prepareMarkers(provider, candidates, tileOriginX, tileOriginY, z, tileP
 async function renderOffscreen(provider, x, y, z, tileSize) {
     const tileOriginX = x * tileSize;
     const tileOriginY = y * tileSize;
-    const assumedHalfExtentPx = 32;
-
-    let candidates = queryCandidates(provider, x, y, z, tileSize, assumedHalfExtentPx);
+    const candidates = queryCandidates(provider, x, y, z, tileSize, queryPaddingPx(provider, z));
     if (candidates.length === 0) {
         if (provider.items.length > 0) {
             console.debug('[tile-sw] no candidates in bounds for z=' + z + ' x=' + x + ' y=' + y, 'totalItems:', provider.items.length);
@@ -251,11 +267,7 @@ async function renderOffscreen(provider, x, y, z, tileSize) {
         return { kind: 'empty' };
     }
 
-    let { markers, maxHalfExtentPx } = prepareMarkers(provider, candidates, tileOriginX, tileOriginY, z, tileSize);
-    if (maxHalfExtentPx > assumedHalfExtentPx + 1) {
-        candidates = queryCandidates(provider, x, y, z, tileSize, maxHalfExtentPx);
-        ({ markers, maxHalfExtentPx } = prepareMarkers(provider, candidates, tileOriginX, tileOriginY, z, tileSize));
-    }
+    const { markers, maxHalfExtentPx } = prepareMarkers(provider, candidates, tileOriginX, tileOriginY, z, tileSize);
     if (markers.length === 0) {
         console.debug('[tile-sw] candidates found but 0 markers prepared for z=' + z + ' x=' + x + ' y=' + y, 'candidates:', candidates.length, 'icons registered:', provider.icons.length);
         return { kind: 'empty' };

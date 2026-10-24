@@ -1,4 +1,5 @@
 import { copyIconBitmap } from './swIconBitmaps';
+import { MARKER_HIT_SEARCH_RADIUS_PX, pickMarkerHit, type MarkerHit } from './MarkerHitPick';
 import type { TileProvider } from '../tileserver/TileProvider';
 import type { TileRequest } from '../tileserver/TileRequest';
 import type { GeoPoint } from '../features';
@@ -20,16 +21,17 @@ function toWorldPixel(lat: number, lng: number, z: number): { wx: number; wy: nu
     return { wx, wy };
 }
 
-function tileToGeoBounds(x: number, y: number, z: number, tileSize: number): {
+function tileToGeoBounds(x: number, y: number, z: number, tileSize: number, paddingPx = 0): {
     north: number; south: number; west: number; east: number;
 } {
     const n = Math.pow(2, z);
     const tilesPerWorld = (256 / tileSize) * n; // in case tileSize !== 256, keep it in "256-equivalent" tile units
-    const west = (x / tilesPerWorld) * 360 - 180;
-    const east = ((x + 1) / tilesPerWorld) * 360 - 180;
+    const pad = paddingPx / tileSize;
+    const west = ((x - pad) / tilesPerWorld) * 360 - 180;
+    const east = ((x + 1 + pad) / tilesPerWorld) * 360 - 180;
     const latRad = (y: number) => Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / tilesPerWorld)));
-    const north = (latRad(y) * 180) / Math.PI;
-    const south = (latRad(y + 1) * 180) / Math.PI;
+    const north = (latRad(y - pad) * 180) / Math.PI;
+    const south = (latRad(y + 1 + pad) * 180) / Math.PI;
     return { north, south, west, east };
 }
 
@@ -68,9 +70,8 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
     private readonly defaultBitmapIcon: BitmapIcon = createDefaultIcon().toBitmapIcon();
     /** Per-instance tile output cache; each sync creates a fresh renderer instance, so no invalidation is needed. */
     private readonly tileCache = new Map<string, Uint8Array | null>();
-
-    /** Largest icon half-extent any tile has needed so far, in px. */
-    private observedHalfExtentPx = 32;
+    // Like tileCache, these bounds belong to one immutable rendering snapshot.
+    private readonly queryPaddingByZoom = new Map<number, number>();
 
     // android-sdk / ios-sdk の MarkerTileRenderer と同じく位置引数で受ける
     // （名前付きオプション型は持たない）。
@@ -115,12 +116,6 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
     }
 
     private queryCandidates(z: number, x: number, y: number, paddingPx: number): T[] {
-        const { north, south, west, east } = tileToGeoBounds(x, y, z, this.tileSize);
-        // Approximate degrees-per-pixel padding using the tile's own lat span;
-        // generous but cheap, matching the "conservative first pass" idea from
-        // the Android/iOS renderer without needing a full projection inverse.
-        const latSpan = north - south;
-        const lonSpan = east - west || 1e-9;
         // A whole declutter cell beyond the icon overhang.
         //
         // The overhang alone is enough to draw the tile, but not enough to
@@ -130,13 +125,9 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         // and the two would not be the same one, which is an icon cut at the
         // seam. Growing by the cell as well means every cell that reaches this
         // tile is here in full, so both tiles see all of it and agree.
-        const padNorm = (paddingPx + this.declutterPx) / this.tileSize;
-        const latPad = latSpan * padNorm;
-        const lonPad = lonSpan * padNorm;
-        const s = south - latPad;
-        const n = north + latPad;
-        const w = west - lonPad;
-        const e = east + lonPad;
+        const tile = tileToGeoBounds(x, y, z, this.tileSize);
+        const { north, south, west, east } =
+            tileToGeoBounds(x, y, z, this.tileSize, paddingPx + this.declutterPx);
 
         // With declutter on, thin at the index rather than after.
         //
@@ -149,14 +140,42 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         //
         // The index declines when its cells cannot guarantee the separation, in
         // which case this falls back to the full query and the later pass does
-        // the thinning as before.
+        // the thinning as before. The separation is read off the tile itself,
+        // not the padded box, so it does not depend on the icons.
+        const latSpan = tile.north - tile.south;
+        const lonSpan = tile.east - tile.west || 1e-9;
         const separationDegrees =
             this.declutterPx > 0 ? (Math.max(latSpan, lonSpan) * this.declutterPx) / this.tileSize : 0;
         if (separationDegrees > 0) {
-            const thinned = this.grid.queryBoundsThinned(s, n, w, e, separationDegrees);
+            const thinned = this.grid.queryBoundsThinned(south, north, west, east, separationDegrees);
             if (thinned) return thinned;
         }
-        return this.grid.queryBounds(s, n, w, e);
+        return this.grid.queryBounds(south, north, west, east);
+    }
+
+    private queryPaddingPx(z: number): number {
+        const cached = this.queryPaddingByZoom.get(z);
+        if (cached !== undefined) return cached;
+        // Determine the bound BEFORE the spatial query. Expanding from the first
+        // candidates misses a large icon whose anchor lies outside that query.
+        // Cache once per zoom, rather than scanning all markers for every tile.
+        const bitmaps = new Map<MarkerIcon, BitmapIcon>();
+        let extent = 0;
+        for (const item of this.items) {
+            let bitmap = this.defaultBitmapIcon;
+            if (item.icon) {
+                bitmap = bitmaps.get(item.icon) ?? item.icon.toBitmapIcon();
+                bitmaps.set(item.icon, bitmap);
+            }
+            const scale = Math.max(Math.max(this.iconScale(item, z), 0) * this.extraIconScale, 0);
+            const { width, height } = markerTileDrawSize(bitmap, scale);
+            extent = Math.max(extent,
+                width * Math.max(Math.abs(bitmap.anchor.x), Math.abs(1 - bitmap.anchor.x)),
+                height * Math.max(Math.abs(bitmap.anchor.y), Math.abs(1 - bitmap.anchor.y)));
+        }
+        const padding = Math.ceil(extent) + 2;
+        this.queryPaddingByZoom.set(z, padding);
+        return padding;
     }
 
     private prepareMarkers(
@@ -177,9 +196,6 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
             const { wx, wy } = toWorldPixel(item.position.latitude, item.position.longitude, z);
             const centerNormX = wx - tileOriginWx;
             const centerNormY = wy - tileOriginWy;
-            if (centerNormX < -tilePx || centerNormX > 2 * tilePx || centerNormY < -tilePx || centerNormY > 2 * tilePx) {
-                continue;
-            }
 
             const callbackScale = Math.max(this.iconScale(item, z), 0);
             const scale = Math.max(callbackScale * this.extraIconScale, 0);
@@ -188,6 +204,8 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
             const drawH = drawSize.height;
             const anchorX = bitmapIcon.anchor.x;
             const anchorY = bitmapIcon.anchor.y;
+            if (centerNormX - drawW * anchorX > tilePx || centerNormX + drawW * (1 - anchorX) < 0 ||
+                centerNormY - drawH * anchorY > tilePx || centerNormY + drawH * (1 - anchorY) < 0) continue;
 
             const halfX = Math.max(Math.abs(drawW * anchorX), Math.abs(drawW * (1 - anchorX)));
             const halfY = Math.max(Math.abs(drawH * anchorY), Math.abs(drawH * (1 - anchorY)));
@@ -373,13 +391,7 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
 
         const { x, y, z } = req;
         const tilePx = this.tileSize;
-        // Starts at 32px but widens to whatever a tile has actually needed.
-        // Left fixed, the "conservative first pass" never pays off — real icons
-        // are larger than the guess — and query+prepare simply run twice for
-        // every tile.
-        const assumedHalfExtentPx = this.observedHalfExtentPx;
-
-        let candidates = this.queryCandidates(z, x, y, assumedHalfExtentPx);
+        const candidates = this.queryCandidates(z, x, y, this.queryPaddingPx(z));
         if (candidates.length === 0) {
             this.cacheTile(key, null);
             return null;
@@ -392,13 +404,7 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         const tileOriginWx = x * tilePx;
         const tileOriginWy = y * tilePx;
 
-        let { markers, maxHalfExtentPx } = this.prepareMarkers(candidates, tileOriginWx, tileOriginWy, z, tilePx);
-        if (maxHalfExtentPx > assumedHalfExtentPx + 1) {
-            this.observedHalfExtentPx = maxHalfExtentPx;
-            candidates = this.queryCandidates(z, x, y, maxHalfExtentPx);
-            await Promise.all([...new Set(candidates.map((c) => this.bitmapIconOf(c).url))].map((url) => this.icons.ensure(url)));
-            ({ markers, maxHalfExtentPx } = this.prepareMarkers(candidates, tileOriginWx, tileOriginWy, z, tilePx));
-        }
+        const { markers, maxHalfExtentPx } = this.prepareMarkers(candidates, tileOriginWx, tileOriginWy, z, tilePx);
 
         if (markers.length === 0) {
             this.cacheTile(key, null);
@@ -422,9 +428,7 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
     renderTileDataUrl(req: TileRequest): string | null {
         const { x, y, z } = req;
         const tilePx = this.tileSize;
-        const assumedHalfExtentPx = this.observedHalfExtentPx;
-
-        const candidates = this.queryCandidates(z, x, y, assumedHalfExtentPx);
+        const candidates = this.queryCandidates(z, x, y, this.queryPaddingPx(z));
         if (candidates.length === 0) return null;
         this.warmIcons(candidates);
 
@@ -516,23 +520,31 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
     }
 
     /**
-     * Find the nearest item to `click` within `hitRadiusPx` pixels at the given zoom level.
+     * Find the item under `click` at the given zoom level, or the nearest one within `hitRadiusPx`.
      *
      * Use `MARKER_HIT_RADIUS_TOUCH_PX` for finger taps and `MARKER_HIT_RADIUS_MOUSE_PX`
      * for mouse/pen, or supply a custom radius. Returns `null` when nothing is close enough.
      */
     findNearest(click: GeoPoint, hitRadiusPx: number, zoom: number): T | null {
+        return this.findHit(click, hitRadiusPx, zoom)?.item ?? null;
+    }
+
+    /**
+     * {@link findNearest} の判定結果つき版。通常マーカーの結果と {@link preferMarkerHit} で
+     * 比べるために、矩形そのものに入ったか（`exact`）と距離も返す。
+     *
+     * 選び方はコアの {@link pickMarkerHit} と同じ。描かれた（ラベル込みの）アイコンの矩形に
+     * タップ点が入っているものを、先端の近い別のマーカーより優先する。
+     *
+     * @internal
+     */
+    findHit(click: GeoPoint, hitRadiusPx: number, zoom: number): MarkerHit<T> | null {
         const cosLat = Math.cos((click.latitude * Math.PI) / 180);
         const metersPerPx = (156543.03392 * cosLat) / Math.pow(2, zoom);
         if (!(metersPerPx > 0)) return null;
         const metersPerLatDeg = 111111;
         const metersPerLngDeg = 111111 * Math.max(cosLat, 1e-6);
 
-        // A marker is "hit" when the click falls inside its ICON's on-screen
-        // rectangle (anchor-adjusted) plus the tap tolerance — the same rule the
-        // providers' native `find()` uses. Testing only a fixed radius around the
-        // anchor made a large icon clickable only near its center, so taps that
-        // visually landed on the marker missed.
         const drawSizeOf = (item: T): { drawW: number; drawH: number; bitmapIcon: BitmapIcon } => {
             const bitmapIcon = this.bitmapIconOf(item);
             const scale = Math.max(Math.max(this.iconScale(item, zoom), 0) * this.extraIconScale, 0);
@@ -540,10 +552,10 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
             return { drawW, drawH, bitmapIcon };
         };
 
-        // Pad the spatial query by the largest icon half-extent so no marker whose
-        // icon covers the click is excluded. Estimated from a representative item
-        // (icons are uniform in practice); the exact per-candidate test still filters.
-        let maxHalfPx = hitRadiusPx;
+        // Pad the spatial query so no marker whose icon covers the click is excluded. Icons with a
+        // label beside the pin can be much wider than `items[0]`, so never pad by less than the
+        // shared search radius; the exact per-candidate test still filters.
+        let maxHalfPx = Math.max(hitRadiusPx, MARKER_HIT_SEARCH_RADIUS_PX);
         if (this.items.length > 0) {
             const { drawW, drawH } = drawSizeOf(this.items[0]);
             maxHalfPx = Math.max(maxHalfPx, drawW, drawH);
@@ -559,25 +571,23 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
             click.longitude + padLngDeg,
         );
 
-        let nearest: T | null = null;
-        let minDist = Infinity;
-        for (const item of candidates) {
-            const { drawW, drawH, bitmapIcon } = drawSizeOf(item);
-            // Click position relative to the marker's anchor, in screen pixels (y down).
-            const dxPx = ((click.longitude - item.position.longitude) * metersPerLngDeg) / metersPerPx;
-            const dyPx = ((item.position.latitude - click.latitude) * metersPerLatDeg) / metersPerPx;
-            const left = -bitmapIcon.anchor.x * drawW - hitRadiusPx;
-            const right = (1 - bitmapIcon.anchor.x) * drawW + hitRadiusPx;
-            const top = -bitmapIcon.anchor.y * drawH - hitRadiusPx;
-            const bottom = (1 - bitmapIcon.anchor.y) * drawH + hitRadiusPx;
-            if (dxPx >= left && dxPx <= right && dyPx >= top && dyPx <= bottom) {
-                const d = dxPx * dxPx + dyPx * dyPx;
-                if (d < minDist) {
-                    minDist = d;
-                    nearest = item;
-                }
-            }
-        }
-        return nearest;
+        // Click position relative to each marker's anchor, in screen pixels (y down). The click
+        // itself sits at the origin, so each anchor is placed at minus that offset.
+        return pickMarkerHit(
+            { x: 0, y: 0 },
+            candidates,
+            item => {
+                const { drawW, drawH, bitmapIcon } = drawSizeOf(item);
+                const dxPx = ((click.longitude - item.position.longitude) * metersPerLngDeg) / metersPerPx;
+                const dyPx = ((item.position.latitude - click.latitude) * metersPerLatDeg) / metersPerPx;
+                return {
+                    anchorScreen: { x: -dxPx, y: -dyPx },
+                    width: drawW,
+                    height: drawH,
+                    anchor: bitmapIcon.anchor,
+                };
+            },
+            hitRadiusPx,
+        );
     }
 }
