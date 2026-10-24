@@ -187,7 +187,7 @@ type MapCameraPositionInterface = {
 /**
  * Creates a default camera position.
  */
-declare function createMapCameraPosition({ position, zoom, bearing, tilt, paddings, visibleRegion, }: MapCameraPositionInterface): MapCameraPosition;
+declare function createMapCameraPosition({ position, zoom: givenZoom, bearing: givenBearing, tilt: givenTilt, paddings, visibleRegion, }: MapCameraPositionInterface): MapCameraPosition;
 /**
  * Represents the camera position and orientation for the map view.
  */
@@ -196,7 +196,12 @@ interface MapCameraPosition {
     position: GeoPoint;
     /** Backward-compatible alias for position. */
     center: GeoPoint;
-    /** Zoom level (typically 0-22, where higher is more zoomed in). */
+    /**
+     * Zoom level (typically 0-22, where higher is more zoomed in).
+     *
+     * Reads 0 when the camera was built without one; {@link isZoomSpecified}
+     * tells the two apart.
+     */
     zoom: number;
     /**
      * Map rotation in degrees (0-360, where 0 is north).
@@ -211,12 +216,29 @@ interface MapCameraPosition {
     tilt: number;
     visibleRegion: VisibleRegion | null;
     paddings: MapPaddings | null;
+    /**
+     * Whether `zoom` / `bearing` / `tilt` were given.
+     *
+     * Kept so an explicit 0 (zoom 0 is the whole world, bearing 0 is north up,
+     * tilt 0 is straight down) is not mistaken for "not given".
+     * `MapViewState.moveCameraTo` takes only the unset ones from the current
+     * camera ({@link resolvedOnto}).
+     */
+    readonly isZoomSpecified: boolean;
+    readonly isBearingSpecified: boolean;
+    readonly isTiltSpecified: boolean;
     equals(other: MapCameraPosition | null, tolerance?: number): boolean;
+    /** Keeps a property unset unless `partial` gives it. */
     copy(partial?: MapCameraPositionCopyParams): MapCameraPosition;
+    /**
+     * Returns this camera with the unset `zoom` / `bearing` / `tilt` filled in
+     * from `current`. A property that was given is used as is, 0 included.
+     */
+    resolvedOnto(current: MapCameraPosition): MapCameraPosition;
 }
 declare namespace MapCameraPosition {
     const Default: MapCameraPosition;
-    function from(other: MapCameraPositionInterface): MapCameraPosition;
+    function from(other: MapCameraPositionInterface | MapCameraPosition): MapCameraPosition;
 }
 
 interface Offset {

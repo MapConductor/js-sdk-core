@@ -187,11 +187,11 @@ export abstract class MapViewState<ActualMapDesignType extends MapDesignTypeInte
   moveCameraTo(cameraPosition: MapCameraPosition, durationMillis?: number): void;
   moveCameraTo(position: GeoPoint, durationMillis?: number): void;
   moveCameraTo(positionOrCamera: GeoPoint | MapCameraPosition, durationMillis?: number): void {
-    // カメラを渡されたらそのまま使う。「位置だけ動かして縮尺は保つ」は
-    // `moveCameraTo(position: GeoPoint)` のオーバーロードが担う（下の行）。
+    // 明示されたプロパティは 0 でもそのまま使い、未指定のものだけ現在のカメラから
+    // 引き継ぐ。`createMapCameraPosition({ position })` なら位置だけが動く。
     const next =
       'zoom' in positionOrCamera
-        ? (positionOrCamera as MapCameraPosition)
+        ? (positionOrCamera as MapCameraPosition).resolvedOnto(this._cameraPosition)
         : this._cameraPosition.copy({ position: positionOrCamera as GeoPoint });
 
     const controller = this.attachedMapController;
