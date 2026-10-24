@@ -47,7 +47,12 @@ export interface MapCameraPosition {
   position: GeoPoint;
   /** Backward-compatible alias for position. */
   center: GeoPoint;
-  /** Zoom level (typically 0-22, where higher is more zoomed in). */
+  /**
+   * Zoom level (typically 0-22, where higher is more zoomed in).
+   *
+   * Reads 0 when the camera was built without one; {@link isZoomSpecified}
+   * tells the two apart.
+   */
   zoom: number;
   /**
    * Map rotation in degrees (0-360, where 0 is north).
@@ -62,8 +67,25 @@ export interface MapCameraPosition {
   tilt: number;
   visibleRegion: VisibleRegion | null;
   paddings: MapPaddings | null;
+  /**
+   * Whether `zoom` / `bearing` / `tilt` were given.
+   *
+   * Kept so an explicit 0 (zoom 0 is the whole world, bearing 0 is north up,
+   * tilt 0 is straight down) is not mistaken for "not given".
+   * `MapViewState.moveCameraTo` takes only the unset ones from the current
+   * camera ({@link resolvedOnto}).
+   */
+  readonly isZoomSpecified: boolean;
+  readonly isBearingSpecified: boolean;
+  readonly isTiltSpecified: boolean;
   equals(other: MapCameraPosition | null, tolerance?: number): boolean;
+  /** Keeps a property unset unless `partial` gives it. */
   copy(partial?: MapCameraPositionCopyParams): MapCameraPosition;
+  /**
+   * Returns this camera with the unset `zoom` / `bearing` / `tilt` filled in
+   * from `current`. A property that was given is used as is, 0 included.
+   */
+  resolvedOnto(current: MapCameraPosition): MapCameraPosition;
 }
 
 /**
@@ -102,12 +124,18 @@ export type MapCameraPositionInterface = {
  */
 export function createMapCameraPosition({
   position,
-  zoom = 0,
-  bearing = 0,
-  tilt = 0,
+  zoom: givenZoom,
+  bearing: givenBearing,
+  tilt: givenTilt,
   paddings = MapPaddings.Zeros,
   visibleRegion = null,
 }: MapCameraPositionInterface): MapCameraPosition {
+  const isZoomSpecified = givenZoom != null;
+  const isBearingSpecified = givenBearing != null;
+  const isTiltSpecified = givenTilt != null;
+  const zoom = givenZoom ?? 0;
+  const bearing = givenBearing ?? 0;
+  const tilt = givenTilt ?? 0;
   const normalizedPosition = fromGeoPoint(position);
   const normalizedPaddings = paddings == null ? null : MapPaddings.from(paddings);
 
@@ -131,6 +159,9 @@ export function createMapCameraPosition({
       return visibleRegion;
     },
     paddings: normalizedPaddings,
+    isZoomSpecified,
+    isBearingSpecified,
+    isTiltSpecified,
     equals(other: MapCameraPosition | null, tolerance: number = 1e-2): boolean {
       if (!other) return false;
       return (
@@ -143,11 +174,24 @@ export function createMapCameraPosition({
     copy(partial: MapCameraPositionCopyParams = {}): MapCameraPosition {
       return createMapCameraPosition({
         position: partial.position ?? partial.center ?? normalizedPosition,
-        zoom: partial.zoom ?? zoom,
-        bearing: partial.bearing ?? bearing,
-        tilt: partial.tilt ?? tilt,
+        zoom: partial.zoom ?? givenZoom,
+        bearing: partial.bearing ?? givenBearing,
+        tilt: partial.tilt ?? givenTilt,
         paddings: partial.paddings ?? normalizedPaddings,
         visibleRegion: partial.visibleRegion ?? visibleRegion,
+      });
+    },
+    resolvedOnto(current: MapCameraPosition): MapCameraPosition {
+      if (isZoomSpecified && isBearingSpecified && isTiltSpecified) {
+        return this;
+      }
+      return createMapCameraPosition({
+        position: normalizedPosition,
+        zoom: isZoomSpecified ? zoom : current.zoom,
+        bearing: isBearingSpecified ? bearing : current.bearing,
+        tilt: isTiltSpecified ? tilt : current.tilt,
+        paddings: normalizedPaddings,
+        visibleRegion,
       });
     },
   };
@@ -165,12 +209,16 @@ export namespace MapCameraPosition {
     bearing: 0,
   });
 
-  export function from(other: MapCameraPositionInterface): MapCameraPosition {
+  export function from(
+    other: MapCameraPositionInterface | MapCameraPosition,
+  ): MapCameraPosition {
+    // A MapCameraPosition reads 0 for an unset property; keep it unset.
+    const camera = other as Partial<MapCameraPosition>;
     return createMapCameraPosition({
       position: other.position,
-      zoom: other.zoom,
-      bearing: other.bearing,
-      tilt: other.tilt,
+      zoom: camera.isZoomSpecified === false ? undefined : other.zoom,
+      bearing: camera.isBearingSpecified === false ? undefined : other.bearing,
+      tilt: camera.isTiltSpecified === false ? undefined : other.tilt,
       paddings: other.paddings,
       visibleRegion: other.visibleRegion,
     });
