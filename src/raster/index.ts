@@ -2,6 +2,7 @@ export * from "./RasterHeaderRules";
 export * from "./RasterLayerCapable";
 export * from "./RasterLayerController";
 export * from "./RasterLayerEntity";
+export * from "./RasterTilePreference";
 export * from "./RasterLayerManager";
 export * from "./RasterLayerOverlay";
 export * from "./RasterLayerOverlayRenderer";

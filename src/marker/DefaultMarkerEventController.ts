@@ -50,6 +50,7 @@ export interface MarkerEventHost<ActualMarker> {
     setSelectedMarker(entity: MarkerEntity<ActualMarker> | null): void | Promise<void>;
     updateSelectedPosition(position: GeoPoint | null): void;
 
+    dispatchClick(state: MarkerState): void;
     dispatchDragStart(state: MarkerState): void;
     dispatchDrag(state: MarkerState): void;
     dispatchDragEnd(state: MarkerState): void;
@@ -218,6 +219,16 @@ export class DefaultMarkerEventController<ActualMarker> {
         await this.host.setSelectedMarker(null);
         if (wasDragging) {
             this.host.dispatchDragEnd(selected.state);
+        } else if (updatePosition && selected.state.clickable) {
+            // A press and release that never passed the drag threshold is a
+            // click, and this is the only place that can report it: the
+            // pointerdown above called `preventDefault()` to take the gesture,
+            // which also suppresses the browser's click and with it the map's
+            // own tap cascade. Without this, a draggable marker was simply not
+            // clickable — `onClick` never fired, and the map did not get the
+            // tap either. Not dispatched for `pointercancel`, which is the
+            // gesture being taken away rather than completed.
+            this.host.dispatchClick(selected.state);
         }
         this.restoreMapInteraction(event.pointerId);
     }

@@ -86,8 +86,11 @@ function fixture(c) {
         const b = m.icon.toBitmapIcon();
         const width = Math.max(b.size.width * scale * extra, 1), height = Math.max(b.size.height * scale * extra, 1);
         const dx = i ? 24 : c.dx, dy = i ? 64 : c.dy;
-        const left = Math.max(0, dx - width * b.anchor.x), top = Math.max(0, dy - height * b.anchor.y);
-        const right = Math.min(256, dx + width * (1 - b.anchor.x)), bottom = Math.min(256, dy + height * (1 - b.anchor.y));
+        // Markers are drawn on whole pixels: the origin and the size are rounded separately.
+        const x0 = Math.round(dx - width * b.anchor.x), y0 = Math.round(dy - height * b.anchor.y);
+        const w = Math.max(1, Math.round(width)), h = Math.max(1, Math.round(height));
+        const left = Math.max(0, x0), top = Math.max(0, y0);
+        const right = Math.min(256, x0 + w), bottom = Math.min(256, y0 + h);
         return { x: left, y: top, width: right - left, height: bottom - top };
     });
     return { req, markers, scale, extra, expected };
@@ -113,8 +116,8 @@ for (const c of cases) {
                 const icons = f.markers.map(m => ({ ...m.icon.toBitmapIcon(), bitmap: m.icon.toBitmapIcon().size }));
                 const items = f.markers.map((m, iconIndex) => ({ lat: m.position.latitude, lng: m.position.longitude, iconIndex }));
                 const provider = sw.register(items, icons, f.scale, f.extra);
-                const blob = await sw.render(provider, f.req.x, f.req.y, f.req.z, 256);
-                if (blob) actual = JSON.parse(await blob.text());
+                const outcome = await sw.render(provider, f.req.x, f.req.y, f.req.z, 256);
+                if (outcome.kind === 'tile') actual = JSON.parse(await outcome.blob.text());
             } else {
                 const renderer = new MarkerTileRenderer(f.markers, 256, () => f.scale, f.extra);
                 await renderer.preloadIcons();
@@ -147,9 +150,9 @@ test('Service Worker re-registration resets cached bounds for new icons', async 
     const p = position(req, 128, 290), items = [{ lat: p.latitude, lng: p.longitude, iconIndex: 0 }];
     const icons = size => [{ ...bitmap(size, size, { x: .5, y: 1 }), bitmap: { width: size, height: size } }];
     const small = sw.register(items, icons(16));
-    assert.equal(await sw.render(small, req.x, req.y, req.z, 256), null);
+    assert.equal((await sw.render(small, req.x, req.y, req.z, 256)).kind, 'empty');
     const large = sw.register(items, icons(54));
-    const blob = await sw.render(large, req.x, req.y, req.z, 256);
-    assert.ok(blob);
-    assert.equal(JSON.parse(await blob.text()).length, 1);
+    const outcome = await sw.render(large, req.x, req.y, req.z, 256);
+    assert.equal(outcome.kind, 'tile');
+    assert.equal(JSON.parse(await outcome.blob.text()).length, 1);
 });

@@ -63,6 +63,8 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
     readonly extraIconScale: number;
     private readonly iconScale: (item: T, zoom: number) => number;
     private readonly debugTileOverlay: boolean;
+    /** Keep one marker per cell of this many pixels, or 0 to keep them all. */
+    private readonly declutterPx: number;
     private readonly grid: GeoGridIndex<T>;
     private readonly icons = new IconImageCache();
     private readonly defaultBitmapIcon: BitmapIcon = createDefaultIcon().toBitmapIcon();
@@ -79,8 +81,10 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         iconScaleCallback?: (item: T, zoom: number) => number,
         extraIconScale: number = 1.0,
         debugTileOverlay: boolean = false,
+        declutterPx: number = 0,
     ) {
         this.tileSize = tileSize;
+        this.declutterPx = declutterPx;
         this.iconScale = iconScaleCallback ?? ((_item, _zoom) => 1.0);
         this.extraIconScale = extraIconScale;
         this.debugTileOverlay = debugTileOverlay;
@@ -112,7 +116,40 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
     }
 
     private queryCandidates(z: number, x: number, y: number, paddingPx: number): T[] {
-        const { north, south, west, east } = tileToGeoBounds(x, y, z, this.tileSize, paddingPx);
+        // A whole declutter cell beyond the icon overhang.
+        //
+        // The overhang alone is enough to draw the tile, but not enough to
+        // decide it: a declutter cell straddling the edge would have some of
+        // its markers inside the query and some outside, and the tile next door
+        // would see a different part of the same cell. Both would keep a marker
+        // and the two would not be the same one, which is an icon cut at the
+        // seam. Growing by the cell as well means every cell that reaches this
+        // tile is here in full, so both tiles see all of it and agree.
+        const tile = tileToGeoBounds(x, y, z, this.tileSize);
+        const { north, south, west, east } =
+            tileToGeoBounds(x, y, z, this.tileSize, paddingPx + this.declutterPx);
+
+        // With declutter on, thin at the index rather than after.
+        //
+        // The caller is about to keep one marker per `declutterPx` cell anyway,
+        // so every marker it will drop is one the index need not have returned
+        // — and on a dense layer that is most of them. Positioning and decoding
+        // the ones destined for the bin is what made declutter *cost* time on
+        // the other two SDKs before they moved the thinning here (20,000
+        // markers, 82.8 ms to 178.5 ms on iOS).
+        //
+        // The index declines when its cells cannot guarantee the separation, in
+        // which case this falls back to the full query and the later pass does
+        // the thinning as before. The separation is read off the tile itself,
+        // not the padded box, so it does not depend on the icons.
+        const latSpan = tile.north - tile.south;
+        const lonSpan = tile.east - tile.west || 1e-9;
+        const separationDegrees =
+            this.declutterPx > 0 ? (Math.max(latSpan, lonSpan) * this.declutterPx) / this.tileSize : 0;
+        if (separationDegrees > 0) {
+            const thinned = this.grid.queryBoundsThinned(south, north, west, east, separationDegrees);
+            if (thinned) return thinned;
+        }
         return this.grid.queryBounds(south, north, west, east);
     }
 
@@ -207,15 +244,97 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         tilePx: number,
         paddingPx: number,
         req: TileRequest,
+        tileOriginWx: number,
+        tileOriginWy: number,
     ): OffscreenCanvas | HTMLCanvasElement {
         const offscreenSize = tilePx + paddingPx * 2;
         const { canvas: offscreen, ctx: offCtx } = this.createCanvas(offscreenSize);
-        for (const m of markers) {
+        // Drop markers completely hidden by a later one.
+        //
+        // Zoom out far enough and a whole city collapses onto a few hundred
+        // pixels: at z6 a dataset of 20k markers resolves to a couple of
+        // thousand distinct positions, and the rest are drawn underneath copies
+        // of themselves. Keeping the last of each group is what would have been
+        // visible anyway, since drawing is in painter's order.
+        //
+        // Only exact agreement counts — same rectangle, same icon — so nothing
+        // that could peek out from behind another is dropped. Where markers
+        // share a rectangle but not an icon, none are: a different icon may be
+        // transparent where the one above it is not.
+        const lastAt = new Map<string, number>();
+        const mixedIcons = new Set<string>();
+        const placed = markers.map((m) => {
             const centerX = m.centerNormX + paddingPx;
             const centerY = m.centerNormY + paddingPx;
-            const dx = centerX - m.drawW * m.anchorX;
-            const dy = centerY - m.drawH * m.anchorY;
-            offCtx.drawImage(m.image as CanvasImageSource, dx, dy, m.drawW, m.drawH);
+            // Whole pixels, deliberately. The destination comes out of a
+            // projection, so it lands on a fraction of a pixel almost every
+            // time, and drawing to a non-integer destination makes the canvas
+            // resample: 20k markers measured at 277 ms unaligned against 38 ms
+            // aligned in Chromium, and the same effect costs 20x on Android.
+            // Rounding moves a pin by at most half a pixel, which is not
+            // visible at icon scale.
+            return {
+                image: m.image as CanvasImageSource,
+                dx: Math.round(centerX - m.drawW * m.anchorX),
+                dy: Math.round(centerY - m.drawH * m.anchorY),
+                w: Math.max(1, Math.round(m.drawW)),
+                h: Math.max(1, Math.round(m.drawH)),
+                worldX: m.centerNormX + tileOriginWx,
+                worldY: m.centerNormY + tileOriginWy,
+            };
+        });
+
+        // With decluttering on the group is a cell rather than a rectangle, and
+        // the mixed-icon exemption does not apply: the caller has said markers
+        // that close together are interchangeable, so one of them stands for
+        // the rest whatever they draw.
+        // The declutter cell is anchored to the world, not to this tile.
+        //
+        // `dx`/`dy` are positions within this tile, so a cell keyed off them
+        // moves with the tile: the same ground lands in a different cell on the
+        // tile next door, the two tiles keep different markers, and a marker
+        // drawn on one and dropped on the other is **cut at the seam.** Adding
+        // the tile's own origin back gives the world pixel the projection
+        // produced, which is the same number whichever tile is asking.
+        //
+        // Subtracting the tile's own cell keeps the numbers small. That does
+        // not move the grid — two tiles still agree about which markers share a
+        // cell, which is all the grouping is asked for — and android-sdk needs
+        // the small numbers, because it packs the group and an index into one
+        // Long. The three stay identical.
+        const declutter = this.declutterPx > 0;
+        const cell = Math.max(this.declutterPx, 1);
+        const baseCellX = Math.floor(tileOriginWx / cell);
+        const baseCellY = Math.floor(tileOriginWy / cell);
+        const groupKey = (p: {
+            dx: number;
+            dy: number;
+            w: number;
+            h: number;
+            worldX: number;
+            worldY: number;
+        }): string =>
+            declutter
+                ? `${Math.floor(p.worldX / cell) - baseCellX},${Math.floor(p.worldY / cell) - baseCellY}`
+                : `${p.dx},${p.dy},${p.w},${p.h}`;
+
+        const seenIcon = new Map<string, CanvasImageSource>();
+        for (let index = 0; index < placed.length; index++) {
+            const p = placed[index];
+            const key = groupKey(p);
+            if (!declutter) {
+                const previous = seenIcon.get(key);
+                if (previous !== undefined && previous !== p.image) mixedIcons.add(key);
+                seenIcon.set(key, p.image);
+            }
+            lastAt.set(key, index);
+        }
+
+        for (let index = 0; index < placed.length; index++) {
+            const p = placed[index];
+            const key = groupKey(p);
+            if (!mixedIcons.has(key) && lastAt.get(key) !== index) continue;
+            offCtx.drawImage(p.image, p.dx, p.dy, p.w, p.h);
         }
 
         // android-sdk / ios-sdk と同じデバッグオーバーレイ：padding 位置に上/左の枠線と
@@ -293,7 +412,7 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         }
 
         const paddingPx = Math.max(Math.ceil(maxHalfExtentPx + 2), 2);
-        const finalCanvas = this.draw(markers, tilePx, paddingPx, req);
+        const finalCanvas = this.draw(markers, tilePx, paddingPx, req, tileOriginWx, tileOriginWy);
         const bytes = await this.canvasToBytes(finalCanvas);
         this.cacheTile(key, bytes);
         return bytes;
@@ -319,7 +438,7 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         if (markers.length === 0) return null;
 
         const paddingPx = Math.max(Math.ceil(maxHalfExtentPx + 2), 2);
-        const finalCanvas = this.draw(markers, tilePx, paddingPx, req);
+        const finalCanvas = this.draw(markers, tilePx, paddingPx, req, tileOriginWx, tileOriginWy);
         return finalCanvas instanceof HTMLCanvasElement ? finalCanvas.toDataURL('image/png') : null;
     }
 

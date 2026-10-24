@@ -1,4 +1,5 @@
 import type { CameraRestriction } from './CameraRestriction';
+import type { MapViewStyle } from './MapViewStyle';
 import type { GeoPoint } from '../features/GeoPoint';
 import type { MapCameraPosition } from '../types/MapCamera';
 import type { MapViewControllerInterface } from '../controller/MapViewControllerInterface';
@@ -34,6 +35,22 @@ export interface MapViewBaseProps<TState extends MapViewStateInterface<MapDesign
    * そちらはマップ生成時にしか反映されない。実行時に変更したい場合はこちらを使う。
    */
   cameraRestriction?: CameraRestriction | null;
+  /**
+   * 地図の見た目。デザイン名を選ぶ代わりにアプリが直接述べるときに渡す。
+   *
+   * ベクタースタイルは**ベースマップそのもの**なので、重ねるのではなく
+   * 「これが地図だ」と言う。`@mapconductor/vectorstyle` が作る。下で何が
+   * 起きるかはバックエンド次第で、アプリは知らなくてよい。
+   *
+   * **android-sdk と ios-sdk ではこの引数名は `style`。** JS だけ違うのは
+   * `style` が React/React Native では要素自身の見た目を指す名前として
+   * 予約同然だから。RN の `MapViewBaseProps` は実際に `style` を
+   * コンテナのスタイルとして使っており、そこを奪うと React を書く人全員が
+   * 踏む。web と RN で名前を割るほうが悪いので、JS 側は両方 `mapStyle`。
+   */
+  mapStyle?: MapViewStyle | null;
+  /** スタイルが言ってきたこと。渡さなければ console に出る。 */
+  onStyleDiagnostics?: (diagnostics: readonly string[]) => void;
 }
 
 /**

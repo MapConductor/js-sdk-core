@@ -25,6 +25,64 @@ const EMPTY_TILE = new Uint8Array([
  */
 const swProviders = new Map();
 
+/**
+ * Rendered tiles, keyed by their URL path.
+ *
+ * The Cache-Control header on the response does nothing here: `respondWith`
+ * intercepts ahead of the HTTP cache, so a repeat request re-rendered the tile
+ * every time — measured at 105 ms per fetch of an already-drawn tile, whether
+ * or not the caller asked for caching.
+ *
+ * Budgeted in bytes rather than entries. Counting entries is the mistake this
+ * project has already made once: a byte-blind cache of a few hundred tiles is
+ * tens of megabytes, and in a Service Worker there is no low-memory callback to
+ * catch it.
+ */
+const TILE_CACHE_MAX_BYTES = 16 * 1024 * 1024;
+const tileCache = new Map();
+let tileCacheBytes = 0;
+
+function cachedTile(key) {
+    const hit = tileCache.get(key);
+    if (hit === undefined) return null;
+    // Map preserves insertion order, so re-inserting makes this the newest and
+    // the eviction loop below can just take from the front.
+    tileCache.delete(key);
+    tileCache.set(key, hit);
+    return hit;
+}
+
+function cacheTile(key, bytes) {
+    if (!bytes || bytes.byteLength === 0) return;
+    // A single tile larger than the whole budget would evict everything and
+    // then not fit; skip it rather than empty the cache for nothing.
+    if (bytes.byteLength > TILE_CACHE_MAX_BYTES) return;
+    const existing = tileCache.get(key);
+    if (existing !== undefined) {
+        tileCacheBytes -= existing.byteLength;
+        tileCache.delete(key);
+    }
+    tileCache.set(key, bytes);
+    tileCacheBytes += bytes.byteLength;
+    while (tileCacheBytes > TILE_CACHE_MAX_BYTES) {
+        const oldest = tileCache.keys().next();
+        if (oldest.done) break;
+        tileCacheBytes -= tileCache.get(oldest.value).byteLength;
+        tileCache.delete(oldest.value);
+    }
+}
+
+/** Drops a route's tiles. Its markers have changed, so they all lie. */
+function dropCachedTiles(routeId) {
+    const prefix = '/__tiles/' + routeId + '/';
+    for (const key of Array.from(tileCache.keys())) {
+        if (key.startsWith(prefix)) {
+            tileCacheBytes -= tileCache.get(key).byteLength;
+            tileCache.delete(key);
+        }
+    }
+}
+
 const GRID_CELL_DEG = 0.02;
 const GRID_MAX_CELLS_PER_QUERY = 4000;
 
@@ -85,12 +143,16 @@ self.addEventListener('message', (event) => {
             grid: buildGrid(msg.items),
             queryPaddingByZoom: new Map(),
         });
+        // A re-registration means the markers changed, so anything already
+        // drawn for this route is wrong.
+        dropCachedTiles(msg.routeId);
         console.log('[tile-sw] sw-register:', msg.routeId, 'items:', msg.items.length, 'icons:', msg.icons.length);
         if (event.ports && event.ports[0]) {
             event.ports[0].postMessage({ ok: true });
         }
     } else if (msg.type === 'sw-unregister') {
         swProviders.delete(msg.routeId);
+        dropCachedTiles(msg.routeId);
         console.log('[tile-sw] sw-unregister:', msg.routeId);
     }
 });
@@ -202,38 +264,59 @@ async function renderOffscreen(provider, x, y, z, tileSize) {
         if (provider.items.length > 0) {
             console.debug('[tile-sw] no candidates in bounds for z=' + z + ' x=' + x + ' y=' + y, 'totalItems:', provider.items.length);
         }
-        return null;
+        return { kind: 'empty' };
     }
 
     const { markers, maxHalfExtentPx } = prepareMarkers(provider, candidates, tileOriginX, tileOriginY, z, tileSize);
     if (markers.length === 0) {
         console.debug('[tile-sw] candidates found but 0 markers prepared for z=' + z + ' x=' + x + ' y=' + y, 'candidates:', candidates.length, 'icons registered:', provider.icons.length);
-        return null;
+        return { kind: 'empty' };
     }
 
     const paddingPx = Math.max(Math.ceil(maxHalfExtentPx + 2), 2);
     const offscreenSize = tileSize + paddingPx * 2;
     const canvas = new OffscreenCanvas(offscreenSize, offscreenSize);
     const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
+    if (!ctx) return { kind: 'failed' };
 
-    for (const m of markers) {
-        const cx = m.centerX + paddingPx;
-        const cy = m.centerY + paddingPx;
-        ctx.drawImage(m.bitmap, cx - m.drawW * m.anchorX, cy - m.drawH * m.anchorY, m.drawW, m.drawH);
+    // Whole pixels, and markers exactly on top of one another drawn once —
+    // see the same loop in MarkerTileRenderer.draw() for why both matter.
+    const placed = markers.map((m) => ({
+        bitmap: m.bitmap,
+        dx: Math.round(m.centerX + paddingPx - m.drawW * m.anchorX),
+        dy: Math.round(m.centerY + paddingPx - m.drawH * m.anchorY),
+        w: Math.max(1, Math.round(m.drawW)),
+        h: Math.max(1, Math.round(m.drawH)),
+    }));
+    const lastAt = new Map();
+    const seenIcon = new Map();
+    const mixedIcons = new Set();
+    for (let index = 0; index < placed.length; index++) {
+        const p = placed[index];
+        const key = p.dx + ',' + p.dy + ',' + p.w + ',' + p.h;
+        const previous = seenIcon.get(key);
+        if (previous !== undefined && previous !== p.bitmap) mixedIcons.add(key);
+        seenIcon.set(key, p.bitmap);
+        lastAt.set(key, index);
+    }
+    for (let index = 0; index < placed.length; index++) {
+        const p = placed[index];
+        const key = p.dx + ',' + p.dy + ',' + p.w + ',' + p.h;
+        if (!mixedIcons.has(key) && lastAt.get(key) !== index) continue;
+        ctx.drawImage(p.bitmap, p.dx, p.dy, p.w, p.h);
     }
 
     const finalCanvas = new OffscreenCanvas(tileSize, tileSize);
     const finalCtx = finalCanvas.getContext('2d');
-    if (!finalCtx) return null;
+    if (!finalCtx) return { kind: 'failed' };
     finalCtx.drawImage(canvas, -paddingPx, -paddingPx);
 
     const blob = await finalCanvas.convertToBlob({ type: 'image/png' });
     if (!blob || blob.size === 0) {
         console.warn('[tile-sw] convertToBlob returned empty blob for tile', x, y, z);
-        return null;
+        return { kind: 'failed' };
     }
-    return blob;
+    return { kind: 'tile', blob };
 }
 
 async function findWindowClient(clientId) {
@@ -245,8 +328,30 @@ async function findWindowClient(clientId) {
     return windows.find((c) => c.focused) ?? windows[0] ?? null;
 }
 
+/**
+ * Nothing to draw here — a real answer, and a cacheable one.
+ *
+ * What this must never be used for is a tile that could not be drawn right
+ * now. A map library keeps what it is given: a transparent picture handed out
+ * for a failure becomes a hole that is never asked about again, and the
+ * neighbouring tiles' overhang is cut off at its edge. ios-sdk and android-sdk
+ * answer the same three ways -- empty with pixels, failure with 503, and 404
+ * only for a path that names nothing.
+ */
 function emptyTileResponse() {
-    return new Response(EMPTY_TILE, { headers: { 'Content-Type': 'image/png' } });
+    return pngResponse(EMPTY_TILE);
+}
+
+/** Could not draw it now. The library will ask again; nothing is cached. */
+function failedTileResponse() {
+    return new Response('tile render failed', {
+        status: 503,
+        headers: {
+            'Content-Type': 'text/plain',
+            'Cache-Control': 'no-store',
+            'Retry-After': '1',
+        },
+    });
 }
 
 function pngResponse(body) {
@@ -266,16 +371,22 @@ function pngResponse(body) {
 function postMessageRender(client, pathname) {
     return new Promise((resolve) => {
         const channel = new MessageChannel();
+        // A page that never answered has not told us the tile is empty.
         const timeout = setTimeout(() => {
-            resolve(emptyTileResponse());
+            console.warn('[tile-sw] main thread did not answer in 5s for', pathname);
+            resolve(failedTileResponse());
         }, 5000);
 
         channel.port1.onmessage = (e) => {
             clearTimeout(timeout);
-            const result = e.data.result;
+            const { result, outcome } = e.data;
             if (result) {
                 resolve(pngResponse(result));
+            } else if (outcome === 'failed') {
+                resolve(failedTileResponse());
             } else {
+                // 'empty', 'notFound', and pages older than this protocol,
+                // where no bytes only ever meant nothing to draw.
                 resolve(emptyTileResponse());
             }
         };
@@ -286,7 +397,9 @@ function postMessageRender(client, pathname) {
 
 async function mainThreadRender(pathname, clientId) {
     const client = await findWindowClient(clientId);
-    if (!client) return emptyTileResponse();
+    // No page to draw it: nobody has said this tile is empty, so do not claim
+    // it is. The next request will find a client.
+    if (!client) return failedTileResponse();
     return postMessageRender(client, pathname);
 }
 
@@ -303,11 +416,21 @@ self.addEventListener('fetch', (event) => {
     console.log('[tile-sw] fetch z=' + z + ' x=' + x + ' y=' + y, 'swProvider:', !!swProvider, 'offscreen:', offscreenOk, 'clientId:', event.clientId);
 
     if (swProvider && offscreenOk) {
+        const cached = cachedTile(url.pathname);
+        if (cached) {
+            // A fresh Response each time: a body can only be read once, so the
+            // cache holds the bytes rather than the Response.
+            event.respondWith(pngResponse(cached));
+            return;
+        }
         event.respondWith(
             renderOffscreen(swProvider, x, y, z, tileSize)
-                .then((blob) => {
-                    // console.log('[tile-sw] offscreen result blob:', blob ? blob.size : 'null', 'for z=' + z + ' x=' + x + ' y=' + y);
-                    return blob ? pngResponse(blob) : emptyTileResponse();
+                .then(async (outcome) => {
+                    if (outcome.kind === 'empty') return emptyTileResponse();
+                    if (outcome.kind === 'failed') return failedTileResponse();
+                    const bytes = await outcome.blob.arrayBuffer();
+                    cacheTile(url.pathname, bytes);
+                    return pngResponse(bytes);
                 })
                 .catch((err) => {
                     console.warn('[tile-sw] offscreen failed, falling back to postMessage:', err);
