@@ -3423,8 +3423,7 @@ declare class MarkerTileRenderer<T extends {
     private readonly defaultBitmapIcon;
     /** Per-instance tile output cache; each sync creates a fresh renderer instance, so no invalidation is needed. */
     private readonly tileCache;
-    /** Largest icon half-extent any tile has needed so far, in px. */
-    private observedHalfExtentPx;
+    private readonly queryPaddingByZoom;
     constructor(items: ReadonlyArray<T>, tileSize?: number, iconScaleCallback?: (item: T, zoom: number) => number, extraIconScale?: number, debugTileOverlay?: boolean, declutterPx?: number);
     private bitmapIconOf;
     /** Decode every unique icon up front. Call before relying on the synchronous renderTileDataUrl() path. */
@@ -3432,6 +3431,7 @@ declare class MarkerTileRenderer<T extends {
     private tileKey;
     private cacheTile;
     private queryCandidates;
+    private queryPaddingPx;
     private prepareMarkers;
     /** Kick off (but don't await) decoding for any candidate not yet in the icon cache. */
     private warmIcons;
