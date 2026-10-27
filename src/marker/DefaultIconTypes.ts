@@ -12,7 +12,7 @@ import { Offset } from "../types";
  * 横（left / center / right）と縦（top / center / bottom）のキーワードを空白区切りで並べる。
  * 順序は問わず、片方だけなら残りは `center`。
  *
- * - `left` / `right` はピンの外側に置き、縦はピンの上端・頭の中心・先端に揃える。
+ * - `left` / `right` はピンの外側に置き、縦はピンの上端・上端と先端の中間・先端に揃える。
  * - `center` 列の `top` / `bottom` はピンの上・下の外側に置く。
  * - `"center center"`（既定）はピンの頭の中に重ねる（従来どおり）。
  */
