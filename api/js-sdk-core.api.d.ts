@@ -2885,7 +2885,7 @@ declare abstract class AbstractDefaultIcon extends AbstractMarkerIcon {
      * is one, as fractions of the bitmap. The bitmap is a square around a pin
      * about two thirds as wide, so taps beside the pin used to count.
      */
-    private hitBounds;
+    protected hitBounds(layout: IconLayout): NonNullable<BitmapIcon["hitBounds"]>;
     hashCode(): number;
     /**
      * Android AbstractDefaultIcon.toBitmapIcon() / iOS makeIcon() と同じレイアウト計算。
