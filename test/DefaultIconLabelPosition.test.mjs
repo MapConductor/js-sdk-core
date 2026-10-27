@@ -36,6 +36,17 @@ test('right center はビットマップを右へだけ伸ばし、ピン先端�
     assert.ok(x > icon.iconSize, `label center ${x} should be right of the pin`);
 });
 
+test('横に置いた center は、ピンの上端と先端の真ん中に置く（頭の中心ではない）', () => {
+    for (const labelPosition of ['right center', 'left center', 'right']) {
+        const icon = new ColorDefaultIcon({ label, labelPosition });
+        const svg = decodeURIComponent(icon.toBitmapIcon().url);
+        const y = Number(/<text x="[\d.]+" y="([\d.]+)"/.exec(svg)[1]);
+        // 48 px のピンは y 2〜43 に描かれる（中間は約 22.5）。頭の中心は 16.8。
+        assert.ok(Math.abs(y - 22.5) <= 1, `${labelPosition}: label center y ${y}`);
+        assert.equal(icon.toBitmapIcon().size.height, icon.iconSize);
+    }
+});
+
 // ピン形は外接箱の中で 0.25 単位だけ右に寄っているので、1px までの差は許す。
 test('left は right のほぼ鏡像', () => {
     const right = bitmapTipPx(new ColorDefaultIcon({ label, labelPosition: 'right' }));
