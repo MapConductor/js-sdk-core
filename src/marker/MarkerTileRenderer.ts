@@ -1,5 +1,6 @@
 import { copyIconBitmap } from './swIconBitmaps';
 import { MARKER_HIT_SEARCH_RADIUS_PX, pickMarkerHit, type MarkerHit } from './MarkerHitPick';
+import { markerHitShape } from './MarkerIconExtent';
 import type { TileProvider } from '../tileserver/TileProvider';
 import type { TileRequest } from '../tileserver/TileRequest';
 import type { GeoPoint } from '../features';
@@ -580,12 +581,7 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
                 const { drawW, drawH, bitmapIcon } = drawSizeOf(item);
                 const dxPx = ((click.longitude - item.position.longitude) * metersPerLngDeg) / metersPerPx;
                 const dyPx = ((item.position.latitude - click.latitude) * metersPerLatDeg) / metersPerPx;
-                return {
-                    anchorScreen: { x: -dxPx, y: -dyPx },
-                    width: drawW,
-                    height: drawH,
-                    anchor: bitmapIcon.anchor,
-                };
+                return { anchorScreen: { x: -dxPx, y: -dyPx }, ...markerHitShape(bitmapIcon, drawW, drawH) };
             },
             hitRadiusPx,
         );

@@ -14,6 +14,13 @@ export interface BitmapIcon {
         width: number;
         height: number;
     };
+    /**
+     * Where the icon is actually drawn, as fractions of the bitmap (0 to 1). A
+     * default pin sits in a square bitmap with transparent space on either side
+     * of it; a tap there should not count. Absent: the whole bitmap. Read it
+     * through {@link markerHitShape}.
+     */
+    hitBounds?: { left: number; top: number; right: number; bottom: number };
 }
 
 export interface AddParams {
