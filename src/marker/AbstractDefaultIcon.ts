@@ -134,6 +134,34 @@ export abstract class AbstractDefaultIcon extends AbstractMarkerIcon {
                 width: layout.bitmapWidth,
                 height: layout.bitmapHeight,
             },
+            hitBounds: this.hitBounds(layout),
+        };
+    }
+
+    /**
+     * The pin as drawn — its outline, stroke included — and the label when there
+     * is one, as fractions of the bitmap. The bitmap is a square around a pin
+     * about two thirds as wide, so taps beside the pin used to count.
+     */
+    private hitBounds(layout: IconLayout): NonNullable<BitmapIcon["hitBounds"]> {
+        const pin = computeMarkerPinBounds(layout.markerSize, this.scale, this.strokeWidth);
+        const halfStroke = Math.max(0, this.strokeWidth * this.scale) / 2;
+        let left = layout.markerOffsetX + pin.left - halfStroke;
+        let right = layout.markerOffsetX + pin.right + halfStroke;
+        let top = layout.markerOffsetY + pin.top - halfStroke;
+        let bottom = layout.markerOffsetY + pin.bottom + halfStroke;
+        if (layout.labelWidth > 0) {
+            left = Math.min(left, layout.labelCenterX - layout.labelWidth / 2);
+            right = Math.max(right, layout.labelCenterX + layout.labelWidth / 2);
+            top = Math.min(top, layout.labelCenterY - layout.labelHeight / 2);
+            bottom = Math.max(bottom, layout.labelCenterY + layout.labelHeight / 2);
+        }
+        const clamp = (v: number) => Math.min(Math.max(v, 0), 1);
+        return {
+            left: clamp(left / layout.bitmapWidth),
+            top: clamp(top / layout.bitmapHeight),
+            right: clamp(right / layout.bitmapWidth),
+            bottom: clamp(bottom / layout.bitmapHeight),
         };
     }
 
@@ -173,6 +201,8 @@ export abstract class AbstractDefaultIcon extends AbstractMarkerIcon {
                 outlineStroke,
                 labelCenterX: markerSize / 2,
                 labelCenterY: headCenterY,
+                labelWidth: 0,
+                labelHeight: 0,
             };
             return this.cachedLayout;
         }
@@ -227,6 +257,8 @@ export abstract class AbstractDefaultIcon extends AbstractMarkerIcon {
             outlineStroke,
             labelCenterX: markerOffsetX + cx,
             labelCenterY: markerOffsetY + cy,
+            labelWidth,
+            labelHeight,
         };
         return this.cachedLayout;
     }

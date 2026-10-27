@@ -170,6 +170,9 @@ export interface IconLayout {
     /** ラベル文字列の中心（text-anchor="middle" / dominant-baseline="central" で描く）。 */
     labelCenterX: number;
     labelCenterY: number;
+    /** ラベルのアウトライン込みの幅と高さ。ラベルが無ければ 0。当たり判定に使う。 */
+    labelWidth: number;
+    labelHeight: number;
 }
 
 /**
