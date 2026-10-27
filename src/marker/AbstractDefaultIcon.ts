@@ -143,7 +143,7 @@ export abstract class AbstractDefaultIcon extends AbstractMarkerIcon {
      * is one, as fractions of the bitmap. The bitmap is a square around a pin
      * about two thirds as wide, so taps beside the pin used to count.
      */
-    private hitBounds(layout: IconLayout): NonNullable<BitmapIcon["hitBounds"]> {
+    protected hitBounds(layout: IconLayout): NonNullable<BitmapIcon["hitBounds"]> {
         const pin = computeMarkerPinBounds(layout.markerSize, this.scale, this.strokeWidth);
         const halfStroke = Math.max(0, this.strokeWidth * this.scale) / 2;
         let left = layout.markerOffsetX + pin.left - halfStroke;

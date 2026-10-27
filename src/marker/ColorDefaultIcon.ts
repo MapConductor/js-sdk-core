@@ -171,6 +171,7 @@ export class ImageDefaultIcon extends AbstractDefaultIcon {
             url: canvas.toDataURL(),
             anchor: this.anchor,
             size: { width: bitmapWidth, height: bitmapHeight },
+            hitBounds: this.hitBounds(layout),
         };
     }
 
