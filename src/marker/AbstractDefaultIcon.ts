@@ -221,9 +221,11 @@ export abstract class AbstractDefaultIcon extends AbstractMarkerIcon {
 
         let cy = headCenterY;
         if (h !== 0) {
-            // 横に置くときは、縦はピンの上端・頭の中心・先端に揃える。
+            // 横に置くときは、縦はピンの上端・上端と先端の中間・先端に揃える。
+            // center を頭の中心にすると、ピン全体の中央より上に見える。
             if (v < 0) cy = pin.top + labelHeight / 2;
             else if (v > 0) cy = pin.bottom - labelHeight / 2;
+            else cy = (pin.top + pin.bottom) / 2;
         } else {
             // 中央列の top / bottom はピンと重ならないよう上下の外側に置く。
             if (v < 0) cy = pin.top - gap - labelHeight / 2;
