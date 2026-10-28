@@ -21,6 +21,7 @@ function fingerPrintsEqual(
         a.strokeColor === b.strokeColor &&
         a.strokeWidth === b.strokeWidth &&
         a.geodesic === b.geodesic &&
+        a.clickable === b.clickable &&
         a.zIndex === b.zIndex &&
         a.points === b.points &&
         a.extra === b.extra

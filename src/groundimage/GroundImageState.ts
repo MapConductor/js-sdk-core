@@ -1,5 +1,5 @@
 import { GeoPoint, GeoRectBounds } from "../features";
-import { combineHash, hashNum, hashObj } from "../features/hash-utils";
+import { combineHash, hashBool, hashNum, hashObj } from "../features/hash-utils";
 import { createSubject } from "../features/subscribe";
 import { Serializable } from "../marker/MarkerState";
 
@@ -9,6 +9,7 @@ export interface GroundImageFingerPrint {
     imageUrl: number;
     opacity: number;
     tileSize: number;
+    clickable: number;
     extra: number;
 }
 
@@ -25,6 +26,15 @@ export interface GroundImageState {
     imageUrl: string;
     opacity: number;
     tileSize: number;
+    /**
+     * タップを受け取るか。`false` ならこのグラウンドイメージはタップに対して透過し、
+     * 下のオーバーレイ（無ければ地図クリック）へイベントが流れる。
+     *
+     * 判定はコアの `GroundImageManager.find` が行うため、どのプロバイダでも同じ挙動になる。
+     * fingerPrint に含めるのは、Google Maps のようにネイティブ側の `clickable` へ
+     * 渡すプロバイダがあるため（CircleState と同じ）。
+     */
+    clickable: boolean;
     extra: Serializable | null;
     onClick: OnGroundImageEventHandler | null;
     fingerPrint(): GroundImageFingerPrint;
@@ -39,6 +49,7 @@ export interface GroundImageStateCopyParams {
     imageUrl?: string;
     opacity?: number;
     tileSize?: number;
+    clickable?: boolean;
     extra?: Serializable | null;
     onClick?: OnGroundImageEventHandler | null;
     id?: string | null;
@@ -55,6 +66,7 @@ const fingerPrintEquals = (a: GroundImageFingerPrint, b: GroundImageFingerPrint)
     a.imageUrl === b.imageUrl &&
     a.opacity === b.opacity &&
     a.tileSize === b.tileSize &&
+    a.clickable === b.clickable &&
     a.extra === b.extra;
 
 export function createGroundImageState(params: {
@@ -62,6 +74,7 @@ export function createGroundImageState(params: {
     imageUrl: string;
     opacity?: number;
     tileSize?: number;
+    clickable?: boolean;
     id?: string | null;
     extra?: Serializable | null;
     onClick?: OnGroundImageEventHandler | null;
@@ -70,6 +83,7 @@ export function createGroundImageState(params: {
     let imageUrl = params.imageUrl;
     let opacity = params.opacity ?? 1.0;
     let tileSize = params.tileSize ?? GROUND_IMAGE_DEFAULT_TILE_SIZE;
+    let clickable = params.clickable ?? true;
     let extra = params.extra ?? null;
     let onClick = params.onClick ?? null;
 
@@ -78,6 +92,7 @@ export function createGroundImageState(params: {
         result = combineHash(result, hashObj(imageUrl));
         result = combineHash(result, hashNum(opacity));
         result = combineHash(result, tileSize);
+        result = combineHash(result, clickable ? 1231 : 1237);
         result = combineHash(result, extra == null ? 0 : hashObj(extra));
         return (result | 0).toString();
     };
@@ -93,6 +108,7 @@ export function createGroundImageState(params: {
             imageUrl: hashObj(imageUrl),
             opacity: hashNum(opacity),
             tileSize,
+            clickable: hashBool(clickable),
             extra: extra == null ? 0 : hashObj(extra),
         };
     }
@@ -107,6 +123,7 @@ export function createGroundImageState(params: {
         result = combineHash(result, fp.imageUrl);
         result = combineHash(result, fp.opacity);
         result = combineHash(result, fp.tileSize);
+        result = combineHash(result, fp.clickable);
         result = combineHash(result, fp.extra);
         return result;
     };
@@ -118,6 +135,7 @@ export function createGroundImageState(params: {
             imageUrl: opts.imageUrl ?? imageUrl,
             opacity: opts.opacity ?? opacity,
             tileSize: opts.tileSize ?? tileSize,
+            clickable: opts.clickable ?? clickable,
             extra: "extra" in opts ? opts.extra ?? null : extra,
             onClick: "onClick" in opts ? opts.onClick ?? null : onClick,
         });
@@ -137,6 +155,8 @@ export function createGroundImageState(params: {
         set opacity(v: number) { opacity = v; emit(); },
         get tileSize() { return tileSize; },
         set tileSize(v: number) { tileSize = v; emit(); },
+        get clickable() { return clickable; },
+        set clickable(v: boolean) { clickable = v; emit(); },
         get extra() { return extra; },
         set extra(v: Serializable | null) { extra = v; emit(); },
         get onClick() { return onClick; },

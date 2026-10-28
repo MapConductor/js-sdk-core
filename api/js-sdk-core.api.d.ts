@@ -2250,6 +2250,7 @@ interface PolylineFingerPrint {
     strokeColor: number;
     strokeWidth: number;
     geodesic: number;
+    clickable: number;
     zIndex: number;
     points: number;
     extra: number;
@@ -2265,6 +2266,15 @@ interface PolylineState {
     strokeColor: string;
     strokeWidth: number;
     geodesic: boolean;
+    /**
+     * タップを受け取るか。`false` ならこのポリラインはタップに対して透過し、
+     * 下のオーバーレイ（無ければ地図クリック）へイベントが流れる。
+     *
+     * 判定はコアの `PolylineManager.find` が行うため、どのプロバイダでも同じ挙動になる。
+     * fingerPrint に含めるのは、Google Maps のようにネイティブ側の `clickable` へ
+     * 渡すプロバイダがあるため（CircleState と同じ）。
+     */
+    clickable: boolean;
     zIndex: number;
     extra: Serializable | null;
     onClick: OnPolylineEventHandler | null;
@@ -2282,6 +2292,7 @@ interface PolylineStateCopyParams {
     strokeColor?: string;
     strokeWidth?: number;
     geodesic?: boolean;
+    clickable?: boolean;
     zIndex?: number;
     extra?: Serializable | null;
     onClick?: OnPolylineEventHandler | null;
@@ -2292,6 +2303,7 @@ declare function createPolylineState(params: {
     strokeColor?: string;
     strokeWidth?: number;
     geodesic?: boolean;
+    clickable?: boolean;
     zIndex?: number;
     extra?: Serializable | null;
     onClick?: OnPolylineEventHandler | null;
@@ -3192,6 +3204,13 @@ declare class StrategyMarkerController<ActualMarker> implements SlottedOverlayCo
         renderer: MarkerOverlayRenderer<ActualMarker>;
         clickListener?: OnMarkerEventHandler | null;
     });
+    /**
+     * クリックを配送する。
+     *
+     * `clickable=false` のマーカーには配送しない。各プロバイダのクリック経路が
+     * 先に弾いているが、ネイティブのクリックリスナー経由など
+     * ヒットテストを通らない経路もあるため、出口でも守る。
+     */
     dispatchClick(state: MarkerState): void;
     dispatchDragStart(state: MarkerState): void;
     dispatchDrag(state: MarkerState): void;
@@ -3542,6 +3561,7 @@ interface PolygonFingerPrint {
     strokeWidth: number;
     fillColor: number;
     geodesic: number;
+    clickable: number;
     zIndex: number;
     points: number;
     holes: number;
@@ -3560,6 +3580,15 @@ interface PolygonState {
     strokeWidth: number;
     fillColor: string;
     geodesic: boolean;
+    /**
+     * タップを受け取るか。`false` ならこのポリゴンはタップに対して透過し、
+     * 下のオーバーレイ（無ければ地図クリック）へイベントが流れる。
+     *
+     * 判定はコアの `PolygonManager.find` が行うため、どのプロバイダでも同じ挙動になる。
+     * fingerPrint に含めるのは、Google Maps のようにネイティブ側の `clickable` へ
+     * 渡すプロバイダがあるため（CircleState と同じ）。
+     */
+    clickable: boolean;
     zIndex: number;
     extra: Serializable | null;
     onClick: OnPolygonEventHandler | null;
@@ -3579,6 +3608,7 @@ interface PolygonStateCopyParams {
     strokeWidth?: number;
     fillColor?: string;
     geodesic?: boolean;
+    clickable?: boolean;
     zIndex?: number;
     extra?: Serializable | null;
     onClick?: OnPolygonEventHandler | null;
@@ -3591,6 +3621,7 @@ declare function createPolygonState(params: {
     strokeWidth?: number;
     fillColor?: string;
     geodesic?: boolean;
+    clickable?: boolean;
     zIndex?: number;
     extra?: Serializable | null;
     onClick?: OnPolygonEventHandler | null;
@@ -3666,6 +3697,7 @@ interface GroundImageFingerPrint {
     imageUrl: number;
     opacity: number;
     tileSize: number;
+    clickable: number;
     extra: number;
 }
 interface GroundImageEvent {
@@ -3679,6 +3711,15 @@ interface GroundImageState {
     imageUrl: string;
     opacity: number;
     tileSize: number;
+    /**
+     * タップを受け取るか。`false` ならこのグラウンドイメージはタップに対して透過し、
+     * 下のオーバーレイ（無ければ地図クリック）へイベントが流れる。
+     *
+     * 判定はコアの `GroundImageManager.find` が行うため、どのプロバイダでも同じ挙動になる。
+     * fingerPrint に含めるのは、Google Maps のようにネイティブ側の `clickable` へ
+     * 渡すプロバイダがあるため（CircleState と同じ）。
+     */
+    clickable: boolean;
     extra: Serializable | null;
     onClick: OnGroundImageEventHandler | null;
     fingerPrint(): GroundImageFingerPrint;
@@ -3694,6 +3735,7 @@ interface GroundImageStateCopyParams {
     imageUrl?: string;
     opacity?: number;
     tileSize?: number;
+    clickable?: boolean;
     extra?: Serializable | null;
     onClick?: OnGroundImageEventHandler | null;
     id?: string | null;
@@ -3704,6 +3746,7 @@ declare function createGroundImageState(params: {
     imageUrl: string;
     opacity?: number;
     tileSize?: number;
+    clickable?: boolean;
     id?: string | null;
     extra?: Serializable | null;
     onClick?: OnGroundImageEventHandler | null;
@@ -5042,6 +5085,13 @@ declare abstract class AbstractMarkerController<ActualMarker> implements Slotted
      * `totalCount` is the total number of markers in the current composition call.
      */
     protected shouldTile(_state: MarkerState, _totalCount: number): boolean;
+    /**
+     * クリックを配送する。
+     *
+     * `clickable=false` のマーカーには配送しない。各プロバイダのクリック経路が
+     * 先に弾いているが、ネイティブのクリックリスナー経由など
+     * ヒットテストを通らない経路もあるため、出口でも守る。
+     */
     dispatchClick(state: MarkerState): void;
     dispatchDragStart(state: MarkerState): void;
     dispatchDrag(state: MarkerState): void;

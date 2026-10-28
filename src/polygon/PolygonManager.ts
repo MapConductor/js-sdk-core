@@ -60,6 +60,8 @@ export class PolygonManager<ActualPolygon> implements PolygonManagerInterface<Ac
 
         for (const entity of sorted) {
             const state = entity.state;
+            // clickable=false のポリゴンはタップに対して透過する（CircleManager と同じ方針）。
+            if (!state.clickable) continue;
             const basePoints = state.points;
             if (basePoints.length < 3) continue;
 
