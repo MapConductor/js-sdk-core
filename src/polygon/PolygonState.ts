@@ -9,6 +9,7 @@ export interface PolygonFingerPrint {
     strokeWidth: number;
     fillColor: number;
     geodesic: number;
+    clickable: number;
     zIndex: number;
     points: number;
     holes: number;
@@ -30,6 +31,15 @@ export interface PolygonState {
     strokeWidth: number;
     fillColor: string;
     geodesic: boolean;
+    /**
+     * タップを受け取るか。`false` ならこのポリゴンはタップに対して透過し、
+     * 下のオーバーレイ（無ければ地図クリック）へイベントが流れる。
+     *
+     * 判定はコアの `PolygonManager.find` が行うため、どのプロバイダでも同じ挙動になる。
+     * fingerPrint に含めるのは、Google Maps のようにネイティブ側の `clickable` へ
+     * 渡すプロバイダがあるため（CircleState と同じ）。
+     */
+    clickable: boolean;
     zIndex: number;
     extra: Serializable | null;
     onClick: OnPolygonEventHandler | null;
@@ -48,6 +58,7 @@ export interface PolygonStateCopyParams {
     strokeWidth?: number;
     fillColor?: string;
     geodesic?: boolean;
+    clickable?: boolean;
     zIndex?: number;
     extra?: Serializable | null;
     onClick?: OnPolygonEventHandler | null;
@@ -80,6 +91,7 @@ const fingerPrintEquals = (a: PolygonFingerPrint, b: PolygonFingerPrint): boolea
     a.strokeWidth === b.strokeWidth &&
     a.fillColor === b.fillColor &&
     a.geodesic === b.geodesic &&
+    a.clickable === b.clickable &&
     a.zIndex === b.zIndex &&
     a.points === b.points &&
     a.holes === b.holes &&
@@ -93,6 +105,7 @@ export function createPolygonState(params: {
     strokeWidth?: number;
     fillColor?: string;
     geodesic?: boolean;
+    clickable?: boolean;
     zIndex?: number;
     extra?: Serializable | null;
     onClick?: OnPolygonEventHandler | null;
@@ -107,6 +120,7 @@ export function createPolygonState(params: {
     let strokeWidth = params.strokeWidth ?? 2;
     let fillColor = params.fillColor ?? "transparent";
     let geodesic = params.geodesic ?? false;
+    let clickable = params.clickable ?? true;
     let zIndex = params.zIndex ?? 0;
     let extra = params.extra ?? null;
     let onClick = params.onClick ?? null;
@@ -120,6 +134,7 @@ export function createPolygonState(params: {
             hashNum(strokeWidth),
             hashObj(fillColor),
             hashBool(geodesic),
+            hashBool(clickable),
             extra == null ? 0 : hashObj(extra),
         ]).toString();
 
@@ -133,6 +148,7 @@ export function createPolygonState(params: {
             strokeWidth: hashNum(strokeWidth),
             fillColor: hashObj(fillColor),
             geodesic: hashBool(geodesic),
+            clickable: hashBool(clickable),
             zIndex,
             points: listHashCode(points),
             holes: nestedListHashCode(holes),
@@ -146,6 +162,7 @@ export function createPolygonState(params: {
         result = combineHash(result, hashNum(strokeWidth));
         result = combineHash(result, hashObj(fillColor));
         result = combineHash(result, hashBool(geodesic));
+        result = combineHash(result, hashBool(clickable));
         result = combineHash(result, zIndex);
         result = combineHash(result, listHashCode(points));
         result = combineHash(result, nestedListHashCode(holes));
@@ -161,6 +178,7 @@ export function createPolygonState(params: {
             strokeWidth: opts.strokeWidth ?? strokeWidth,
             fillColor: opts.fillColor ?? fillColor,
             geodesic: opts.geodesic ?? geodesic,
+            clickable: opts.clickable ?? clickable,
             zIndex: opts.zIndex ?? zIndex,
             extra: "extra" in opts ? opts.extra ?? null : extra,
             onClick: "onClick" in opts ? opts.onClick ?? null : onClick,
@@ -185,6 +203,8 @@ export function createPolygonState(params: {
         set fillColor(v: string) { fillColor = v; emit(); },
         get geodesic() { return geodesic; },
         set geodesic(v: boolean) { geodesic = v; emit(); },
+        get clickable() { return clickable; },
+        set clickable(v: boolean) { clickable = v; emit(); },
         get zIndex() { return zIndex; },
         set zIndex(v: number) { zIndex = v; emit(); },
         get extra() { return extra; },

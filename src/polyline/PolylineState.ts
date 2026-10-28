@@ -8,6 +8,7 @@ export interface PolylineFingerPrint {
     strokeColor: number;
     strokeWidth: number;
     geodesic: number;
+    clickable: number;
     zIndex: number;
     points: number;
     extra: number;
@@ -26,6 +27,15 @@ export interface PolylineState {
     strokeColor: string;
     strokeWidth: number;
     geodesic: boolean;
+    /**
+     * タップを受け取るか。`false` ならこのポリラインはタップに対して透過し、
+     * 下のオーバーレイ（無ければ地図クリック）へイベントが流れる。
+     *
+     * 判定はコアの `PolylineManager.find` が行うため、どのプロバイダでも同じ挙動になる。
+     * fingerPrint に含めるのは、Google Maps のようにネイティブ側の `clickable` へ
+     * 渡すプロバイダがあるため（CircleState と同じ）。
+     */
+    clickable: boolean;
     zIndex: number;
     extra: Serializable | null;
     onClick: OnPolylineEventHandler | null;
@@ -42,6 +52,7 @@ export interface PolylineStateCopyParams {
     strokeColor?: string;
     strokeWidth?: number;
     geodesic?: boolean;
+    clickable?: boolean;
     zIndex?: number;
     extra?: Serializable | null;
     onClick?: OnPolylineEventHandler | null;
@@ -66,6 +77,7 @@ const fingerPrintEquals = (a: PolylineFingerPrint, b: PolylineFingerPrint): bool
     a.strokeColor === b.strokeColor &&
     a.strokeWidth === b.strokeWidth &&
     a.geodesic === b.geodesic &&
+    a.clickable === b.clickable &&
     a.zIndex === b.zIndex &&
     a.points === b.points &&
     a.extra === b.extra;
@@ -76,6 +88,7 @@ export function createPolylineState(params: {
     strokeColor?: string;
     strokeWidth?: number;
     geodesic?: boolean;
+    clickable?: boolean;
     zIndex?: number;
     extra?: Serializable | null;
     onClick?: OnPolylineEventHandler | null;
@@ -84,6 +97,7 @@ export function createPolylineState(params: {
     let strokeColor = params.strokeColor ?? "#000000";
     let strokeWidth = params.strokeWidth ?? 1;
     let geodesic = params.geodesic ?? false;
+    let clickable = params.clickable ?? true;
     let zIndex = params.zIndex ?? 0;
     let extra = params.extra ?? null;
     let onClick = params.onClick ?? null;
@@ -95,6 +109,7 @@ export function createPolylineState(params: {
             hashObj(strokeColor),
             hashNum(strokeWidth),
             hashBool(geodesic),
+            hashBool(clickable),
             extra == null ? 0 : hashObj(extra),
         ]).toString();
 
@@ -107,6 +122,7 @@ export function createPolylineState(params: {
             strokeColor: hashObj(strokeColor),
             strokeWidth: hashNum(strokeWidth),
             geodesic: hashBool(geodesic),
+            clickable: hashBool(clickable),
             zIndex,
             points: listHashCode(points),
             extra: extra == null ? 0 : hashObj(extra),
@@ -118,6 +134,7 @@ export function createPolylineState(params: {
         result = combineHash(result, hashObj(strokeColor));
         result = combineHash(result, hashNum(strokeWidth));
         result = combineHash(result, hashBool(geodesic));
+        result = combineHash(result, hashBool(clickable));
         result = combineHash(result, zIndex);
         result = combineHash(result, listHashCode(points));
         return result | 0;
@@ -130,6 +147,7 @@ export function createPolylineState(params: {
             strokeColor: opts.strokeColor ?? strokeColor,
             strokeWidth: opts.strokeWidth ?? strokeWidth,
             geodesic: opts.geodesic ?? geodesic,
+            clickable: opts.clickable ?? clickable,
             zIndex: opts.zIndex ?? zIndex,
             extra: "extra" in opts ? opts.extra ?? null : extra,
             onClick: "onClick" in opts ? opts.onClick ?? null : onClick,
@@ -150,6 +168,8 @@ export function createPolylineState(params: {
         set strokeWidth(v: number) { strokeWidth = v; emit(); },
         get geodesic() { return geodesic; },
         set geodesic(v: boolean) { geodesic = v; emit(); },
+        get clickable() { return clickable; },
+        set clickable(v: boolean) { clickable = v; emit(); },
         get zIndex() { return zIndex; },
         set zIndex(v: number) { zIndex = v; emit(); },
         get extra() { return extra; },

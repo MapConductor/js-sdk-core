@@ -100,7 +100,15 @@ export abstract class AbstractMarkerController<ActualMarker>
         return false;
     }
 
+    /**
+     * クリックを配送する。
+     *
+     * `clickable=false` のマーカーには配送しない。各プロバイダのクリック経路が
+     * 先に弾いているが、ネイティブのクリックリスナー経由など
+     * ヒットテストを通らない経路もあるため、出口でも守る。
+     */
     dispatchClick(state: MarkerState): void {
+        if (!state.clickable) return;
         state.onClick?.(state);
         this.clickListener?.(state);
     }

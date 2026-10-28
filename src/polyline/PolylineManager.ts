@@ -68,6 +68,8 @@ export class PolylineManager<ActualPolyline> implements PolylineManagerInterface
         let bestDist = Infinity;
 
         for (const entity of this.entities.values()) {
+            // clickable=false のポリラインはタップに対して透過する（CircleManager と同じ方針）。
+            if (!entity.state.clickable) continue;
             const pts = entity.state.points;
             for (let i = 0; i < pts.length - 1; i++) {
                 const box = createGeoRectBounds({ southWest: null, northEast: null });

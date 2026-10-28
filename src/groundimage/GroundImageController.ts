@@ -22,6 +22,7 @@ function fingerPrintsEqual(
         a.imageUrl === b.imageUrl &&
         a.opacity === b.opacity &&
         a.tileSize === b.tileSize &&
+        a.clickable === b.clickable &&
         a.extra === b.extra
     );
 }

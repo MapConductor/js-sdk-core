@@ -47,6 +47,8 @@ export class GroundImageManager<ActualGroundImage> implements GroundImageManager
 
     find(position: GeoPoint): GroundImageEntity<ActualGroundImage> | null {
         for (const entity of this.entities.values()) {
+            // clickable=false のグラウンドイメージはタップに対して透過する（CircleManager と同じ方針）。
+            if (!entity.state.clickable) continue;
             if (entity.state.bounds.contains(position)) return entity;
         }
         return null;
