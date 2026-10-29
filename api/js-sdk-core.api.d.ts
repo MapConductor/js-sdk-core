@@ -4843,6 +4843,21 @@ declare abstract class RasterLayerController<ActualLayer extends object> impleme
     upsert(state: RasterLayerState): Promise<void>;
     removeById(id: string): Promise<void>;
     clear(): Promise<void>;
+    /**
+     * 登録済みのラスターレイヤを、作り直された地図スタイルへ貼り直す。
+     *
+     * add / update / upsert / clear と**同じロックの中で**動かす。これらは
+     * renderer の onChange などが終わってから manager へ登録するまでの間に await を挟むので、
+     * ロックの外から読むと、その間は manager が古い状態を返す。スタイルのイベントが
+     * そこに入ると（MapLibre は addImage の中で同期的に styledata を出す）、
+     * 古いソースや不透明度で貼り直してしまう。ハンドルの ID が変わらないプロバイダでは、
+     * 次の変更まで直らない。
+     *
+     * entity の登録はし直さない。ロックの中で読んだ状態が最新なので、貼り直すだけでよい。
+     * entity が無くても onPostProcess は呼ぶ（スタイルが使えない間に clear() が保留した
+     * 削除を、ここで初めて流せる）。
+     */
+    resync(): Promise<void>;
     find(_position: GeoPoint): RasterLayerEntity<ActualLayer> | null;
     onCameraChanged(mapCameraPosition: MapCameraPosition): Promise<void>;
     destroy(): void;
