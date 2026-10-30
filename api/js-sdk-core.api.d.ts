@@ -2364,13 +2364,86 @@ declare abstract class AbstractMarkerOverlayRenderer<MapViewHolderType extends M
     private fromScreenOffset;
 }
 
+/**
+ * Android ColorDefaultIcon / iOS ColorDefaultIcon の名前付きコンストラクタ引数に対応する
+ * オプション群（fillColor を含む全パラメータを 1 つのオブジェクトで受ける）。
+ * `labelTypeFace` は Android の Typeface / iOS の UIFont に対応する Web の font-family 文字列。
+ */
+/**
+ * ラベルをピンに対してどこへ置くか。CSS の `background-position` と同じ書き方で、
+ * 横（left / center / right）と縦（top / center / bottom）のキーワードを空白区切りで並べる。
+ * 順序は問わず、片方だけなら残りは `center`。
+ *
+ * - `left` / `right` はピンの外側に置き、縦はピンの上端・上端と先端の中間・先端に揃える。
+ * - `center` 列の `top` / `bottom` はピンの上・下の外側に置く。
+ * - `"center center"`（既定）はピンの頭の中に重ねる（従来どおり）。
+ */
+type MarkerLabelHorizontalPosition = "left" | "center" | "right";
+type MarkerLabelVerticalPosition = "top" | "center" | "bottom";
+type MarkerLabelPosition = MarkerLabelHorizontalPosition | MarkerLabelVerticalPosition | `${MarkerLabelHorizontalPosition} ${MarkerLabelVerticalPosition}` | `${MarkerLabelVerticalPosition} ${MarkerLabelHorizontalPosition}`;
+/**
+ * 既定マーカーアイコンの見た目を決めるオプションと、その既定値。
+ *
+ * `BaseIconProperties` は「ピンの形と共通の装飾」を表し、塗り方（単色か画像か）だけが
+ * サブクラスで変わる。オプションから内部表現へ落とすのが `createBaseProperties`。
+ */
+interface DefaultMarkerIconOptions {
+    fillColor?: string;
+    strokeColor?: string;
+    strokeWidth?: number;
+    scale?: number;
+    label?: string | null;
+    labelTextColor?: string | null;
+    labelTextSize?: number;
+    labelTypeFace?: string;
+    labelStrokeColor?: string;
+    labelPosition?: MarkerLabelPosition;
+    infoAnchor?: Offset;
+    iconSize?: number;
+    debug?: boolean;
+}
+/** ImageDefaultIcon のコンストラクタ引数。backgroundImage は必須。 */
+interface ImageDefaultIconOptions extends DefaultMarkerIconOptions {
+    backgroundImage: string | HTMLImageElement;
+}
+interface BaseIconProperties {
+    strokeColor: string;
+    strokeWidth: number;
+    scale: number;
+    label: string | null;
+    labelTextColor: string | null;
+    labelTextSize: number;
+    labelTypeFace: string;
+    labelStrokeColor: string;
+    labelPosition: MarkerLabelPosition;
+    infoAnchor: Offset;
+    iconSize: number;
+    debug: boolean;
+}
+
 type ImageSource = HTMLImageElement | HTMLCanvasElement | ImageBitmap;
 interface ImageIconOptions {
     iconSize?: number;
     scale?: number;
+    /** 画像（iconSize × scale の正方形）に対する割合。ラベルがあってもこの基準は変わらない。 */
     anchor?: Offset;
+    /** 画像に対する割合。`anchor` と同じ。 */
     infoAnchor?: Offset;
     debug?: boolean;
+    /** 画像に添える文字列。書き方と既定値は `DefaultMarkerIconOptions` と同じ。 */
+    label?: string | null;
+    labelTextColor?: string | null;
+    labelTextSize?: number;
+    labelTypeFace?: string;
+    labelStrokeColor?: string;
+    /**
+     * ラベルを画像に対してどこへ置くか。書き方は `DefaultMarkerIconOptions.labelPosition` と同じ。
+     *
+     * - `left` / `right` は画像の外側に置き、縦は画像の上端・中間・下端に揃える。
+     * - `center` 列の `top` / `bottom` は画像の上・下の外側に置く。
+     * - `"center center"`（既定）は画像の中央に重ねる。
+     */
+    labelPosition?: MarkerLabelPosition;
 }
 /**
  * 任意の画像ソース（HTMLImageElement / HTMLCanvasElement / ImageBitmap）を
@@ -2382,14 +2455,38 @@ declare class ImageIcon extends AbstractMarkerIcon {
     readonly image: ImageSource;
     readonly iconSize: number;
     readonly scale: number;
-    readonly anchor: Offset;
-    readonly infoAnchor: Offset;
     readonly debug: boolean;
+    readonly label: string | null;
+    readonly labelTextColor: string | null;
+    readonly labelTextSize: number;
+    readonly labelTypeFace: string;
+    readonly labelStrokeColor: string;
+    readonly labelPosition: MarkerLabelPosition;
+    private readonly options;
+    private cachedLayout;
     constructor(image: ImageSource, options?: ImageIconOptions);
+    /**
+     * ビットマップに対する割合。ラベルを横や上に置くとビットマップがその側へ伸びるので、
+     * 画像に対する指定値（`requestedAnchor`）をレイアウトから直す。ラベルが無ければ指定値のまま。
+     */
+    get anchor(): Offset;
+    /** ビットマップに対する割合。`anchor` と同じく、画像に対する指定値から直す。 */
+    get infoAnchor(): Offset;
+    private toBitmapOffset;
+    /** 画像の正方形全体を本体として、その外側（または中央）にラベルを置く。 */
+    private computeLayout;
+    private labelProperties;
     private getImageIdentity;
     equals(other: unknown): boolean;
     hashCode(): number;
     toBitmapIcon(): BitmapIcon;
+    /**
+     * 既定のピンの SVG と同じく、アウトライン（stroke）を下に敷いてから塗りを重ねる。
+     * 中心揃え（text-anchor="middle" / dominant-baseline="central" 相当）。
+     */
+    private drawLabel;
+    /** 画像とラベル（ビットマップに対する割合）。その間の透明な部分は当たらない。 */
+    private hitBounds;
 }
 
 declare enum Direction6 {
@@ -2796,63 +2893,6 @@ declare abstract class AbstractMarkerRenderingStrategy<ActualMarker> implements 
  * オプション群（fillColor を含む全パラメータを 1 つのオブジェクトで受ける）。
  * `labelTypeFace` は Android の Typeface / iOS の UIFont に対応する Web の font-family 文字列。
  */
-/**
- * ラベルをピンに対してどこへ置くか。CSS の `background-position` と同じ書き方で、
- * 横（left / center / right）と縦（top / center / bottom）のキーワードを空白区切りで並べる。
- * 順序は問わず、片方だけなら残りは `center`。
- *
- * - `left` / `right` はピンの外側に置き、縦はピンの上端・上端と先端の中間・先端に揃える。
- * - `center` 列の `top` / `bottom` はピンの上・下の外側に置く。
- * - `"center center"`（既定）はピンの頭の中に重ねる（従来どおり）。
- */
-type MarkerLabelHorizontalPosition = "left" | "center" | "right";
-type MarkerLabelVerticalPosition = "top" | "center" | "bottom";
-type MarkerLabelPosition = MarkerLabelHorizontalPosition | MarkerLabelVerticalPosition | `${MarkerLabelHorizontalPosition} ${MarkerLabelVerticalPosition}` | `${MarkerLabelVerticalPosition} ${MarkerLabelHorizontalPosition}`;
-/**
- * 既定マーカーアイコンの見た目を決めるオプションと、その既定値。
- *
- * `BaseIconProperties` は「ピンの形と共通の装飾」を表し、塗り方（単色か画像か）だけが
- * サブクラスで変わる。オプションから内部表現へ落とすのが `createBaseProperties`。
- */
-interface DefaultMarkerIconOptions {
-    fillColor?: string;
-    strokeColor?: string;
-    strokeWidth?: number;
-    scale?: number;
-    label?: string | null;
-    labelTextColor?: string | null;
-    labelTextSize?: number;
-    labelTypeFace?: string;
-    labelStrokeColor?: string;
-    labelPosition?: MarkerLabelPosition;
-    infoAnchor?: Offset;
-    iconSize?: number;
-    debug?: boolean;
-}
-/** ImageDefaultIcon のコンストラクタ引数。backgroundImage は必須。 */
-interface ImageDefaultIconOptions extends DefaultMarkerIconOptions {
-    backgroundImage: string | HTMLImageElement;
-}
-interface BaseIconProperties {
-    strokeColor: string;
-    strokeWidth: number;
-    scale: number;
-    label: string | null;
-    labelTextColor: string | null;
-    labelTextSize: number;
-    labelTypeFace: string;
-    labelStrokeColor: string;
-    labelPosition: MarkerLabelPosition;
-    infoAnchor: Offset;
-    iconSize: number;
-    debug: boolean;
-}
-
-/**
- * Android ColorDefaultIcon / iOS ColorDefaultIcon の名前付きコンストラクタ引数に対応する
- * オプション群（fillColor を含む全パラメータを 1 つのオブジェクトで受ける）。
- * `labelTypeFace` は Android の Typeface / iOS の UIFont に対応する Web の font-family 文字列。
- */
 
 interface IconLayout {
     /** マーカー本体の一辺（= iconSize * scale、Android の canvasSize）。 */
@@ -2912,13 +2952,8 @@ declare abstract class AbstractDefaultIcon extends AbstractMarkerIcon {
     protected hitBounds(layout: IconLayout): NonNullable<BitmapIcon["hitBounds"]>;
     hashCode(): number;
     /**
-     * Android AbstractDefaultIcon.toBitmapIcon() / iOS makeIcon() と同じレイアウト計算。
-     * すべてピクセル空間で行い、ラベルが広い場合はビットマップを横に広げてマーカーを
-     * 中央寄せする（正方形固定にしない）。ラベルの文字サイズはマーカー scale に追従せず
-     * 絶対値（Android/iOS と同じ）。
-     *
-     * `labelPosition` が中央以外なら、ラベルをピンの輪郭の外側へ置き、ビットマップを
-     * その側へだけ伸ばす。アイコンは不変なので結果は 1 回だけ計算して使い回す。
+     * ピンの輪郭を避けてラベルを置く（計算は `computeIconLabelLayout`、画像アイコンと共通）。
+     * アイコンは不変なので結果は 1 回だけ計算して使い回す。
      */
     protected computeLayout(): IconLayout;
     protected createSvg(layout: IconLayout): string;
