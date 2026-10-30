@@ -1,6 +1,7 @@
 import { TileProvider } from "./TileProvider";
 import { TileOutcome, TileRenderFailedError, TRANSPARENT_TILE_PNG } from "./TileOutcome";
 import { TileRequest } from "./TileRequest";
+import { parseTilePixelRatio, tilePixelRatioSuffix } from "./TilePixelRatio";
 import type { TileRenderRequest, TileRenderResponse } from "./WorkerProtocol";
 import { closeSWIcons } from '../marker/swIconBitmaps';
 
@@ -8,6 +9,7 @@ import { closeSWIcons } from '../marker/swIconBitmaps';
  * Browser-side tile server implemented via a Service Worker interceptor.
  *
  * The Service Worker intercepts requests to `/__tiles/{routeId}/{tileSize}/{z}/{x}/{y}.png`
+ * (`{y}@2x.png` for a tile drawn at two device pixels per CSS pixel)
  * and renders registered SW-side tile data with OffscreenCanvas when possible.
  * If SW-side rendering is unavailable, it forwards requests back to the registered
  * TileProvider on the main thread.
@@ -142,20 +144,27 @@ export class LocalTileServer {
         }
     }
 
+    /**
+     * @param pixelRatio Device pixels per CSS pixel to draw tiles at — usually
+     *   `tilePixelRatio()`. Omit (or 1) for the 1x URLs this always produced.
+     */
     urlTemplate({
         routeId,
         tileSize,
         cacheKey,
+        pixelRatio,
     }: {
         routeId: string;
         tileSize: number;
         cacheKey?: string;
+        pixelRatio?: number;
     }): string {
         const base = `${this.baseUrl}/${routeId}/${tileSize}`;
+        const tile = `{z}/{x}/{y}${tilePixelRatioSuffix(pixelRatio)}.png`;
         if (cacheKey) {
-            return `${base}/${cacheKey}/{z}/{x}/{y}.png`;
+            return `${base}/${cacheKey}/${tile}`;
         }
-        return `${base}/{z}/{x}/{y}.png`;
+        return `${base}/${tile}`;
     }
 
     /**
@@ -252,16 +261,17 @@ export class LocalTileServer {
             const { type, pathname } = event.data as { type: string; pathname: string };
             if (type !== 'tile-request') return;
 
-            // pathname: /__tiles/{routeId}/{tileSize}/{cacheKey?}/{z}/{x}/{y}.png
+            // pathname: /__tiles/{routeId}/{tileSize}/{cacheKey?}/{z}/{x}/{y}{@2x?}.png
             const match = pathname.match(
-                /^\/__tiles\/([^/]+)\/\d+\/(?:[^/]+\/)?(\d+)\/(\d+)\/(\d+)\.png$/,
+                /^\/__tiles\/([^/]+)\/\d+\/(?:[^/]+\/)?(\d+)\/(\d+)\/(\d+)(@\d+x)?\.png$/,
             );
             if (!match) {
                 event.ports[0].postMessage({ result: null, outcome: 'notFound' });
                 return;
             }
-            const [, routeId, z, x, y] = match;
-            this.handleFetchOutcome(routeId, { x: +x, y: +y, z: +z }).then(
+            const [, routeId, z, x, y, ratio] = match;
+            const request: TileRequest = { x: +x, y: +y, z: +z, pixelRatio: parseTilePixelRatio(ratio) };
+            this.handleFetchOutcome(routeId, request).then(
                 (outcome) => {
                     if (outcome.kind === 'tile') {
                         // Copy before transferring: providers may cache and reuse

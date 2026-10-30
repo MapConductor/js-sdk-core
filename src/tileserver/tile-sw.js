@@ -157,11 +157,24 @@ self.addEventListener('message', (event) => {
     }
 });
 
-// pathname: /__tiles/{routeId}/{tileSize}/{cacheKey?}/{z}/{x}/{y}.png
+/**
+ * The most device pixels per CSS pixel a tile is drawn at. Phones report 3,
+ * but a 3x tile is nine times the pixels of a 1x one for a difference few can
+ * see at icon size; LocalTileServer caps the request at 2 before it gets here.
+ */
+const MAX_PIXEL_RATIO = 3;
+
+// pathname: /__tiles/{routeId}/{tileSize}/{cacheKey?}/{z}/{x}/{y}{@2x?}.png
+//
+// `@{n}x` asks for the tile at n device pixels per CSS pixel: the image is
+// n times wider and taller, and the map still lays it out as `tileSize` CSS
+// pixels, so it lands one image pixel per screen pixel on a high-density
+// display instead of being stretched. Without it the tile is 1x, as before.
 function parseTileUrl(pathname) {
-    const m = pathname.match(/^\/__tiles\/([^/]+)\/(\d+)\/(?:[^/]+\/)?(\d+)\/(\d+)\/(\d+)\.png$/);
+    const m = pathname.match(/^\/__tiles\/([^/]+)\/(\d+)\/(?:[^/]+\/)?(\d+)\/(\d+)\/(\d+)(?:@(\d+)x)?\.png$/);
     if (!m) return null;
-    return { routeId: m[1], tileSize: +m[2], z: +m[3], x: +m[4], y: +m[5] };
+    const pixelRatio = m[6] ? Math.min(Math.max(+m[6], 1), MAX_PIXEL_RATIO) : 1;
+    return { routeId: m[1], tileSize: +m[2], z: +m[3], x: +m[4], y: +m[5], pixelRatio };
 }
 
 function toWorldPixel(lat, lng, z) {
@@ -256,7 +269,12 @@ function prepareMarkers(provider, candidates, tileOriginX, tileOriginY, z, tileP
     return { markers, maxHalfExtentPx };
 }
 
-async function renderOffscreen(provider, x, y, z, tileSize) {
+/**
+ * Everything is worked out in CSS pixels, as at 1x, and only the canvas and
+ * the final placement are multiplied by `pixelRatio`. Rounding happens after
+ * that multiplication, so a marker lands on a whole device pixel.
+ */
+async function renderOffscreen(provider, x, y, z, tileSize, pixelRatio = 1) {
     const tileOriginX = x * tileSize;
     const tileOriginY = y * tileSize;
     const candidates = queryCandidates(provider, x, y, z, tileSize, queryPaddingPx(provider, z));
@@ -274,7 +292,8 @@ async function renderOffscreen(provider, x, y, z, tileSize) {
     }
 
     const paddingPx = Math.max(Math.ceil(maxHalfExtentPx + 2), 2);
-    const offscreenSize = tileSize + paddingPx * 2;
+    const r = pixelRatio;
+    const offscreenSize = (tileSize + paddingPx * 2) * r;
     const canvas = new OffscreenCanvas(offscreenSize, offscreenSize);
     const ctx = canvas.getContext('2d');
     if (!ctx) return { kind: 'failed' };
@@ -283,10 +302,10 @@ async function renderOffscreen(provider, x, y, z, tileSize) {
     // see the same loop in MarkerTileRenderer.draw() for why both matter.
     const placed = markers.map((m) => ({
         bitmap: m.bitmap,
-        dx: Math.round(m.centerX + paddingPx - m.drawW * m.anchorX),
-        dy: Math.round(m.centerY + paddingPx - m.drawH * m.anchorY),
-        w: Math.max(1, Math.round(m.drawW)),
-        h: Math.max(1, Math.round(m.drawH)),
+        dx: Math.round((m.centerX + paddingPx - m.drawW * m.anchorX) * r),
+        dy: Math.round((m.centerY + paddingPx - m.drawH * m.anchorY) * r),
+        w: Math.max(1, Math.round(m.drawW * r)),
+        h: Math.max(1, Math.round(m.drawH * r)),
     }));
     const lastAt = new Map();
     const seenIcon = new Map();
@@ -306,10 +325,10 @@ async function renderOffscreen(provider, x, y, z, tileSize) {
         ctx.drawImage(p.bitmap, p.dx, p.dy, p.w, p.h);
     }
 
-    const finalCanvas = new OffscreenCanvas(tileSize, tileSize);
+    const finalCanvas = new OffscreenCanvas(tileSize * r, tileSize * r);
     const finalCtx = finalCanvas.getContext('2d');
     if (!finalCtx) return { kind: 'failed' };
-    finalCtx.drawImage(canvas, -paddingPx, -paddingPx);
+    finalCtx.drawImage(canvas, -paddingPx * r, -paddingPx * r);
 
     const blob = await finalCanvas.convertToBlob({ type: 'image/png' });
     if (!blob || blob.size === 0) {
@@ -410,7 +429,7 @@ self.addEventListener('fetch', (event) => {
     const parsed = parseTileUrl(url.pathname);
     if (!parsed) return;
 
-    const { routeId, tileSize, x, y, z } = parsed;
+    const { routeId, tileSize, x, y, z, pixelRatio } = parsed;
     const swProvider = swProviders.get(routeId);
     const offscreenOk = canRenderOffscreen();
     console.log('[tile-sw] fetch z=' + z + ' x=' + x + ' y=' + y, 'swProvider:', !!swProvider, 'offscreen:', offscreenOk, 'clientId:', event.clientId);
@@ -424,7 +443,7 @@ self.addEventListener('fetch', (event) => {
             return;
         }
         event.respondWith(
-            renderOffscreen(swProvider, x, y, z, tileSize)
+            renderOffscreen(swProvider, x, y, z, tileSize, pixelRatio)
                 .then(async (outcome) => {
                     if (outcome.kind === 'empty') return emptyTileResponse();
                     if (outcome.kind === 'failed') return failedTileResponse();

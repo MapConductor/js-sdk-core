@@ -67,7 +67,9 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
     /** Keep one marker per cell of this many pixels, or 0 to keep them all. */
     private readonly declutterPx: number;
     private readonly grid: GeoGridIndex<T>;
-    private readonly icons = new IconImageCache();
+    private readonly icons: IconImageCache;
+    /** Device pixels per CSS pixel the icons are decoded at (and the default for requests without one). */
+    readonly pixelRatio: number;
     private readonly defaultBitmapIcon: BitmapIcon = createDefaultIcon().toBitmapIcon();
     /** Per-instance tile output cache; each sync creates a fresh renderer instance, so no invalidation is needed. */
     private readonly tileCache = new Map<string, Uint8Array | null>();
@@ -83,8 +85,11 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         extraIconScale: number = 1.0,
         debugTileOverlay: boolean = false,
         declutterPx: number = 0,
+        pixelRatio: number = 1,
     ) {
         this.tileSize = tileSize;
+        this.pixelRatio = pixelRatio;
+        this.icons = new IconImageCache(pixelRatio);
         this.declutterPx = declutterPx;
         this.iconScale = iconScaleCallback ?? ((_item, _zoom) => 1.0);
         this.extraIconScale = extraIconScale;
@@ -104,7 +109,11 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
     }
 
     private tileKey(req: TileRequest): string {
-        return `${req.z}/${req.x}/${req.y}`;
+        return `${req.z}/${req.x}/${req.y}@${this.ratioOf(req)}`;
+    }
+
+    private ratioOf(req: TileRequest): number {
+        return req.pixelRatio ?? this.pixelRatio;
     }
 
     private cacheTile(key: string, value: Uint8Array | null): void {
@@ -248,7 +257,11 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         tileOriginWx: number,
         tileOriginWy: number,
     ): OffscreenCanvas | HTMLCanvasElement {
-        const offscreenSize = tilePx + paddingPx * 2;
+        // Positions are worked out in CSS pixels, as at 1x; only the canvas and
+        // the final placement are multiplied, and rounding comes after that so
+        // markers land on whole device pixels.
+        const r = this.ratioOf(req);
+        const offscreenSize = (tilePx + paddingPx * 2) * r;
         const { canvas: offscreen, ctx: offCtx } = this.createCanvas(offscreenSize);
         // Drop markers completely hidden by a later one.
         //
@@ -276,10 +289,10 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
             // visible at icon scale.
             return {
                 image: m.image as CanvasImageSource,
-                dx: Math.round(centerX - m.drawW * m.anchorX),
-                dy: Math.round(centerY - m.drawH * m.anchorY),
-                w: Math.max(1, Math.round(m.drawW)),
-                h: Math.max(1, Math.round(m.drawH)),
+                dx: Math.round((centerX - m.drawW * m.anchorX) * r),
+                dy: Math.round((centerY - m.drawH * m.anchorY) * r),
+                w: Math.max(1, Math.round(m.drawW * r)),
+                h: Math.max(1, Math.round(m.drawH * r)),
                 worldX: m.centerNormX + tileOriginWx,
                 worldY: m.centerNormY + tileOriginWy,
             };
@@ -341,11 +354,14 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         // android-sdk / ios-sdk と同じデバッグオーバーレイ：padding 位置に上/左の枠線と
         // タイル座標・マーカー数のラベルを赤で描画する。
         if (this.debugTileOverlay) {
+            offCtx.save();
+            offCtx.scale(r, r);
             this.drawDebugOverlay(offCtx, tilePx, paddingPx, req, markers.length);
+            offCtx.restore();
         }
 
-        const { canvas: final, ctx: finalCtx } = this.createCanvas(tilePx);
-        finalCtx.drawImage(offscreen as CanvasImageSource, -paddingPx, -paddingPx);
+        const { canvas: final, ctx: finalCtx } = this.createCanvas(tilePx * r);
+        finalCtx.drawImage(offscreen as CanvasImageSource, -paddingPx * r, -paddingPx * r);
         return final;
     }
 
