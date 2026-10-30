@@ -12,13 +12,12 @@ import { type BaseIconProperties, type MarkerLabelPosition } from "./DefaultIcon
 import {
     computeMarkerPinBounds,
     createMarkerPathData,
-    parseLabelPosition,
     escapeXml,
-    measureLabelWidth,
     fmt,
     toSvgDataUrl,
     type IconLayout,
 } from "./DefaultIconGeometry";
+import { computeIconLabelLayout } from "./IconLabelLayout";
 
 /**
  * 既定マーカーアイコンの土台。ピン形の輪郭・ラベル・寸法の計算を受け持ち、
@@ -174,94 +173,23 @@ export abstract class AbstractDefaultIcon extends AbstractMarkerIcon {
     }
 
     /**
-     * Android AbstractDefaultIcon.toBitmapIcon() / iOS makeIcon() と同じレイアウト計算。
-     * すべてピクセル空間で行い、ラベルが広い場合はビットマップを横に広げてマーカーを
-     * 中央寄せする（正方形固定にしない）。ラベルの文字サイズはマーカー scale に追従せず
-     * 絶対値（Android/iOS と同じ）。
-     *
-     * `labelPosition` が中央以外なら、ラベルをピンの輪郭の外側へ置き、ビットマップを
-     * その側へだけ伸ばす。アイコンは不変なので結果は 1 回だけ計算して使い回す。
+     * ピンの輪郭を避けてラベルを置く（計算は `computeIconLabelLayout`、画像アイコンと共通）。
+     * アイコンは不変なので結果は 1 回だけ計算して使い回す。
      */
     protected computeLayout(): IconLayout {
         if (this.cachedLayout) return this.cachedLayout;
         const markerSize = Math.max(1, Math.round(this.iconSize * this.scale));
-        // Android: outlineStrokeWidth = max(dpToPx(1 * iconScale), 2)
-        const outlineStroke = Math.max(this.scale, 2);
-        // 円形部分の中心（Android drawLabel() と同じ）。
-        const headCenterY = markerSize * 0.35;
-        const padding = markerSize * 0.1;
-
-        if (!this.label) {
-            this.cachedLayout = {
-                markerSize,
-                bitmapWidth: markerSize,
-                bitmapHeight: markerSize,
-                markerOffsetX: 0,
-                markerOffsetY: 0,
-                outlineStroke,
-                labelCenterX: markerSize / 2,
-                labelCenterY: headCenterY,
-                labelWidth: 0,
-                labelHeight: 0,
-            };
-            return this.cachedLayout;
-        }
-
-        const fontSize = Math.max(1, this.labelTextSize);
-        const labelWidth = measureLabelWidth(this.label, fontSize, this.labelTypeFace) + outlineStroke * 2;
-        const labelHeight = fontSize + outlineStroke * 2;
-        const { h, v } = parseLabelPosition(this.labelPosition);
-        const pin = computeMarkerPinBounds(markerSize, this.scale, this.strokeWidth);
-        const gap = Math.max(outlineStroke, markerSize * 0.05);
-
-        // マーカー本体の左上を原点とした座標でラベルの中心を決める。
-        let cx = markerSize / 2;
-        if (h < 0) cx = pin.left - gap - labelWidth / 2;
-        else if (h > 0) cx = pin.right + gap + labelWidth / 2;
-
-        let cy = headCenterY;
-        if (h !== 0) {
-            // 横に置くときは、縦はピンの上端・上端と先端の中間・先端に揃える。
-            // center を頭の中心にすると、ピン全体の中央より上に見える。
-            if (v < 0) cy = pin.top + labelHeight / 2;
-            else if (v > 0) cy = pin.bottom - labelHeight / 2;
-            else cy = (pin.top + pin.bottom) / 2;
-        } else {
-            // 中央列の top / bottom はピンと重ならないよう上下の外側に置く。
-            if (v < 0) cy = pin.top - gap - labelHeight / 2;
-            else if (v > 0) cy = pin.bottom + gap + labelHeight / 2;
-        }
-
-        // 横方向。中央なら従来どおり左右対称に広げる（出力を変えない）。
-        let bitmapWidth: number;
-        let markerOffsetX: number;
-        if (h === 0) {
-            bitmapWidth = Math.max(markerSize, Math.round(labelWidth + padding));
-            markerOffsetX = (bitmapWidth - markerSize) / 2;
-        } else {
-            const minX = Math.min(0, cx - labelWidth / 2 - padding / 2);
-            const maxX = Math.max(markerSize, cx + labelWidth / 2 + padding / 2);
-            bitmapWidth = Math.ceil(maxX - minX);
-            markerOffsetX = -minX;
-        }
-
-        const minY = Math.min(0, cy - labelHeight / 2);
-        const maxY = Math.max(markerSize, cy + labelHeight / 2);
-        const markerOffsetY = Math.ceil(-minY);
-        const bitmapHeight = markerOffsetY + Math.ceil(maxY);
-
-        this.cachedLayout = {
+        this.cachedLayout = computeIconLabelLayout({
             markerSize,
-            bitmapWidth,
-            bitmapHeight,
-            markerOffsetX,
-            markerOffsetY,
-            outlineStroke,
-            labelCenterX: markerOffsetX + cx,
-            labelCenterY: markerOffsetY + cy,
-            labelWidth,
-            labelHeight,
-        };
+            scale: this.scale,
+            body: computeMarkerPinBounds(markerSize, this.scale, this.strokeWidth),
+            // 円形部分の中心（Android drawLabel() と同じ）。
+            centerY: markerSize * 0.35,
+            label: this.label,
+            labelTextSize: this.labelTextSize,
+            labelTypeFace: this.labelTypeFace,
+            labelPosition: this.labelPosition,
+        });
         return this.cachedLayout;
     }
 
