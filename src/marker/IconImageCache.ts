@@ -1,5 +1,14 @@
 /** Decodes BitmapIcon.url (a self-contained data: URL) into a drawable image, with dedup + caching. */
 export class IconImageCache {
+    /**
+     * @param pixelRatio Device pixels per CSS pixel the icons will be drawn at.
+     *   An SVG icon (the default pins) is rasterized at its own size times this,
+     *   so a 2x tile gets a 2x icon instead of a 1x one stretched. A raster icon
+     *   is used as it is: drawn at its `BitmapIcon.size`, it is as sharp as the
+     *   pixels it was made with, so an app wanting 2x supplies a 2x image.
+     */
+    constructor(private readonly pixelRatio: number = 1) {}
+
     private readonly ready = new Map<string, ImageBitmap | HTMLImageElement>();
     private readonly pending = new Map<string, Promise<ImageBitmap | HTMLImageElement | null>>();
     // Permanently-undecodable URLs (e.g. malformed data: URL). Cached so a
@@ -65,6 +74,31 @@ export class IconImageCache {
         }
     }
 
+    /**
+     * An SVG drawn onto a canvas `pixelRatio` times its own size, or null when
+     * there is nothing to gain (1x, a raster image) or no canvas to draw on.
+     * Decoded at its own size, an SVG is a 1x bitmap like any other.
+     */
+    private rasterizeVector(url: string, img: HTMLImageElement): OffscreenCanvas | HTMLCanvasElement | null {
+        if (this.pixelRatio <= 1 || !url.startsWith('data:image/svg+xml')) return null;
+        const width = Math.max(1, Math.round((img.naturalWidth || img.width) * this.pixelRatio));
+        const height = Math.max(1, Math.round((img.naturalHeight || img.height) * this.pixelRatio));
+        let canvas: OffscreenCanvas | HTMLCanvasElement;
+        if (typeof OffscreenCanvas !== 'undefined') {
+            canvas = new OffscreenCanvas(width, height);
+        } else if (typeof document !== 'undefined') {
+            canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+        } else {
+            return null;
+        }
+        const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+        if (!ctx) return null;
+        ctx.drawImage(img, 0, 0, width, height);
+        return canvas;
+    }
+
     private addFailed(url: string): void {
         this.failed.add(url);
         while (this.failed.size > IconImageCache.MAX_FAILED_ENTRIES) {
@@ -91,9 +125,10 @@ export class IconImageCache {
                 console.warn('[MapConductor] MarkerTileRenderer: <img>.decode() failed for icon', err);
                 return null;
             }
+            const rasterized = this.rasterizeVector(url, img);
             if (typeof createImageBitmap === 'function') {
                 try {
-                    return await createImageBitmap(img);
+                    return await createImageBitmap(rasterized ?? img);
                 } catch (err) {
                     // Still drawable via drawImage() on the main thread, just
                     // not transferable to the SW (toSWData() will fall back
@@ -102,7 +137,7 @@ export class IconImageCache {
                     return img;
                 }
             }
-            return img;
+            return rasterized ?? img;
         }
         if (typeof createImageBitmap === 'function') {
             try {
