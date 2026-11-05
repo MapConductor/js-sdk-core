@@ -2688,7 +2688,13 @@ declare class HexCellRegistry<ActualMarker> {
     });
     /** 対象エンティティが属する HexCell を（登録せず）計算して返す */
     getCell(entity: MarkerEntity<ActualMarker>): HexCell;
-    /** 登録/更新して属する HexCell を返す */
+    /**
+     * 登録/更新して属する HexCell を返す。
+     *
+     * K-D 木が持つのはセルなので、**セルの集合が変わったときだけ**作り直しの印を付ける。
+     * 位置の変わらない更新や、既にあるセルへの追加のたびに作り直すと、マーカーを
+     * 差し替えるたびに次の検索（タップの当たり判定）が全件の再構築を待つことになる。
+     */
     setPoint(entity: MarkerEntity<ActualMarker>): HexCell;
     /** HexCell が存在するか */
     contains(hexId: string): boolean;
@@ -2765,7 +2771,13 @@ interface KDTreeStats {
 declare class KDTree {
     private readonly root;
     constructor(points: HexCell[]);
-    /** 再帰的にK-D木を構築 */
+    /**
+     * 再帰的にK-D木を構築する。
+     *
+     * `items[from, to)` の中で中央値だけを選び（quickselect）、左右を同じ配列のまま
+     * 再帰する。階層ごとに配列を複製してソートすると、数万件で 1 秒近くかかり、
+     * マーカーを足し引きした直後のタップがその間止まる。
+     */
     private build;
     /** 最近傍セルを返す（見つからない場合 null） */
     nearest(query: Offset): HexCell | null;
@@ -2824,6 +2836,13 @@ declare class MarkerManager<ActualMarker> {
     /** 空間操作が必要になった時だけ遅延初期化 */
     private ensureCellRegistry;
     updateEntity(entity: MarkerEntity<ActualMarker>): void;
+    /**
+     * ドラッグできるエンティティが 1 つでもあるか。
+     *
+     * `MarkerState` はその場で書き換えられる（`state.draggable = true`）ので、
+     * 数を持ち回らず毎回数える。数万件でも数ミリ秒で、空間インデックスの再構築よりずっと軽い。
+     */
+    hasDraggableEntity(): boolean;
     allEntities(): Array<MarkerEntity<ActualMarker>>;
     /** メモリ統計（概算） */
     getMemoryStats(): MarkerManagerStats;
@@ -5196,6 +5215,8 @@ declare abstract class AbstractMarkerController<ActualMarker> implements Slotted
     find(position: GeoPoint): MarkerEntity<ActualMarker> | null;
     composition(data: MarkerState[]): Promise<void>;
     has(state: MarkerState): boolean;
+    /** ドラッグできるマーカーがあるか（`MarkerEventHost.hasDraggableMarker`） */
+    hasDraggableMarker(): boolean;
     setOnClickListener(listener: OnMarkerEventHandler | null): void;
     setOnDragStart(listener: OnMarkerEventHandler | null): void;
     setOnDrag(listener: OnMarkerEventHandler | null): void;

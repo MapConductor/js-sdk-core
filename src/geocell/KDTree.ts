@@ -95,43 +95,76 @@ class KDTreeNode {
     }
 }
 
+const axisValue = (cell: HexCell, axis: number): number =>
+    axis === 0 ? cell.centerXY.x : cell.centerXY.y;
+
+/**
+ * `items[left..right]` を、`items[k]` が軸の値で k 番目になるよう並べ替える
+ * （左は以下、右は以上）。Wirth の quickselect。
+ *
+ * 六角セルの中心は列ごとに同じ x を持つので、等しい値が大量に並ぶ。
+ * 左右から寄せる分割にしてあるのはそのため（片側に寄せる分割だと O(n²) になる）。
+ */
+function selectNth(items: HexCell[], left: number, right: number, k: number, axis: number): void {
+    while (left < right) {
+        const pivot = axisValue(items[k], axis);
+        let i = left;
+        let j = right;
+        do {
+            while (axisValue(items[i], axis) < pivot) i++;
+            while (pivot < axisValue(items[j], axis)) j--;
+            if (i <= j) {
+                const tmp = items[i];
+                items[i] = items[j];
+                items[j] = tmp;
+                i++;
+                j--;
+            }
+        } while (i <= j);
+        if (j < k) left = i;
+        if (k < i) right = j;
+    }
+}
+
 // ---- KDTree 本体 ---- //
 export class KDTree {
     private readonly root: KDTreeNode | null;
 
     constructor(points: HexCell[]) {
-        this.root = points.length <= 0 ? null : this.build({
-            items: points, 
+        // 呼び出し元の配列は並べ替えない
+        const items = points.slice();
+        this.root = items.length <= 0 ? null : this.build({
+            items,
+            from: 0,
+            to: items.length,
             depth: 0,
         });
     }
 
-    /** 再帰的にK-D木を構築 */
+    /**
+     * 再帰的にK-D木を構築する。
+     *
+     * `items[from, to)` の中で中央値だけを選び（quickselect）、左右を同じ配列のまま
+     * 再帰する。階層ごとに配列を複製してソートすると、数万件で 1 秒近くかかり、
+     * マーカーを足し引きした直後のタップがその間止まる。
+     */
     private build(params: {
         items: HexCell[];
+        from: number;
+        to: number;
         depth: number;
     }): KDTreeNode | null {
-        if (params.items.length === 0) return null;
+        const { items, from, to, depth } = params;
+        if (from >= to) return null;
 
-        const axis = params.depth % 2; // 0: x, 1: y
-        const sorted = [...params.items].sort((a, b) => {
-            const av = axis === 0 ? a.centerXY.x : a.centerXY.y;
-            const bv = axis === 0 ? b.centerXY.x : b.centerXY.y;
-            return av - bv;
-        });
-
-        const mid = Math.floor(sorted.length / 2);
+        const axis = depth % 2; // 0: x, 1: y
+        const mid = from + ((to - from) >> 1);
+        selectNth(items, from, to - 1, mid, axis);
 
         return new KDTreeNode({
-            cell: sorted[mid],
-            left: this.build({
-                items: sorted.slice(0, mid),
-                depth: params.depth + 1,
-            }),
-            right: this.build({
-                items: sorted.slice(mid + 1),
-                depth: params.depth + 1,
-            }),
+            cell: items[mid],
+            left: this.build({ items, from, to: mid, depth: depth + 1 }),
+            right: this.build({ items, from: mid + 1, to, depth: depth + 1 }),
             axis,
         });
     }
