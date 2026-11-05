@@ -250,86 +250,6 @@ declare function createOffset(params: {
     y: number;
 }): Offset;
 
-interface HexCoord {
-    q: number;
-    r: number;
-    depth: number;
-    readonly s: number;
-    neighbors(): HexCoord[];
-}
-declare function createHexCoord({ q, r, depth, }: {
-    q: number;
-    r: number;
-    depth?: number;
-}): {
-    q: number;
-    r: number;
-    depth: number;
-    readonly s: number;
-    neighbors(): HexCoord[];
-};
-declare function hexCoordToString(hexCoord: HexCoord): string;
-declare function getNeighbors(hexCoord: HexCoord): HexCoord[];
-
-interface HexCell {
-    coord: HexCoord;
-    centerLatLng: GeoPoint;
-    centerXY: Offset;
-    id: string;
-    idPrefix(levels: number): string;
-}
-declare function createHexCell({ coord, centerLatLng, centerXY, id, }: {
-    coord: HexCoord;
-    centerLatLng: GeoPoint;
-    centerXY: Offset;
-    id: string;
-}): HexCell;
-declare function hexCellToIdPrefix(params: {
-    hexCell: HexCell;
-    levels: number;
-}): string;
-
-/**
- * Configuration for spatial index
- */
-interface SpatialIndexConfig {
-    /** Use WebAssembly implementation if available (default: true) */
-    useWasm?: boolean;
-    /** Zoom level for hex cell size calculation */
-    zoom?: number;
-    /** Base hex cell size in pixels */
-    baseHexSize?: number;
-}
-/**
- * Spatial index interface for efficient nearest-neighbor queries
- */
-interface SpatialIndex {
-    /**
-     * Build the spatial index from hex cells
-     */
-    build(cells: HexCell[]): void;
-    /**
-     * Find the nearest cell to a query point
-     */
-    findNearest(query: Offset): HexCell | null;
-    /**
-     * Find k nearest cells
-     */
-    findKNearest(query: Offset, k: number): HexCell[];
-    /**
-     * Find all cells within a radius
-     */
-    findWithinRadius(query: Offset, radius: number): HexCell[];
-    /**
-     * Check if the index is empty
-     */
-    isEmpty(): boolean;
-    /**
-     * Clean up resources
-     */
-    dispose(): void;
-}
-
 interface AttributionRule {
     attribution: string;
     minZoom?: number;
@@ -2502,6 +2422,45 @@ declare const Direction6Delta: Record<Direction6, {
     deltaR: number;
 }>;
 
+interface HexCoord {
+    q: number;
+    r: number;
+    depth: number;
+    readonly s: number;
+    neighbors(): HexCoord[];
+}
+declare function createHexCoord({ q, r, depth, }: {
+    q: number;
+    r: number;
+    depth?: number;
+}): {
+    q: number;
+    r: number;
+    depth: number;
+    readonly s: number;
+    neighbors(): HexCoord[];
+};
+declare function hexCoordToString(hexCoord: HexCoord): string;
+declare function getNeighbors(hexCoord: HexCoord): HexCoord[];
+
+interface HexCell {
+    coord: HexCoord;
+    centerLatLng: GeoPoint;
+    centerXY: Offset;
+    id: string;
+    idPrefix(levels: number): string;
+}
+declare function createHexCell({ coord, centerLatLng, centerXY, id, }: {
+    coord: HexCoord;
+    centerLatLng: GeoPoint;
+    centerXY: Offset;
+    id: string;
+}): HexCell;
+declare function hexCellToIdPrefix(params: {
+    hexCell: HexCell;
+    levels: number;
+}): string;
+
 declare const Earth: Readonly<{
     /** WGS84 semi-major axis (equatorial radius) in meters. */
     RADIUS_METERS: 6378137;
@@ -2673,135 +2632,6 @@ declare class HexGeocellImpl implements HexGeocell {
     static defaultGeocell(): HexGeocell;
 }
 
-declare class HexCellRegistry<ActualMarker> {
-    private kdTree;
-    private readonly allCells;
-    private readonly entryIDsByCell;
-    private readonly allEntries;
-    private needsRebuild;
-    private readonly lock;
-    private readonly geocell;
-    private readonly zoom;
-    constructor(params: {
-        geocell: HexGeocell;
-        zoom: number;
-    });
-    /** 対象エンティティが属する HexCell を（登録せず）計算して返す */
-    getCell(entity: MarkerEntity<ActualMarker>): HexCell;
-    /**
-     * 登録/更新して属する HexCell を返す。
-     *
-     * K-D 木が持つのはセルなので、**セルの集合が変わったときだけ**作り直しの印を付ける。
-     * 位置の変わらない更新や、既にあるセルへの追加のたびに作り直すと、マーカーを
-     * 差し替えるたびに次の検索（タップの当たり判定）が全件の再構築を待つことになる。
-     */
-    setPoint(entity: MarkerEntity<ActualMarker>): HexCell;
-    /** HexCell が存在するか */
-    contains(hexId: string): boolean;
-    /** エンティティをレジストリから削除 */
-    removePoint(entity: MarkerEntity<ActualMarker>): boolean;
-    /** 特定セルからエンティティを外す */
-    private removeFromCell;
-    /** 全消去 */
-    clear(): void;
-    private markDirty;
-    /** インデックス再構築（必要時のみ） */
-    private rebuildIfNeeded;
-    /** 最も近い HexCell を返す */
-    findNearest(point: GeoPoint): HexCell | null;
-    /** 最も近い HexCell と距離 */
-    findNearestWithDistance(point: GeoPoint): HexCellWithDistance | null;
-    /** k 近傍（距離付き） */
-    findNearestKWithDistance(params: {
-        point: GeoPoint;
-        k: number;
-    }): HexCellWithDistance[];
-    /** 半径内（メートル等）にある HexCell（距離付き） */
-    findWithinRadiusWithDistance(params: {
-        position: GeoPoint;
-        radius: number;
-    }): HexCellWithDistance[];
-    /** 全 HexCell */
-    all(): HexCell[];
-    /** 指定 HexCell に属するエンティティID一覧（コピーを返す） */
-    getEntryIDsByHexCell(hexCell: HexCell): Set<string> | null;
-    /**
-     * 指定位置／ズームでのピクセル数に相当する距離（m）
-     * ※投影がメートルを返す前提
-     */
-    metersPerPixel(params: {
-        position: GeoPoint;
-        zoom: number;
-        pixels: number;
-        tileSize?: number;
-    }): number;
-    /** ピクセル半径内の HexCell（距離付き） */
-    findWithinPixelRadius(params: {
-        position: GeoPoint;
-        zoom: number;
-        pixels: number;
-        tileSize?: number;
-    }): HexCellWithDistance[];
-    /** ID プレフィックス一致で検索（共通プレフィックス最適化想定） */
-    findByIdPrefix(prefix: string): HexCell[];
-    /** レジストリ状態の統計 */
-    getStats(): RegistryStats;
-}
-interface RegistryStats {
-    totalCells: number;
-    totalEntries: number;
-    kdTreeBuilt: boolean;
-    needsRebuild: boolean;
-}
-
-interface HexCellWithDistance {
-    cell: HexCell;
-    distanceMeters: number;
-}
-declare function createHexCellWithDistance(params: {
-    cell: HexCell;
-    distanceMeters: number;
-}): HexCellWithDistance;
-
-interface KDTreeStats {
-    nodeCount: number;
-    maxDepth: number;
-    isEmpty: boolean;
-}
-declare class KDTree {
-    private readonly root;
-    constructor(points: HexCell[]);
-    /**
-     * 再帰的にK-D木を構築する。
-     *
-     * `items[from, to)` の中で中央値だけを選び（quickselect）、左右を同じ配列のまま
-     * 再帰する。階層ごとに配列を複製してソートすると、数万件で 1 秒近くかかり、
-     * マーカーを足し引きした直後のタップがその間止まる。
-     */
-    private build;
-    /** 最近傍セルを返す（見つからない場合 null） */
-    nearest(query: Offset): HexCell | null;
-    /** 最近傍 + 距離 */
-    nearestWithDistance(query: Offset): HexCellWithDistance | null;
-    /** k 近傍 + 距離（距離昇順） */
-    nearestKWithDistance(params: {
-        query: Offset;
-        k: number;
-    }): HexCellWithDistance[];
-    /** 半径内（メートルなど任意単位）にあるセルを距離付きで返す（距離昇順） */
-    withinRadiusWithDistance(params: {
-        query: Offset;
-        radius: number;
-    }): HexCellWithDistance[];
-    /** 構造統計 */
-    getStats(): KDTreeStats;
-    private _nearest;
-    private _squaredDistance;
-    private _distance;
-    private _countNodes;
-    private _maxDepth;
-}
-
 /**
  * Memory usage statistics for MarkerManager optimization
  */
@@ -2815,7 +2645,16 @@ declare class MarkerManager<ActualMarker> {
     readonly minMarkerCount: number;
     protected readonly geocell: HexGeocell;
     private readonly entities;
-    private cellRegistry;
+    /**
+     * 空間インデックス。android-sdk / ios-sdk の `MarkerGridIndex` と同じ階層グリッド。
+     *
+     * 以前の六角セル + K-D 木は zoom 20 固定（セル 1 辺 約 12cm）で、マーカーがほぼ
+     * 1 件ずつ別のセルに入り、何もまとめていなかった。しかもセルの集合が変わるたびに
+     * 次の検索が全件の K-D 木を作り直していた。
+     *
+     * 足し引きはその場で索引に反映する（作り直さない）。理由は {@link MarkerGridIndex}。
+     */
+    private readonly gridIndex;
     private isDestroyed;
     constructor(geocell: HexGeocell, minMarkerCount?: number);
     lock(): void;
@@ -2831,10 +2670,7 @@ declare class MarkerManager<ActualMarker> {
     }): number;
     findNearest(position: GeoPoint): MarkerEntity<ActualMarker> | null;
     private bruteForceNearest;
-    findByIdPrefix(prefix: string): HexCell[];
     registerEntity(entity: MarkerEntity<ActualMarker>): void;
-    /** 空間操作が必要になった時だけ遅延初期化 */
-    private ensureCellRegistry;
     updateEntity(entity: MarkerEntity<ActualMarker>): void;
     /**
      * ドラッグできるエンティティが 1 つでもあるか。
@@ -5671,5 +5507,5 @@ declare function segmentIntersectsRegion({ start, end, region, geodesic, }: {
 
 declare function splitByMeridian(points: GeoPoint[], geodesic: boolean): GeoPoint[][];
 
-export { AbstractCircleOverlayRenderer, AbstractGroundImageOverlayRenderer, AbstractMarkerController, AbstractMarkerIcon, AbstractMarkerOverlayRenderer, AbstractMarkerRenderingStrategy, AbstractPolygonOverlayRenderer, AbstractPolylineOverlayRenderer, AbstractViewportStrategy, AbstractZoomAltitudeConverter, BLANK_MAP_STYLE, BLANK_MAP_STYLE_URL, BaseMapViewController, CANONICAL_ORDER, CircleController, CircleManager, CircleOverlay, CollectorMarkerOverlayRenderer, ColorDefaultIcon, DEFAULT_CIRCLE_SEGMENTS, DEFAULT_RASTER_LAYER_USER_AGENT, DefaultMarkerEventController, DefaultMarkerIcon, Direction6, Direction6Delta, DriverConformanceViolation, Earth, EmptyMapServiceRegistry, GROUND_IMAGE_DEFAULT_TILE_SIZE, GeoGridIndex, GeoPoint, GroundImageController, GroundImageManager, GroundImageOverlay, GroundScaleZoomAltitudeConverter, HexCellRegistry, HexGeocellImpl, IconImageCache, ImageDefaultIcon, ImageIcon, InitState, KDTree, LocalTileServer, MAP_CAPABILITIES, MARKER_HIT_RADIUS_MOUSE_PX, MARKER_HIT_RADIUS_TOUCH_PX, MARKER_HIT_SEARCH_RADIUS_PX, MARKER_RENDER_BATCH_SIZE, MAX_TILE_PIXEL_RATIO, MapCameraPosition, MapCapabilityStatus, MapDiagnostics, MapDriverConformance, MapOverlayRegistry, MapPaddings, MapProjection, MapProvider, MapProviderType, MapServiceRegistrations, MapUISettings, MapUISettingsDiagnostics, MapViewBase, MapViewHolderBase, MapViewState, MapViewStyleHost, MarkerAnimation, MarkerGrid, MarkerIconSize, MarkerManager, MarkerOverlay, MarkerRenderingSupportKey, MarkerTileRenderer, MarkerTilingOptions, MutableMapServiceRegistry, Mutex, NoCameraRestriction, OVERLAY_KINDS, OverlayCollector, OverlayGeoJson, OverlayHitResolver, Planar, PolygonController, PolygonManager, PolygonOverlay, PolylineController, PolylineManager, PolylineOverlay, RasterHeaderRuleSet, RasterLayerController, RasterLayerManager, RasterLayerOverlay, RasterLayerSource, RasterTilePreferenceKey, ScreenProjectionRequirement, Settings, Spherical, StrategyMarkerController, StyleMutationStore, TRANSPARENT_TILE_PNG, TileRenderFailedError, TileScheme, TileServerRegistry, VectorStyleAsDesign, VectorStyleMutationSupportKey, VectorStyleSupportKey, WEB_MERCATOR_MAX_EXTENT_METERS, WEB_MERCATOR_MAX_LATITUDE, WGS84, WGS84Geodesic, WebMercator, WebMercatorZoomAltitudeConverter, applyGlMapUISettings, applyStyleMutations, bearingFromNativeHeading, bearingFromNativeRotation, bounceInterpolation, bridgeHolesIntoSingleRing, bridgeHolesIntoSingleRingWrapAware, buildPolygonRings, buildPolylineSegments, buildUnwrappedPolygonRings, buildUnwrappedPolylinePath, buildVisibleRegion, calculateMetersPerPixel, capabilityOfGesture, circleToRing, closeRing, closestPointOnSegment, combineHash, computeArea$1 as computeArea, computeDistanceBetween$1 as computeDistanceBetween, computeFitBoundsCameraPosition, computeHeading$1 as computeHeading, computeLength$1 as computeLength, computeOffset$1 as computeOffset, computeOffsetOrigin$1 as computeOffsetOrigin, computeSignedArea$1 as computeSignedArea, computeDistanceBetween as computeWGS84DistanceBetween, createCircleEntity, createCircleState, createCollectorMarkerRenderingSupport, createDefaultIcon, createFingerPrint, createGeoPoint, createGeoRectBounds, createGroundImageEntity, createGroundImageState, createHexCell, createHexCellWithDistance, createHexCoord, createIdentifiedHexCell, createMapCameraPosition, createMapServiceKey, createMarkerEntity, createMarkerFingerPrint, createMarkerState, createOffset, createOppositeMeridianPoint, createOverlayHit, createPolygonEntity, createPolygonState, createPolylineEntity, createPolylineState, createRandomId, createRasterLayerEntity, createRasterLayerState, createSegmentBounds, createSubject, createTileWorkerHandler, densifyAndNormalize, describeStyleMutations, expandBounds, fingerPrintEquals, fromGeoPoint, fromLatLng, fromLatLong, fromLngLat, fromLongLat, generateIdFromHashes, getNeighbors, hashBool, hashDefaultMarkerIcon, hashGeoPoint, hashNullable, hashNum, hashObj, hashStr, hexCellToIdPrefix, hexCoordToString, ingestMarkers, interpolate$1 as interpolate, interpolateAtMeridianGeodesic, interpolateAtMeridianLinear, interpolate as interpolateWGS84, isEmptyCameraRestriction, isFullySupported, isKnownUnsupported, isNativeDescribableStyle, isNativeMapExtensionCapable, isSlottedOverlayController, isUsable, longHashCode, mapCapabilityFromId, mapViewStateInternal, markerHitShape, markerIconExtentPx, markerIconHashCode, markerSearchBounds, normalizeLngDegrees, parseStyleMutations, parseTilePixelRatio, pickMarkerHit, pickMarkerIndex, preferMarkerHit, resolveAttributionRules, resolveCameraRestriction, resolveHoles, resolveMapUISettings, resolveRasterAttributions, reverseStyleMutation, segmentIntersectsRegion, splitByMeridian, splitRingByMeridian, styleMutationLayerId, styleMutationProperty, styleMutationTarget, tilePixelRatio, tilePixelRatioSuffix, toDegrees, toInt, toNativeHeading, toNativeRotation, toRadians, unionHoleRings, unionHoles, unionHolesInPlace, vectorStyleKey, viewportSizeOf, withRasterHeaderTransform, wrapClickedPoint };
-export type { AddParams, AnyMarkerRenderingSupport, AttributionRule, BitmapIcon, CameraOptions, CameraRestriction, ChangeParams, ChangeParamsInterface, CircleAddParams, CircleCapable, CircleChangeParams, CircleEntity, CircleEvent, CircleFingerPrint, CircleManagerInterface, CircleOptions, CircleOverlayRenderer, CircleState, CircleStateCopyParams, CreateMarkerStateParams, DefaultMarkerIconOptions, FitBoundsCameraResult, GeoPointInterface, GeoRectBounds, GlGestureHandler, GlGestureHandlers, GlMarkerDragMap, GlTouchZoomRotateHandler, GroundImageAddParams, GroundImageCapable, GroundImageChangeParams, GroundImageEntity, GroundImageEvent, GroundImageFingerPrint, GroundImageManagerInterface, GroundImageOverlayRenderer, GroundImageState, GroundImageStateCopyParams, GroundOverlayOptions, HexCell, HexCellWithDistance, HexCoord, HexGeocell, HexGeocell as HexGeocellInterface, IdentifiedHexCell, ImageDefaultIconOptions, ImageIconOptions, ImageSource, InfoBubbleEntry, KDTreeStats, MapCameraPositionCopyParams, MapCameraPositionInterface, MapCapability, MapConfig, MapDesignTypeInterface, MapDiagnosticLevel, MapDiagnosticsSink, MapGesture, MapOverlayInterface, MapPaddingsInterface, MapServiceKey, MapServiceRegistration, MapServiceRegistry, MapStyleHost, MapStyleInstallation, MapViewBaseProps, MapViewControllerInterface, MapViewHolder, MapViewStateInterface, MapViewStateInternal, MapViewStateOptions, MapViewStyle, MarkerAnimationOverlayEntry, MarkerAnimationOverlayHost, MarkerCapable, MarkerEntity, MarkerEventController, MarkerEventHost, MarkerFingerPrint, MarkerHit, MarkerHitRect, MarkerIcon, MarkerIngestionResult, MarkerLabelHorizontalPosition, MarkerLabelPosition, MarkerLabelVerticalPosition, MarkerManagerStats, MarkerOptions, MarkerOverlayRenderer, MarkerRenderingStrategy, MarkerRenderingSupport, MarkerState, MarkerStateCopyParams, NativeDescribableStyle, NativeMapExtensionCapable, NativeMapExtensionDescriptor, NativeMapExtensionEvent, NativeMapExtensionEventHandler, NativeStyleDescriptor, Offset, OnCameraMoveHandler, OnCircleEventHandler, OnGroundImageEventHandler, OnMapEventHandler, OnMapInitializedHandler, OnMapLoadedHandler, OnMarkerEventHandler, OnPolygonEventHandler, OnPolylineEventHandler, OnRasterLayerEventHandler, OverlayController, OverlayControllerLike, OverlayHit, OverlayKind, OverlayRendererInterface, PolygonAddParams, PolygonCapable, PolygonChangeParams, PolygonEntity, PolygonEvent, PolygonFingerPrint, PolygonManagerInterface, PolygonOptions, PolygonOverlayRenderer, PolygonRings, PolygonState, PolygonStateCopyParams, PolylineAddParams, PolylineCapable, PolylineChangeParams, PolylineEntity, PolylineEvent, PolylineFingerPrint, PolylineHitResult, PolylineManagerInterface, PolylineOptions, PolylineOverlayRenderer, PolylineState, PolylineStateCopyParams, PreparedMarker, Projection, RasterAttributionRule, RasterHeaderRule, RasterHeaderSupport, RasterLayerAddParams, RasterLayerCapable, RasterLayerChangeParams, RasterLayerEntity, RasterLayerEvent, RasterLayerFingerPrint, RasterLayerManagerInterface, RasterLayerMounting, RasterLayerOverlayRenderer, RasterLayerState, RasterLayerStateCopyParams, RasterRequestParameters, RasterTilePreference, RasterTransformRequest, RegistryStats, ScreenOffsetResult, Serializable, SlottedOverlayController, SpatialIndex, SpatialIndexConfig, StyleMutation, StylePatchableMap, TileOutcome, TileProvider, TileRenderRequest, TileRenderResponse, TileRequest, VectorStyleMutationSupport, VectorStyleSupport, ViewportSize, VisibleRegion };
+export { AbstractCircleOverlayRenderer, AbstractGroundImageOverlayRenderer, AbstractMarkerController, AbstractMarkerIcon, AbstractMarkerOverlayRenderer, AbstractMarkerRenderingStrategy, AbstractPolygonOverlayRenderer, AbstractPolylineOverlayRenderer, AbstractViewportStrategy, AbstractZoomAltitudeConverter, BLANK_MAP_STYLE, BLANK_MAP_STYLE_URL, BaseMapViewController, CANONICAL_ORDER, CircleController, CircleManager, CircleOverlay, CollectorMarkerOverlayRenderer, ColorDefaultIcon, DEFAULT_CIRCLE_SEGMENTS, DEFAULT_RASTER_LAYER_USER_AGENT, DefaultMarkerEventController, DefaultMarkerIcon, Direction6, Direction6Delta, DriverConformanceViolation, Earth, EmptyMapServiceRegistry, GROUND_IMAGE_DEFAULT_TILE_SIZE, GeoGridIndex, GeoPoint, GroundImageController, GroundImageManager, GroundImageOverlay, GroundScaleZoomAltitudeConverter, HexGeocellImpl, IconImageCache, ImageDefaultIcon, ImageIcon, InitState, LocalTileServer, MAP_CAPABILITIES, MARKER_HIT_RADIUS_MOUSE_PX, MARKER_HIT_RADIUS_TOUCH_PX, MARKER_HIT_SEARCH_RADIUS_PX, MARKER_RENDER_BATCH_SIZE, MAX_TILE_PIXEL_RATIO, MapCameraPosition, MapCapabilityStatus, MapDiagnostics, MapDriverConformance, MapOverlayRegistry, MapPaddings, MapProjection, MapProvider, MapProviderType, MapServiceRegistrations, MapUISettings, MapUISettingsDiagnostics, MapViewBase, MapViewHolderBase, MapViewState, MapViewStyleHost, MarkerAnimation, MarkerGrid, MarkerIconSize, MarkerManager, MarkerOverlay, MarkerRenderingSupportKey, MarkerTileRenderer, MarkerTilingOptions, MutableMapServiceRegistry, Mutex, NoCameraRestriction, OVERLAY_KINDS, OverlayCollector, OverlayGeoJson, OverlayHitResolver, Planar, PolygonController, PolygonManager, PolygonOverlay, PolylineController, PolylineManager, PolylineOverlay, RasterHeaderRuleSet, RasterLayerController, RasterLayerManager, RasterLayerOverlay, RasterLayerSource, RasterTilePreferenceKey, ScreenProjectionRequirement, Settings, Spherical, StrategyMarkerController, StyleMutationStore, TRANSPARENT_TILE_PNG, TileRenderFailedError, TileScheme, TileServerRegistry, VectorStyleAsDesign, VectorStyleMutationSupportKey, VectorStyleSupportKey, WEB_MERCATOR_MAX_EXTENT_METERS, WEB_MERCATOR_MAX_LATITUDE, WGS84, WGS84Geodesic, WebMercator, WebMercatorZoomAltitudeConverter, applyGlMapUISettings, applyStyleMutations, bearingFromNativeHeading, bearingFromNativeRotation, bounceInterpolation, bridgeHolesIntoSingleRing, bridgeHolesIntoSingleRingWrapAware, buildPolygonRings, buildPolylineSegments, buildUnwrappedPolygonRings, buildUnwrappedPolylinePath, buildVisibleRegion, calculateMetersPerPixel, capabilityOfGesture, circleToRing, closeRing, closestPointOnSegment, combineHash, computeArea$1 as computeArea, computeDistanceBetween$1 as computeDistanceBetween, computeFitBoundsCameraPosition, computeHeading$1 as computeHeading, computeLength$1 as computeLength, computeOffset$1 as computeOffset, computeOffsetOrigin$1 as computeOffsetOrigin, computeSignedArea$1 as computeSignedArea, computeDistanceBetween as computeWGS84DistanceBetween, createCircleEntity, createCircleState, createCollectorMarkerRenderingSupport, createDefaultIcon, createFingerPrint, createGeoPoint, createGeoRectBounds, createGroundImageEntity, createGroundImageState, createHexCell, createHexCoord, createIdentifiedHexCell, createMapCameraPosition, createMapServiceKey, createMarkerEntity, createMarkerFingerPrint, createMarkerState, createOffset, createOppositeMeridianPoint, createOverlayHit, createPolygonEntity, createPolygonState, createPolylineEntity, createPolylineState, createRandomId, createRasterLayerEntity, createRasterLayerState, createSegmentBounds, createSubject, createTileWorkerHandler, densifyAndNormalize, describeStyleMutations, expandBounds, fingerPrintEquals, fromGeoPoint, fromLatLng, fromLatLong, fromLngLat, fromLongLat, generateIdFromHashes, getNeighbors, hashBool, hashDefaultMarkerIcon, hashGeoPoint, hashNullable, hashNum, hashObj, hashStr, hexCellToIdPrefix, hexCoordToString, ingestMarkers, interpolate$1 as interpolate, interpolateAtMeridianGeodesic, interpolateAtMeridianLinear, interpolate as interpolateWGS84, isEmptyCameraRestriction, isFullySupported, isKnownUnsupported, isNativeDescribableStyle, isNativeMapExtensionCapable, isSlottedOverlayController, isUsable, longHashCode, mapCapabilityFromId, mapViewStateInternal, markerHitShape, markerIconExtentPx, markerIconHashCode, markerSearchBounds, normalizeLngDegrees, parseStyleMutations, parseTilePixelRatio, pickMarkerHit, pickMarkerIndex, preferMarkerHit, resolveAttributionRules, resolveCameraRestriction, resolveHoles, resolveMapUISettings, resolveRasterAttributions, reverseStyleMutation, segmentIntersectsRegion, splitByMeridian, splitRingByMeridian, styleMutationLayerId, styleMutationProperty, styleMutationTarget, tilePixelRatio, tilePixelRatioSuffix, toDegrees, toInt, toNativeHeading, toNativeRotation, toRadians, unionHoleRings, unionHoles, unionHolesInPlace, vectorStyleKey, viewportSizeOf, withRasterHeaderTransform, wrapClickedPoint };
+export type { AddParams, AnyMarkerRenderingSupport, AttributionRule, BitmapIcon, CameraOptions, CameraRestriction, ChangeParams, ChangeParamsInterface, CircleAddParams, CircleCapable, CircleChangeParams, CircleEntity, CircleEvent, CircleFingerPrint, CircleManagerInterface, CircleOptions, CircleOverlayRenderer, CircleState, CircleStateCopyParams, CreateMarkerStateParams, DefaultMarkerIconOptions, FitBoundsCameraResult, GeoPointInterface, GeoRectBounds, GlGestureHandler, GlGestureHandlers, GlMarkerDragMap, GlTouchZoomRotateHandler, GroundImageAddParams, GroundImageCapable, GroundImageChangeParams, GroundImageEntity, GroundImageEvent, GroundImageFingerPrint, GroundImageManagerInterface, GroundImageOverlayRenderer, GroundImageState, GroundImageStateCopyParams, GroundOverlayOptions, HexCell, HexCoord, HexGeocell, HexGeocell as HexGeocellInterface, IdentifiedHexCell, ImageDefaultIconOptions, ImageIconOptions, ImageSource, InfoBubbleEntry, MapCameraPositionCopyParams, MapCameraPositionInterface, MapCapability, MapConfig, MapDesignTypeInterface, MapDiagnosticLevel, MapDiagnosticsSink, MapGesture, MapOverlayInterface, MapPaddingsInterface, MapServiceKey, MapServiceRegistration, MapServiceRegistry, MapStyleHost, MapStyleInstallation, MapViewBaseProps, MapViewControllerInterface, MapViewHolder, MapViewStateInterface, MapViewStateInternal, MapViewStateOptions, MapViewStyle, MarkerAnimationOverlayEntry, MarkerAnimationOverlayHost, MarkerCapable, MarkerEntity, MarkerEventController, MarkerEventHost, MarkerFingerPrint, MarkerHit, MarkerHitRect, MarkerIcon, MarkerIngestionResult, MarkerLabelHorizontalPosition, MarkerLabelPosition, MarkerLabelVerticalPosition, MarkerManagerStats, MarkerOptions, MarkerOverlayRenderer, MarkerRenderingStrategy, MarkerRenderingSupport, MarkerState, MarkerStateCopyParams, NativeDescribableStyle, NativeMapExtensionCapable, NativeMapExtensionDescriptor, NativeMapExtensionEvent, NativeMapExtensionEventHandler, NativeStyleDescriptor, Offset, OnCameraMoveHandler, OnCircleEventHandler, OnGroundImageEventHandler, OnMapEventHandler, OnMapInitializedHandler, OnMapLoadedHandler, OnMarkerEventHandler, OnPolygonEventHandler, OnPolylineEventHandler, OnRasterLayerEventHandler, OverlayController, OverlayControllerLike, OverlayHit, OverlayKind, OverlayRendererInterface, PolygonAddParams, PolygonCapable, PolygonChangeParams, PolygonEntity, PolygonEvent, PolygonFingerPrint, PolygonManagerInterface, PolygonOptions, PolygonOverlayRenderer, PolygonRings, PolygonState, PolygonStateCopyParams, PolylineAddParams, PolylineCapable, PolylineChangeParams, PolylineEntity, PolylineEvent, PolylineFingerPrint, PolylineHitResult, PolylineManagerInterface, PolylineOptions, PolylineOverlayRenderer, PolylineState, PolylineStateCopyParams, PreparedMarker, Projection, RasterAttributionRule, RasterHeaderRule, RasterHeaderSupport, RasterLayerAddParams, RasterLayerCapable, RasterLayerChangeParams, RasterLayerEntity, RasterLayerEvent, RasterLayerFingerPrint, RasterLayerManagerInterface, RasterLayerMounting, RasterLayerOverlayRenderer, RasterLayerState, RasterLayerStateCopyParams, RasterRequestParameters, RasterTilePreference, RasterTransformRequest, ScreenOffsetResult, Serializable, SlottedOverlayController, StyleMutation, StylePatchableMap, TileOutcome, TileProvider, TileRenderRequest, TileRenderResponse, TileRequest, VectorStyleMutationSupport, VectorStyleSupport, ViewportSize, VisibleRegion };

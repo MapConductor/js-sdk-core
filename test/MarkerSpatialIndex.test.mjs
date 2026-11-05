@@ -1,25 +1,26 @@
-// マーカーの空間インデックス（HexCellRegistry / KDTree）と、pointerdown での引き当て。
+// マーカーの空間検索（MarkerManager）と、pointerdown での引き当て。
 //
 // ## なぜここを固定するか
 //
 // 数万件のマーカーを置いた地図で、マーカーを差し替えるたびに次の検索が K-D 木の
 // 全件再構築を待っていた。pointerdown がその検索をするので、地図を触った瞬間に
-// 0.8〜1.6 秒止まる（Pixel 5a の実測）。
+// 0.8〜1.8 秒止まる（Pixel 5a の実測）。
 //
-// 速くしたことで結果が変わってはいけない。インデックスの取り違えは何も落とさず、
+// 索引は android-sdk / ios-sdk と同じ階層グリッド（MarkerGridIndex）に置き換えた。
+// JS 版は足し引きをその場で反映する（作り直さない）ので、変更の前に一度検索して
+// 索引を作らせてから変更し、その後の答えを確かめる。索引の取り違えは何も落とさず、
 // マーカーが静かに見つからなくなるだけなので、総当たりの結果と毎回比べる。
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    createHexCell,
+    createGeoPoint,
+    createGeoRectBounds,
     createMarkerEntity,
     createMarkerState,
     DefaultMarkerEventController,
-    HexCellRegistry,
     HexGeocellImpl,
-    KDTree,
     MarkerManager,
 } from '../dist/index.mjs';
 
@@ -31,142 +32,204 @@ function random(seed = 123456789) {
     };
 }
 
-const cellAt = (id, x, y) =>
-    createHexCell({
-        coord: { q: 0, r: 0 },
-        centerLatLng: { latitude: 0, longitude: 0 },
-        centerXY: { x, y },
-        id,
-    });
-
-const distSq = (a, b) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
-
-/** 六角格子のように、同じ x（列）と同じ y が大量に並ぶ点。分割の取り違えはここで出る */
-function gridCells() {
-    const cells = [];
-    for (let col = 0; col < 40; col++) {
-        for (let row = 0; row < 40; row++) {
-            cells.push(cellAt(`c${col}_${row}`, col * 3, row * 2 + (col % 2)));
-        }
-    }
-    return cells;
-}
-
-function scatteredCells(count) {
-    const next = random();
-    return Array.from({ length: count }, (_, i) => cellAt(`s${i}`, next() * 1000, next() * 1000));
-}
-
-for (const [name, cells] of [
-    ['同じ座標が並ぶ格子', gridCells()],
-    ['ばらばらの点', scatteredCells(3000)],
-]) {
-    test(`K-D 木は総当たりと同じ答えを返す（${name}）`, () => {
-        const tree = new KDTree(cells);
-        assert.equal(tree.getStats().nodeCount, cells.length);
-
-        const next = random(42);
-        for (let i = 0; i < 200; i++) {
-            const query = { x: next() * 130 - 5, y: next() * 90 - 5 };
-
-            const nearest = tree.nearest(query);
-            const best = Math.min(...cells.map((c) => distSq(c.centerXY, query)));
-            assert.equal(distSq(nearest.centerXY, query), best);
-
-            const radius = next() * 10;
-            const within = tree.withinRadiusWithDistance({ query, radius }).map((h) => h.cell.id).sort();
-            const expected = cells
-                .filter((c) => distSq(c.centerXY, query) <= radius * radius)
-                .map((c) => c.id)
-                .sort();
-            assert.deepEqual(within, expected);
-
-            const k = 1 + Math.floor(next() * 8);
-            const knn = tree.nearestKWithDistance({ query, k }).map((h) => h.distanceMeters ** 2);
-            const expectedKnn = cells
-                .map((c) => distSq(c.centerXY, query))
-                .sort((a, b) => a - b)
-                .slice(0, k);
-            assert.deepEqual(
-                knn.map((d) => Math.round(d * 1e6)),
-                expectedKnn.map((d) => Math.round(d * 1e6)),
-            );
-        }
-    });
-}
-
-test('K-D 木は渡した配列を並べ替えない', () => {
-    const cells = scatteredCells(100);
-    const ids = cells.map((c) => c.id);
-    new KDTree(cells);
-    assert.deepEqual(
-        cells.map((c) => c.id),
-        ids,
-    );
-});
-
 const geocell = HexGeocellImpl.defaultGeocell();
 
 const entityAt = (id, latitude, longitude, extra = {}) =>
     createMarkerEntity({
         marker: null,
-        state: createMarkerState({ id, position: { latitude, longitude }, ...extra }),
+        state: createMarkerState({ id, position: createGeoPoint({ latitude, longitude }), ...extra }),
     });
 
-const withinIds = (registry, position, radius) =>
-    registry
-        .findWithinRadiusWithDistance({ position, radius })
-        .flatMap((h) => [...(registry.getEntryIDsByHexCell(h.cell) ?? [])])
-        .sort();
+const boundsOf = (south, west, north, east) =>
+    createGeoRectBounds({
+        southWest: createGeoPoint({ latitude: south, longitude: west }),
+        northEast: createGeoPoint({ latitude: north, longitude: east }),
+    });
 
-test('セルの変わらない更新・同じセルへの追加と削除のあとも、作り直した索引と同じ答えを返す', () => {
-    const registry = new HexCellRegistry({ geocell, zoom: 20 });
-    const center = { latitude: 35.7078, longitude: 139.7615 };
+const idsOf = (entities) => entities.map((e) => e.state.id).sort();
+
+const distSq = (entity, p) =>
+    (entity.state.position.latitude - p.latitude) ** 2 + (entity.state.position.longitude - p.longitude) ** 2;
+
+/** 総当たりの答え。索引を使わない MarkerManager と同じ判定 */
+function bruteForce(entities) {
+    return {
+        inBounds: (bounds) => entities.filter((e) => bounds.contains(e.state.position)),
+        nearestDistSq: (p) => Math.min(...entities.map((e) => distSq(e, p))),
+    };
+}
+
+function assertMatchesBruteForce(manager, entities, next) {
+    const scan = bruteForce(entities);
+    const boxes = [
+        boundsOf(35.70, 139.75, 35.71, 139.77),
+        boundsOf(35.6, 139.6, 35.8, 139.9),
+        boundsOf(35.7078, 139.7615, 35.7079, 139.7616),
+        boundsOf(10, 100, 11, 101),
+    ];
+    for (let i = 0; i < 30; i++) {
+        const lat = 35.65 + next() * 0.12;
+        const lng = 139.70 + next() * 0.12;
+        const size = next() * 0.03;
+        boxes.push(boundsOf(lat, lng, lat + size, lng + size));
+    }
+    for (const bounds of boxes) {
+        assert.deepEqual(idsOf(manager.findMarkersInBounds(bounds)), idsOf(scan.inBounds(bounds)));
+    }
+
+    for (let i = 0; i < 100; i++) {
+        const p = { latitude: 35.6 + next() * 0.2, longitude: 139.6 + next() * 0.3 };
+        const found = manager.findNearest(p);
+        assert.ok(found, 'nearest returned nothing');
+        assert.equal(distSq(found, p), scan.nearestDistSq(p));
+    }
+    // 遠く離れた点（リングの外。総当たりに落ちる）
+    const far = { latitude: 10, longitude: 100 };
+    assert.equal(distSq(manager.findNearest(far), far), scan.nearestDistSq(far));
+}
+
+test('索引を使う件数で、範囲検索と最近傍が総当たりと一致する', () => {
     const next = random(7);
-    const entities = Array.from({ length: 500 }, (_, i) =>
-        entityAt(`p${i}`, center.latitude + (next() - 0.5) * 0.02, center.longitude + (next() - 0.5) * 0.02),
+    const manager = new MarkerManager(geocell, 100);
+    const entities = Array.from({ length: 5000 }, (_, i) =>
+        entityAt(`p${i}`, 35.65 + next() * 0.12, 139.70 + next() * 0.12),
     );
-    for (const e of entities) registry.setPoint(e);
-    // 一度検索して木を作らせる（以降の更新で作り直しが要るかどうかを試す）
-    assert.ok(registry.findNearest(center));
+    for (const e of entities) manager.registerEntity(e);
 
-    // 位置の変わらない更新（セルの集合は変わらない）
-    for (const e of entities) registry.setPoint(e);
-    // 既存のマーカーと同じ位置への追加（既存のセルに入る）
+    assertMatchesBruteForce(manager, entities, random(42));
+    assert.equal(manager.getMemoryStats().spatialIndexInitialized, true);
+});
+
+test('追加・更新・移動・削除のあとも、総当たりと一致する', () => {
+    const next = random(11);
+    const manager = new MarkerManager(geocell, 100);
+    let entities = Array.from({ length: 3000 }, (_, i) =>
+        entityAt(`p${i}`, 35.65 + next() * 0.12, 139.70 + next() * 0.12),
+    );
+    for (const e of entities) manager.registerEntity(e);
+    // 先に同じ検索をして索引を作らせる（以降の変更はその場で反映される）
+    assertMatchesBruteForce(manager, entities, random(43));
+
+    // 消すもの・動かすものの位置でも、変更の前に検索しておく。索引は段ごとに作るので、
+    // ここで作った段が変更で正しく直されるかを、変更の直後に確かめる。
+    const removed = entities[2];
+    const beforeMove = entities[1].state.position;
+    const around = (at) => boundsOf(at.latitude - 1e-4, at.longitude - 1e-4, at.latitude + 1e-4, at.longitude + 1e-4);
+    const probes = [['p2', removed.state.position], ['p1', beforeMove]];
+    for (const [id, at] of probes) {
+        assert.ok(idsOf(manager.findMarkersInBounds(around(at))).includes(id), id);
+        assert.equal(manager.findNearest(at)?.state.id, id);
+    }
+
+    // 位置の変わらない更新
+    for (const e of entities.slice(0, 500)) manager.updateEntity(e);
+    // 既存のマーカーと同じ位置への追加
     const twin = entityAt('twin', entities[0].state.position.latitude, entities[0].state.position.longitude);
-    registry.setPoint(twin);
-    // 1 件を遠くへ動かす（セルが消えて、新しいセルができる）
-    const moved = entityAt('p1', center.latitude + 0.5, center.longitude + 0.5);
-    registry.setPoint(moved);
-    // 1 件を外す（セルが消える）
-    registry.removePoint(entities[2]);
+    manager.registerEntity(twin);
+    // 遠くへ動かす（別のエンティティで置き換え）
+    const moved = entityAt('p1', 35.9, 140.0);
+    manager.updateEntity(moved);
+    // 外す
+    manager.removeEntity('p2');
+    // 新規
+    const added = Array.from({ length: 200 }, (_, i) =>
+        entityAt(`n${i}`, 35.65 + next() * 0.12, 139.70 + next() * 0.12),
+    );
+    for (const e of added) manager.registerEntity(e);
 
-    const fresh = new HexCellRegistry({ geocell, zoom: 20 });
-    for (const e of [...entities.filter((e) => !['p1', 'p2'].includes(e.state.id)), twin, moved]) {
-        fresh.setPoint(e);
+    // 消したものと、動かす前の位置には、もう何も残っていない（他の検索より先に見る）
+    for (const [id, at] of probes) {
+        assert.ok(!idsOf(manager.findMarkersInBounds(around(at))).includes(id), id);
+        assert.notEqual(manager.findNearest(at)?.state.id, id);
     }
 
-    const probes = [center, moved.state.position, entities[0].state.position, entities[2].state.position];
-    for (let i = 0; i < 50; i++) {
-        probes.push({
-            latitude: center.latitude + (next() - 0.5) * 0.03,
-            longitude: center.longitude + (next() - 0.5) * 0.03,
-        });
-    }
-    for (const position of probes) {
-        for (const radius of [50, 300, 2000]) {
-            assert.deepEqual(withinIds(registry, position, radius), withinIds(fresh, position, radius));
-        }
-        assert.equal(registry.findNearest(position)?.id, fresh.findNearest(position)?.id);
-    }
-    assert.ok(withinIds(registry, entities[0].state.position, 50).includes('twin'));
-    assert.ok(registry.getEntryIDsByHexCell(registry.findNearest(moved.state.position)).has('p1'));
+    entities = [...entities.filter((e) => !['p1', 'p2'].includes(e.state.id)), twin, moved, ...added];
+    assertMatchesBruteForce(manager, entities, random(43));
+    assert.equal(manager.findNearest({ latitude: 35.9, longitude: 140.0 })?.state.id, 'p1');
 
-    // 同じセルに残りがある削除では、セルは残る
-    registry.removePoint(twin);
-    const stillThere = registry.findNearest(entities[0].state.position);
-    assert.ok(registry.getEntryIDsByHexCell(stillThere).has('p0'));
-    assert.ok(!registry.getEntryIDsByHexCell(stillThere).has('twin'));
+    assert.ok(idsOf(manager.findMarkersInBounds(boundsOf(35.89, 139.99, 35.91, 140.01))).includes('p1'));
+});
+
+test('その場で書き換えた位置は、updateEntity のあとの検索に反映される', () => {
+    const next = random(13);
+    const manager = new MarkerManager(geocell, 100);
+    const entities = Array.from({ length: 1000 }, (_, i) =>
+        entityAt(`p${i}`, 35.65 + next() * 0.12, 139.70 + next() * 0.12),
+    );
+    for (const e of entities) manager.registerEntity(e);
+    assert.ok(manager.findNearest({ latitude: 35.7, longitude: 139.75 }));
+    assert.deepEqual(manager.findMarkersInBounds(boundsOf(36.4, 140.4, 36.6, 140.6)), []);
+
+    // ドラッグと同じく MarkerState をその場で書き換え、updateEntity で知らせる
+    entities[0].state.position = createGeoPoint({ latitude: 36.5, longitude: 140.5 });
+    manager.updateEntity(entities[0]);
+
+    assert.equal(manager.findNearest({ latitude: 36.5, longitude: 140.5 })?.state.id, 'p0');
+    assert.deepEqual(idsOf(manager.findMarkersInBounds(boundsOf(36.4, 140.4, 36.6, 140.6))), ['p0']);
+});
+
+test('同じセルのまま差し替えたエンティティは、新しいものが返る', () => {
+    const manager = new MarkerManager(geocell, 1);
+    manager.registerEntity(entityAt('a', 35.68, 139.76));
+    manager.registerEntity(entityAt('b', 35.0, 139.0));
+    const box = boundsOf(35.67, 139.75, 35.69, 139.77);
+    assert.deepEqual(idsOf(manager.findMarkersInBounds(box)), ['a']);
+
+    const replacement = entityAt('a', 35.68, 139.76);
+    manager.updateEntity(replacement);
+    assert.equal(manager.findMarkersInBounds(box)[0], replacement);
+    assert.equal(manager.findNearest(createGeoPoint({ latitude: 35.68, longitude: 139.76 })), replacement);
+});
+
+/**
+ * リングは正方形なので、角で見つかったものは辺で見つかったものより遠いことがある。
+ * 最初に当たるのはリング 1 の角（約 2.05 セル先）だが、本当の最近傍はリング 2 の辺
+ * （1.6 セル先）にある。最初に当たったリングで打ち切ると角を返す。
+ */
+test('最近傍は、先に当たったリングの角より遠いリングの辺を見落とさない', () => {
+    const cell = 180 / 2 ** 15; // MarkerGridIndex の最近傍の段
+    // セルの真ん中。行は -90 度から、列は -180 度から数える
+    const centre = createGeoPoint({
+        latitude: -90 + (Math.floor((35 + 90) / cell) + 0.5) * cell,
+        longitude: -180 + (Math.floor((139 + 180) / cell) + 0.5) * cell,
+    });
+    const manager = new MarkerManager(geocell, 1);
+    manager.registerEntity(entityAt('corner', centre.latitude + cell * 1.45, centre.longitude + cell * 1.45));
+    manager.registerEntity(entityAt('edge', centre.latitude, centre.longitude + cell * 1.6));
+    assert.equal(manager.findNearest(centre)?.state.id, 'edge');
+});
+
+test('180 度をまたぐ範囲でも、総当たりと一致する', () => {
+    const next = random(17);
+    const manager = new MarkerManager(geocell, 10);
+    const entities = Array.from({ length: 400 }, (_, i) =>
+        entityAt(`p${i}`, -1 + next() * 2, ((179 + next() * 2 + 180) % 360) - 180),
+    );
+    for (const e of entities) manager.registerEntity(e);
+    const scan = bruteForce(entities);
+    const bounds = boundsOf(-0.5, 179.5, 0.5, -179.5);
+    const found = idsOf(manager.findMarkersInBounds(bounds));
+    assert.ok(found.length > 0);
+    assert.deepEqual(found, idsOf(scan.inBounds(bounds)));
+
+    const p = { latitude: 0, longitude: 179.999 };
+    assert.equal(distSq(manager.findNearest(p), p), scan.nearestDistSq(p));
+});
+
+test('clear と destroy のあとは何も返さない', () => {
+    const manager = new MarkerManager(geocell, 1);
+    manager.registerEntity(entityAt('a', 35, 139));
+    manager.registerEntity(entityAt('b', 35.1, 139.1));
+    manager.registerEntity(entityAt('c', 35.2, 139.2));
+    assert.equal(manager.findNearest({ latitude: 35, longitude: 139 })?.state.id, 'a');
+
+    manager.clear();
+    assert.equal(manager.findNearest({ latitude: 35, longitude: 139 }), null);
+    assert.deepEqual(manager.findMarkersInBounds(boundsOf(34, 138, 36, 140)), []);
+
+    manager.registerEntity(entityAt('d', 35, 139));
+    manager.destroy();
+    assert.equal(manager.findNearest({ latitude: 35, longitude: 139 }), null);
 });
 
 test('ドラッグできるマーカーがあるかは、その場の書き換えも反映する', () => {
