@@ -173,6 +173,20 @@ export class MarkerManager<ActualMarker> {
         this.cellRegistry?.setPoint(entity);
     }
 
+    /**
+     * ドラッグできるエンティティが 1 つでもあるか。
+     *
+     * `MarkerState` はその場で書き換えられる（`state.draggable = true`）ので、
+     * 数を持ち回らず毎回数える。数万件でも数ミリ秒で、空間インデックスの再構築よりずっと軽い。
+     */
+    public hasDraggableEntity(): boolean {
+        if (this.isDestroyed) return false;
+        for (const entity of this.entities.values()) {
+            if (entity.state.draggable) return true;
+        }
+        return false;
+    }
+
     public allEntities(): Array<MarkerEntity<ActualMarker>> {
         if (this.isDestroyed) return [];
         return Array.from(this.entities.values());

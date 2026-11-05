@@ -46,6 +46,16 @@ export interface MarkerEventHost<ActualMarker> {
         pointerType: 'touch' | 'mouse',
     ): MarkerEntity<ActualMarker> | null;
 
+    /**
+     * ドラッグできるマーカーが 1 つでもあるか。
+     *
+     * false を返すと、`pointerdown` でマーカーを引き当てない（掴めるものが無いので結果は
+     * 使われない）。引き当ては空間インデックスを使うので、マーカーを差し替えた直後は
+     * その再構築を待つことになり、地図を触った瞬間に止まって見える。
+     * 実装しない host は従来どおり毎回引き当てる。
+     */
+    hasDraggableMarker?(): boolean;
+
     getSelectedMarker(): MarkerEntity<ActualMarker> | null;
     setSelectedMarker(entity: MarkerEntity<ActualMarker> | null): void | Promise<void>;
     updateSelectedPosition(position: GeoPoint | null): void;
@@ -154,6 +164,8 @@ export class DefaultMarkerEventController<ActualMarker> {
     private readonly handlePointerDown = (event: PointerEvent): void => {
         this.lastPointerType = event.pointerType === 'touch' ? 'touch' : 'mouse';
         if (!event.isPrimary || event.button !== 0 || this.activePointerId != null) return;
+        // 掴めるマーカーが無ければ引き当てない（地図のパンのたびに走るため）
+        if (this.host.hasDraggableMarker?.() === false) return;
         const entity = this.findMarkerAtPointer(event);
         if (!entity?.state.draggable) return;
 

@@ -68,6 +68,11 @@ export abstract class AbstractMarkerController<ActualMarker>
         return this.markerManager.hasEntity(state.id);
     }
 
+    /** ドラッグできるマーカーがあるか（`MarkerEventHost.hasDraggableMarker`） */
+    hasDraggableMarker(): boolean {
+        return this.markerManager.hasDraggableEntity();
+    }
+
     setOnClickListener(listener: OnMarkerEventHandler | null): void {
         this.clickListener = listener;
     }

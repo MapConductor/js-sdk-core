@@ -48,31 +48,47 @@ export class HexCellRegistry<ActualMarker> {
         return createHexCell({ coord, centerLatLng, centerXY, id: cellId });
     }
 
-    /** 登録/更新して属する HexCell を返す */
+    /**
+     * 登録/更新して属する HexCell を返す。
+     *
+     * K-D 木が持つのはセルなので、**セルの集合が変わったときだけ**作り直しの印を付ける。
+     * 位置の変わらない更新や、既にあるセルへの追加のたびに作り直すと、マーカーを
+     * 差し替えるたびに次の検索（タップの当たり判定）が全件の再構築を待つことになる。
+     */
     public setPoint(entity: MarkerEntity<ActualMarker>): HexCell {
         return this.lock.write(() => {
             const entityId = entity.state.id;
-
-            // 古いセルから外す
-            const oldCellId = this.allEntries.get(entityId);
-            if (oldCellId) this.removeFromCell({
-                cellId: oldCellId,
-                entityId,
-            });
-
-            // 新しいセルへ
             const cell = this.getCell(entity);
             const cellId = cell.id;
 
-            this.allCells.set(cellId, cell);
+            const oldCellId = this.allEntries.get(entityId);
+            // 同じセルのまま（位置が変わらない更新など）
+            if (oldCellId === cellId) return this.allCells.get(cellId) ?? cell;
+
+            let cellsChanged = false;
+            // 古いセルから外す
+            if (oldCellId) {
+                this.removeFromCell({
+                    cellId: oldCellId,
+                    entityId,
+                });
+                cellsChanged = !this.allCells.has(oldCellId);
+            }
+
+            // 新しいセルへ。既にあるセルは置き換えない（木が持っているものと揃える）
+            const existing = this.allCells.get(cellId);
+            if (!existing) {
+                this.allCells.set(cellId, cell);
+                cellsChanged = true;
+            }
             this.allEntries.set(entityId, cellId);
 
             const set = this.entryIDsByCell.get(cellId) ?? new Set<string>();
             set.add(entityId);
             this.entryIDsByCell.set(cellId, set);
 
-            this.markDirty();
-            return cell;
+            if (cellsChanged) this.markDirty();
+            return existing ?? cell;
         });
     }
 
@@ -94,7 +110,8 @@ export class HexCellRegistry<ActualMarker> {
             });
             if (removed) {
                 this.allEntries.delete(entityId);
-                this.markDirty();
+                // セルにまだ他のエンティティが残っていれば、木は変わらない
+                if (!this.allCells.has(cellId)) this.markDirty();
             }
             return removed;
         });
