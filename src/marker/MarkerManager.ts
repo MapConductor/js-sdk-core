@@ -1,8 +1,8 @@
 import { GeoPoint, GeoRectBounds } from "../features";
-import { HexGeocell, HexGeocellImpl, HexCellRegistry, HexCell } from "../geocell";
+import { HexGeocell, HexGeocellImpl } from "../geocell";
 import { Earth } from "../projection";
-import { Spherical } from "../spherical";
 import { MarkerEntity } from "./MarkerEntity";
+import { MarkerGridIndex } from "./MarkerGridIndex";
 
 /**
  * Memory usage statistics for MarkerManager optimization
@@ -20,8 +20,16 @@ export class MarkerManager<ActualMarker> {
     // Kotlin: mutableMapOf<String, MarkerEntity<ActualMarker>>()
     private readonly entities = new Map<string, MarkerEntity<ActualMarker>>();
 
-    // Lazy-init 空間インデックス
-    private cellRegistry: HexCellRegistry<ActualMarker> | null = null;
+    /**
+     * 空間インデックス。android-sdk / ios-sdk の `MarkerGridIndex` と同じ階層グリッド。
+     *
+     * 以前の六角セル + K-D 木は zoom 20 固定（セル 1 辺 約 12cm）で、マーカーがほぼ
+     * 1 件ずつ別のセルに入り、何もまとめていなかった。しかもセルの集合が変わるたびに
+     * 次の検索が全件の K-D 木を作り直していた。
+     *
+     * 足し引きはその場で索引に反映する（作り直さない）。理由は {@link MarkerGridIndex}。
+     */
+    private readonly gridIndex = new MarkerGridIndex<ActualMarker>(() => this.entities.values());
 
     private isDestroyed = false;
 
@@ -47,7 +55,7 @@ export class MarkerManager<ActualMarker> {
         const removed = this.entities.get(id) ?? null;
         if (removed) {
             this.entities.delete(id);
-            this.cellRegistry?.removePoint(removed);
+            this.gridIndex.remove(id);
         }
         return removed;
     }
@@ -76,35 +84,7 @@ export class MarkerManager<ActualMarker> {
         if (this.isDestroyed) return null;
 
         if (this.entities.size > this.minMarkerCount) {
-            // 大きいデータセットでは空間インデックス使用
-            const registry = this.ensureCellRegistry();
-            const nearestCell = registry.findNearest(position);
-            if (nearestCell) {
-                const ids = registry.getEntryIDsByHexCell(nearestCell) ?? [];
-                let best: MarkerEntity<ActualMarker> | null = null;
-                let bestDistSq = Number.POSITIVE_INFINITY;
-
-                for (const id of ids) {
-                    const ent = this.entities.get(id);
-                    if (!ent) continue;
-                    const dx =
-                        ent.state.position.latitude - position.latitude;
-                    const dy =
-                        ent.state.position.longitude - position.longitude;
-                    const d2 = dx * dx + dy * dy;
-                    if (d2 < bestDistSq) {
-                        best = ent;
-                        bestDistSq = d2;
-                    }
-                }
-                // セルは見つかったが中身が空 = 空間インデックスの desync。
-                // android-sdk / ios-sdk と同じく null を返す。ここで総当りに落とすと、
-                // 2000件超のマップでタップ1回が全件スキャンになる上、インデックスの
-                // 不整合そのものを隠してしまう。
-                return best;
-            }
-            // セルが無い場合はフォールバック
-            return this.bruteForceNearest(position);
+            return this.gridIndex.nearest(position);
         }
 
         // 小規模は総当り
@@ -127,11 +107,6 @@ export class MarkerManager<ActualMarker> {
         return best;
     }
 
-    public findByIdPrefix(prefix: string): HexCell[] {
-        if (this.isDestroyed) return [];
-        return this.cellRegistry?.findByIdPrefix(prefix) ?? [];
-    }
-
     public registerEntity(entity: MarkerEntity<ActualMarker>): void {
         // In-flight async work (e.g. a renderer.onAdd()/onChange() promise
         // resolving after a provider switch) can legitimately try to write
@@ -144,23 +119,7 @@ export class MarkerManager<ActualMarker> {
             return;
         }
         this.entities.set(entity.state.id, entity);
-        this.cellRegistry?.setPoint(entity);
-    }
-
-    /** 空間操作が必要になった時だけ遅延初期化 */
-    private ensureCellRegistry(): HexCellRegistry<ActualMarker> {
-        if (!this.cellRegistry) {
-            // Kotlin: HexCellRegistry(geocell = geocell, zoom = 20.0)
-            this.cellRegistry = new HexCellRegistry<ActualMarker>({
-                geocell: this.geocell,
-                zoom: 20.0,
-            });
-            // 既存エンティティを再索引
-            for (const entity of this.entities.values()) {
-                this.cellRegistry.setPoint(entity);
-            }
-        }
-        return this.cellRegistry;
+        this.gridIndex.set(entity);
     }
 
     public updateEntity(entity: MarkerEntity<ActualMarker>): void {
@@ -170,7 +129,8 @@ export class MarkerManager<ActualMarker> {
             return;
         }
         this.entities.set(entity.state.id, entity);
-        this.cellRegistry?.setPoint(entity);
+        // 動いたマーカーは属するセルが変わる
+        this.gridIndex.set(entity);
     }
 
     /**
@@ -199,8 +159,8 @@ export class MarkerManager<ActualMarker> {
         }
         return {
             entityCount: this.entities.size,
-            hasSpatialIndex: this.cellRegistry !== null,
-            spatialIndexInitialized: this.cellRegistry !== null,
+            hasSpatialIndex: true,
+            spatialIndexInitialized: this.gridIndex.isBuilt,
             estimatedMemoryKB: Math.floor(this.estimateMemoryUsage() / 1024),
         };
     }
@@ -209,15 +169,14 @@ export class MarkerManager<ActualMarker> {
         // おおよその概算（バイト）
         const entityMapOverhead = this.entities.size * 64; // Mapエントリ + 文字列キー分
         const entityObjects = this.entities.size * 200; // エンティティ本体の概算
-        const spatialIndexSize =
-            this.cellRegistry !== null ? this.entities.size * 100 : 0; // レジストリ分の概算
+        const spatialIndexSize = this.gridIndex.estimatedBytes();
         return entityMapOverhead + entityObjects + spatialIndexSize;
     }
 
     public clear(): void {
         if (this.isDestroyed) return;
         this.entities.clear();
-        this.cellRegistry?.clear();
+        this.gridIndex.clear();
     }
 
     public findMarkersInBounds(
@@ -226,27 +185,11 @@ export class MarkerManager<ActualMarker> {
         if (this.isDestroyed) return [];
         if (bounds.isEmpty) return [];
 
-        // `bounds.isEmpty` above already rules out a null corner, so the `!` was
-        // safe — but it read as if it might not be, and it repeated the assertion
-        // at each use. Binding both up front states the precondition once and
-        // matches android-sdk / ios-sdk.
-        const center = bounds.center;
-        const northEast = bounds.northEast;
-        if (this.entities.size > this.minMarkerCount && center != null && northEast != null) {
-            const registry = this.ensureCellRegistry();
-            const distance = Spherical.computeDistanceBetween(center, northEast);
-            const hexCells = registry.findWithinRadiusWithDistance({
-                position: center,
-                radius: distance,
-            });
-            const entryIDs = hexCells
-                .flatMap((hc) => Array.from(registry.getEntryIDsByHexCell(hc.cell) ?? []));
-            return entryIDs
-                .map((id) => this.getEntity(id))
-                .filter((entity): entity is MarkerEntity<ActualMarker> => entity != null);
+        if (this.entities.size > this.minMarkerCount) {
+            return this.gridIndex.inBounds(bounds);
         }
 
-        // 現状は総当りでフィルタ
+        // 小規模は総当りでフィルタ
         const out: Array<MarkerEntity<ActualMarker>> = [];
         for (const e of this.entities.values()) {
             if (bounds.contains(e.state.position)) {
@@ -261,8 +204,7 @@ export class MarkerManager<ActualMarker> {
         if (!this.isDestroyed) {
             this.isDestroyed = true;
             this.entities.clear();
-            this.cellRegistry?.clear();
-            this.cellRegistry = null;
+            this.gridIndex.clear();
         }
     }
 
