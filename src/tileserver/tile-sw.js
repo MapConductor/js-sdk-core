@@ -18,7 +18,8 @@ const EMPTY_TILE = new Uint8Array([
 
 /**
  * SW-side provider data registered by the main thread:
- * routeId -> { items: [{lat,lng,iconIndex}], icons: [{bitmap,anchor,size}], zoomScales, extraIconScale, grid }
+ * routeId -> { items: [{lat,lng,iconIndex,labelIndex}], icons: [{bitmap,anchor,size}],
+ *             labels: [{bitmap,centerOffset,size}], zoomScales, extraIconScale, declutterPx, grid }
  * `icons[].bitmap` are ImageBitmaps this worker owns: the main thread clones
  * them in (they are NOT in the transfer list — see LocalTileServer), decoded
  * once there and deduplicated by icon content.
@@ -138,8 +139,10 @@ self.addEventListener('message', (event) => {
         swProviders.set(msg.routeId, {
             items: msg.items,
             icons: msg.icons,
+            labels: msg.labels ?? [],
             zoomScales: msg.zoomScales,
             extraIconScale: msg.extraIconScale ?? 1.0,
+            declutterPx: msg.declutterPx ?? 0,
             grid: buildGrid(msg.items),
             queryPaddingByZoom: new Map(),
         });
@@ -208,7 +211,9 @@ function canRenderOffscreen() {
 }
 
 function queryCandidates(provider, x, y, z, tileSize, paddingPx) {
-    const { north, south, west, east } = tileToGeoBounds(x, y, z, tileSize, paddingPx);
+    // 間引きのマス目 1 つ分も広げる。境界をまたぐマス目を両側のタイルが丸ごと見るので、
+    // 同じ点を残す（MarkerTileRenderer.queryCandidates と同じ）。
+    const { north, south, west, east } = tileToGeoBounds(x, y, z, tileSize, paddingPx + provider.declutterPx);
     return queryGrid(
         provider.grid,
         provider.items,
@@ -231,6 +236,13 @@ function queryPaddingPx(provider, z) {
         extent = Math.max(extent,
             width * Math.max(Math.abs(icon.anchor.x), Math.abs(1 - icon.anchor.x)),
             height * Math.max(Math.abs(icon.anchor.y), Math.abs(1 - icon.anchor.y)));
+    }
+    // ラベルも含める。隣のタイルの点のラベルがはみ出してくる分。
+    for (const label of provider.labels) {
+        if (!label) continue;
+        extent = Math.max(extent,
+            (Math.abs(label.centerOffset.x) + label.size.width / 2) * scale,
+            (Math.abs(label.centerOffset.y) + label.size.height / 2) * scale);
     }
     const padding = Math.ceil(extent) + 2;
     provider.queryPaddingByZoom.set(z, padding);
@@ -257,13 +269,31 @@ function prepareMarkers(provider, candidates, tileOriginX, tileOriginY, z, tileP
         const drawH = Math.max(icon.size.height * scale, 1);
         const anchorX = icon.anchor.x;
         const anchorY = icon.anchor.y;
-        if (centerX - drawW * anchorX > tilePx || centerX + drawW * (1 - anchorX) < 0 ||
-            centerY - drawH * anchorY > tilePx || centerY + drawH * (1 - anchorY) < 0) continue;
-        const halfX = Math.max(Math.abs(drawW * anchorX), Math.abs(drawW * (1 - anchorX)));
-        const halfY = Math.max(Math.abs(drawH * anchorY), Math.abs(drawH * (1 - anchorY)));
-        maxHalfExtentPx = Math.max(maxHalfExtentPx, halfX, halfY);
+        // 本体とラベルを合わせた範囲で、タイルにかかるかを見る。
+        let left = drawW * anchorX;
+        let right = drawW * (1 - anchorX);
+        let top = drawH * anchorY;
+        let bottom = drawH * (1 - anchorY);
+        const labelData = item.labelIndex >= 0 ? provider.labels[item.labelIndex] : null;
+        let label = null;
+        if (labelData) {
+            label = {
+                bitmap: labelData.bitmap,
+                centerOffsetX: labelData.centerOffset.x * scale,
+                centerOffsetY: labelData.centerOffset.y * scale,
+                drawW: Math.max(labelData.size.width * scale, 1),
+                drawH: Math.max(labelData.size.height * scale, 1),
+            };
+            left = Math.max(left, label.drawW / 2 - label.centerOffsetX);
+            right = Math.max(right, label.centerOffsetX + label.drawW / 2);
+            top = Math.max(top, label.drawH / 2 - label.centerOffsetY);
+            bottom = Math.max(bottom, label.centerOffsetY + label.drawH / 2);
+        }
+        if (centerX - left > tilePx || centerX + right < 0 ||
+            centerY - top > tilePx || centerY + bottom < 0) continue;
+        maxHalfExtentPx = Math.max(maxHalfExtentPx, left, right, top, bottom);
 
-        markers.push({ bitmap: icon.bitmap, centerX, centerY, drawW, drawH, anchorX, anchorY });
+        markers.push({ bitmap: icon.bitmap, centerX, centerY, drawW, drawH, anchorX, anchorY, label });
     }
 
     return { markers, maxHalfExtentPx };
@@ -300,29 +330,73 @@ async function renderOffscreen(provider, x, y, z, tileSize, pixelRatio = 1) {
 
     // Whole pixels, and markers exactly on top of one another drawn once —
     // see the same loop in MarkerTileRenderer.draw() for why both matter.
-    const placed = markers.map((m) => ({
-        bitmap: m.bitmap,
-        dx: Math.round((m.centerX + paddingPx - m.drawW * m.anchorX) * r),
-        dy: Math.round((m.centerY + paddingPx - m.drawH * m.anchorY) * r),
-        w: Math.max(1, Math.round(m.drawW * r)),
-        h: Math.max(1, Math.round(m.drawH * r)),
-    }));
+    const placed = markers.map((m) => {
+        const cx = m.centerX + paddingPx;
+        const cy = m.centerY + paddingPx;
+        return {
+            bitmap: m.bitmap,
+            dx: Math.round((cx - m.drawW * m.anchorX) * r),
+            dy: Math.round((cy - m.drawH * m.anchorY) * r),
+            w: Math.max(1, Math.round(m.drawW * r)),
+            h: Math.max(1, Math.round(m.drawH * r)),
+            worldX: m.centerX + tileOriginX,
+            worldY: m.centerY + tileOriginY,
+            label: m.label
+                ? {
+                    bitmap: m.label.bitmap,
+                    dx: Math.round((cx + m.label.centerOffsetX - m.label.drawW / 2) * r),
+                    dy: Math.round((cy + m.label.centerOffsetY - m.label.drawH / 2) * r),
+                    w: Math.max(1, Math.round(m.label.drawW * r)),
+                    h: Math.max(1, Math.round(m.label.drawH * r)),
+                }
+                : null,
+        };
+    });
+    // 間引き（declutterPx）とラベル付きの優先は MarkerTileRenderer.draw() と同じ規則。
+    // マス目は世界座標に固定し、ラベル付きを先に、ラベル付きどうしは世界座標で決める。
+    const declutter = provider.declutterPx > 0;
+    const cell = Math.max(provider.declutterPx, 1);
+    const baseCellX = Math.floor(tileOriginX / cell);
+    const baseCellY = Math.floor(tileOriginY / cell);
+    const groupKey = (p) => declutter
+        ? (Math.floor(p.worldX / cell) - baseCellX) + ',' + (Math.floor(p.worldY / cell) - baseCellY)
+        : p.dx + ',' + p.dy + ',' + p.w + ',' + p.h;
+    const worldKey = (p) => p.worldY * 1048576 + p.worldX;
     const lastAt = new Map();
     const seenIcon = new Map();
     const mixedIcons = new Set();
+    const labelledWinner = new Map();
     for (let index = 0; index < placed.length; index++) {
         const p = placed[index];
-        const key = p.dx + ',' + p.dy + ',' + p.w + ',' + p.h;
-        const previous = seenIcon.get(key);
-        if (previous !== undefined && previous !== p.bitmap) mixedIcons.add(key);
-        seenIcon.set(key, p.bitmap);
+        const key = groupKey(p);
+        if (!declutter) {
+            const previous = seenIcon.get(key);
+            if (previous !== undefined && (previous !== p.bitmap || p.label || placed[lastAt.get(key) ?? index].label)) {
+                mixedIcons.add(key);
+            }
+            seenIcon.set(key, p.bitmap);
+        }
         lastAt.set(key, index);
+        if (p.label) {
+            const winner = labelledWinner.get(key);
+            if (winner === undefined || worldKey(p) > worldKey(placed[winner])) labelledWinner.set(key, index);
+        }
     }
+    const drawn = placed.map((p, index) => {
+        const key = groupKey(p);
+        const winner = labelledWinner.get(key);
+        if (declutter && winner !== undefined) return winner === index;
+        return mixedIcons.has(key) || lastAt.get(key) === index;
+    });
     for (let index = 0; index < placed.length; index++) {
+        if (!drawn[index]) continue;
         const p = placed[index];
-        const key = p.dx + ',' + p.dy + ',' + p.w + ',' + p.h;
-        if (!mixedIcons.has(key) && lastAt.get(key) !== index) continue;
         ctx.drawImage(p.bitmap, p.dx, p.dy, p.w, p.h);
+    }
+    // 文字は本体をすべて描いたあと。ほかの点の下に字が隠れない。
+    for (let index = 0; index < placed.length; index++) {
+        const label = drawn[index] ? placed[index].label : null;
+        if (label) ctx.drawImage(label.bitmap, label.dx, label.dy, label.w, label.h);
     }
 
     const finalCanvas = new OffscreenCanvas(tileSize * r, tileSize * r);

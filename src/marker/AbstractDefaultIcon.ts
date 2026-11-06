@@ -18,6 +18,13 @@ import {
     type IconLayout,
 } from "./DefaultIconGeometry";
 import { computeIconLabelLayout } from "./IconLabelLayout";
+import {
+    DEFAULT_LABEL_WRITING_MODE,
+    createTileLabel,
+    isVerticalWritingMode,
+    labelSvgElements,
+    type MarkerTileParts,
+} from "./MarkerTileLabel";
 
 /**
  * 既定マーカーアイコンの土台。ピン形の輪郭・ラベル・寸法の計算を受け持ち、
@@ -26,6 +33,7 @@ import { computeIconLabelLayout } from "./IconLabelLayout";
 
 export abstract class AbstractDefaultIcon extends AbstractMarkerIcon {
     private cachedLayout: IconLayout | null = null;
+    private cachedTileParts: MarkerTileParts | null = null;
 
     protected constructor(protected readonly baseProperties: BaseIconProperties) {
         super();
@@ -77,6 +85,11 @@ export abstract class AbstractDefaultIcon extends AbstractMarkerIcon {
 
     get labelPosition(): MarkerLabelPosition {
         return this.baseProperties.labelPosition;
+    }
+
+    /** ラベルの書字方向。`"vertical-rl"` / `"vertical-lr"` で縦書き。 */
+    get labelWritingMode(): string {
+        return this.baseProperties.labelWritingMode ?? DEFAULT_LABEL_WRITING_MODE;
     }
 
     get iconSize(): number {
@@ -189,11 +202,63 @@ export abstract class AbstractDefaultIcon extends AbstractMarkerIcon {
             labelTextSize: this.labelTextSize,
             labelTypeFace: this.labelTypeFace,
             labelPosition: this.labelPosition,
+            labelWritingMode: this.labelWritingMode,
         });
         return this.cachedLayout;
     }
 
-    protected createSvg(layout: IconLayout): string {
+    /**
+     * タイル描画用に、ラベルを除いたピンと、ラベルだけの画像に分けたもの（`MarkerTileLabel`）。
+     *
+     * ピンは色や大きさが同じなら、ラベルの違うアイコンの間で同じ画像（同じデータ URL）になる。
+     * 街路樹のように「樹種 × 向き」でラベルを付け替えても、デコードする本体は種類の数だけで済む。
+     *
+     * @internal
+     */
+    tileParts(): MarkerTileParts {
+        if (this.cachedTileParts) return this.cachedTileParts;
+        if (!this.label) {
+            this.cachedTileParts = { body: this.toBitmapIcon(), label: null };
+            return this.cachedTileParts;
+        }
+        const layout = this.computeLayout();
+        const markerSize = layout.markerSize;
+        const bodyLayout = computeIconLabelLayout({
+            markerSize,
+            scale: this.scale,
+            body: computeMarkerPinBounds(markerSize, this.scale, this.strokeWidth),
+            centerY: markerSize * 0.35,
+            label: null,
+            labelTextSize: this.labelTextSize,
+            labelTypeFace: this.labelTypeFace,
+            labelPosition: this.labelPosition,
+        });
+        const body: BitmapIcon = {
+            url: toSvgDataUrl(this.createSvg(bodyLayout, false)),
+            anchor: { x: 0.5, y: 1 },
+            size: { width: markerSize, height: markerSize },
+        };
+        const anchorX = layout.markerOffsetX + markerSize / 2;
+        const anchorY = layout.markerOffsetY + markerSize;
+        const label = createTileLabel(
+            {
+                text: this.label,
+                fontSize: this.labelTextSize,
+                typeFace: this.labelTypeFace,
+                textColor: this.labelTextColor ?? "#000000",
+                strokeColor: this.labelStrokeColor,
+                outline: layout.outlineStroke,
+                vertical: isVerticalWritingMode(this.labelWritingMode),
+            },
+            { width: layout.labelWidth, height: layout.labelHeight, contentWidth: layout.labelWidth },
+            layout.labelCenterX - anchorX,
+            layout.labelCenterY - anchorY,
+        );
+        this.cachedTileParts = { body, label };
+        return this.cachedTileParts;
+    }
+
+    protected createSvg(layout: IconLayout, withLabel = true): string {
         const { markerSize, bitmapWidth, bitmapHeight, markerOffsetX, markerOffsetY } = layout;
         const strokeWidth = Math.max(0, this.strokeWidth * this.scale);
         const markerPath = createMarkerPathData(
@@ -203,7 +268,7 @@ export abstract class AbstractDefaultIcon extends AbstractMarkerIcon {
             markerOffsetX,
             markerOffsetY,
         );
-        const label = this.createLabelSvg(layout);
+        const label = withLabel ? this.createLabelSvg(layout) : "";
         const debug = this.debug
             ? `<rect x="0.5" y="0.5" width="${fmt(bitmapWidth - 1)}" height="${fmt(bitmapHeight - 1)}" fill="none" stroke="#000000" stroke-width="1"/>`
             : "";
@@ -224,18 +289,19 @@ export abstract class AbstractDefaultIcon extends AbstractMarkerIcon {
      */
     protected createLabelSvg(layout: IconLayout): string {
         if (!this.label) return "";
-
-        const text = escapeXml(this.label);
-        const fill = escapeXml(this.labelTextColor ?? "#000000");
-        const stroke = escapeXml(this.labelStrokeColor);
-        const size = Math.max(1, this.labelTextSize);
-        const attrs =
-            `x="${fmt(layout.labelCenterX)}" y="${fmt(layout.labelCenterY)}" text-anchor="middle" dominant-baseline="central" ` +
-            `font-family="${escapeXml(this.labelTypeFace)}" font-size="${size}"`;
-        return [
-            `<text ${attrs} fill="none" stroke="${stroke}" stroke-width="${fmt(layout.outlineStroke)}" stroke-linejoin="round" stroke-linecap="round">${text}</text>`,
-            `<text ${attrs} fill="${fill}">${text}</text>`,
-        ].join("");
+        return labelSvgElements(
+            {
+                text: this.label,
+                fontSize: this.labelTextSize,
+                typeFace: this.labelTypeFace,
+                textColor: this.labelTextColor ?? "#000000",
+                strokeColor: this.labelStrokeColor,
+                outline: layout.outlineStroke,
+                vertical: isVerticalWritingMode(this.labelWritingMode),
+            },
+            layout.labelCenterX,
+            layout.labelCenterY,
+        );
     }
 
     protected abstract createFillSvg(

@@ -14,4 +14,15 @@ export interface PreparedMarker {
     drawH: number;
     anchorX: number;
     anchorY: number;
+    /** 本体を描き終えたあとに重ねるラベル（`MarkerTileLabel`）。寸法は描画倍率を掛けたもの。 */
+    label?: PreparedLabel | null;
+}
+
+/** タイル上のラベル。中心はアンカー点からのずれで持つ。 */
+export interface PreparedLabel {
+    image: ImageBitmap | HTMLImageElement;
+    centerOffsetX: number;
+    centerOffsetY: number;
+    drawW: number;
+    drawH: number;
 }

@@ -256,6 +256,7 @@ export const createBaseProperties = (options: DefaultMarkerIconOptions = {}): Ba
     labelTypeFace: options.labelTypeFace ?? DEFAULT_BASE_PROPERTIES.labelTypeFace,
     labelStrokeColor: normalizeHexColor(options.labelStrokeColor ?? DEFAULT_BASE_PROPERTIES.labelStrokeColor),
     labelPosition: options.labelPosition ?? DEFAULT_BASE_PROPERTIES.labelPosition,
+    labelWritingMode: options.labelWritingMode ?? DEFAULT_BASE_PROPERTIES.labelWritingMode,
     infoAnchor: options.infoAnchor ?? DEFAULT_BASE_PROPERTIES.infoAnchor,
     iconSize: options.iconSize ?? DEFAULT_BASE_PROPERTIES.iconSize,
     debug: options.debug ?? DEFAULT_BASE_PROPERTIES.debug,
