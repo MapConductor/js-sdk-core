@@ -41,6 +41,12 @@ export interface DefaultMarkerIconOptions {
     labelTypeFace?: string;
     labelStrokeColor?: string;
     labelPosition?: MarkerLabelPosition;
+    /**
+     * ラベルの書字方向。CSS の `writing-mode` と同じ書き方で、`"vertical-rl"` / `"vertical-lr"` を
+     * 縦書きとして扱う（既定は `"horizontal-tb"`）。横の通りに沿って並ぶ点のように、横書きでは
+     * 幅を取りすぎて並ばないラベルに使う。
+     */
+    labelWritingMode?: string;
     infoAnchor?: Offset;
     iconSize?: number;
     debug?: boolean;
@@ -61,6 +67,8 @@ export interface BaseIconProperties {
     labelTypeFace: string;
     labelStrokeColor: string;
     labelPosition: MarkerLabelPosition;
+    /** 省略時は横書き。 */
+    labelWritingMode?: string;
     infoAnchor: Offset;
     iconSize: number;
     debug: boolean;
@@ -79,6 +87,7 @@ export const DEFAULT_BASE_PROPERTIES: BaseIconProperties = {
     labelTypeFace: DEFAULT_LABEL_TYPE_FACE,
     labelStrokeColor: "#FFFFFF",
     labelPosition: "center center",
+    labelWritingMode: "horizontal-tb",
     infoAnchor: { x: 0.5, y: 0 },
     iconSize: Settings.Default.iconSize,
     debug: false,

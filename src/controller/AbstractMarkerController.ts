@@ -13,6 +13,9 @@ import { ingestMarkers, type MarkerIngestionResult } from "../marker/MarkerInges
 import { OverlayController } from "./OverlayController";
 import { Mutex } from "../base/Mutex";
 
+/** 続けて来るマーカーの変更を、タイルの描き直し 1 回にまとめる窓。1 フレーム分。 */
+const TILE_REFRESH_COALESCE_MS = 16;
+
 export abstract class AbstractMarkerController<ActualMarker>
     implements SlottedOverlayController, OverlayController<MarkerState, MarkerEntity<ActualMarker>, MarkerState>
 {
@@ -31,6 +34,9 @@ export abstract class AbstractMarkerController<ActualMarker>
     /** 直近のカメラ位置。サブクラスのヒットテスト等が参照する。 */
     protected mapCameraPosition: MapCameraPosition | null = null;
     private semaphore = new Mutex();
+
+    /** 待っているタイルの描き直し（`scheduleTiledMarkersChanged`）。走り始めたら null に戻す。 */
+    private pendingTiledRefresh: Promise<void> | null = null;
 
     public markerManager: MarkerManager<ActualMarker>;
     public renderer: MarkerOverlayRenderer<ActualMarker>;
@@ -191,6 +197,27 @@ export abstract class AbstractMarkerController<ActualMarker>
         // no-op by default
     }
 
+    /**
+     * 1 本ずつの変更からのタイルの描き直しを、1 フレームに 1 回へまとめる。
+     *
+     * ラベルの付け替えのように数十本が続けて変わると、1 本ごとに `onTiledMarkersChanged` が
+     * 走り、そのたびに全件（街路樹なら 14 万件）を Service Worker へ送り直していた。続けて来た
+     * 変更は `TILE_REFRESH_COALESCE_MS` の間に受けて、まとめて 1 回だけ描き直す。
+     * android-sdk / ios-sdk の各プロバイダの `scheduleTileRefresh` と同じ。
+     */
+    private scheduleTiledMarkersChanged(): Promise<void> {
+        if (this.pendingTiledRefresh) return this.pendingTiledRefresh;
+        const pending = new Promise<void>((resolve, reject) => {
+            setTimeout(() => {
+                // 走り始めたら次の変更は次の回へ回す。
+                this.pendingTiledRefresh = null;
+                this.semaphore.withLock(() => this.onTiledMarkersChanged()).then(resolve, reject);
+            }, TILE_REFRESH_COALESCE_MS);
+        });
+        this.pendingTiledRefresh = pending;
+        return pending;
+    }
+
     /** Called after a provider marker is created and registered. */
     protected onMarkerAdded(_entity: MarkerEntity<ActualMarker>): void {
         // no-op by default
@@ -199,6 +226,7 @@ export abstract class AbstractMarkerController<ActualMarker>
     async update(state: MarkerState): Promise<void> {
         // Captured inside the lock, animated after it is released (see below).
         let entityToAnimate: MarkerEntity<ActualMarker> | null = null;
+        let tiledChanged = false;
         await this.semaphore.withLock(async () => {
             // A composition may remove and recreate this marker while update()
             // is waiting for the lock (for example, when an animation finishes
@@ -212,7 +240,9 @@ export abstract class AbstractMarkerController<ActualMarker>
             const prevFinger = prevEntity.fingerPrint;
             if (fingerPrintEquals(currentFinger, prevFinger)) return;
 
-            const wantsTile = this.shouldTile(state, this.markerManager.allEntities().length);
+            // 件数だけが要る。allEntities() は全件の写しを作るので、数十本が続けて変わると
+            // そのたびに 14 万件を写すことになる。
+            const wantsTile = this.shouldTile(state, this.markerManager.getMemoryStats().entityCount);
             // タイル判定は tiledMarkerIds で行う。`marker === null` はプロバイダの onAdd が
             // 失敗して null を返したケースとも一致してしまう。
             const wasTiled = this.tiledMarkerIds.has(state.id);
@@ -232,7 +262,7 @@ export abstract class AbstractMarkerController<ActualMarker>
                 if (!wasTiled) {
                     await this.renderer.onPostProcess();
                 }
-                await this.onTiledMarkersChanged();
+                tiledChanged = true;
                 return;
             }
 
@@ -271,9 +301,10 @@ export abstract class AbstractMarkerController<ActualMarker>
 
             await this.renderer.onPostProcess();
             if (wasTiled) {
-                await this.onTiledMarkersChanged();
+                tiledChanged = true;
             }
         });
+        if (tiledChanged) await this.scheduleTiledMarkersChanged();
 
         // Play the animation OUTSIDE the semaphore. For the screen-space overlay
         // path, onAnimate resolves only when the animation finishes (~seconds);

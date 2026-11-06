@@ -1,4 +1,5 @@
-import { measureLabelWidth, parseLabelPosition, type IconLayout } from "./DefaultIconGeometry";
+import { parseLabelPosition, type IconLayout } from "./DefaultIconGeometry";
+import { isVerticalWritingMode, measureLabel } from "./MarkerTileLabel";
 
 /** ラベルを避けて置く、アイコン本体の描かれている範囲（本体の左上を原点とする px）。 */
 export interface IconBodyBounds {
@@ -19,6 +20,8 @@ export interface IconLabelLayoutParams {
     labelTextSize: number;
     labelTypeFace: string;
     labelPosition: string;
+    /** CSS の `writing-mode` と同じ書き方。`vertical-rl` / `vertical-lr` で縦書き。 */
+    labelWritingMode?: string;
 }
 
 /**
@@ -54,8 +57,10 @@ export function computeIconLabelLayout(params: IconLabelLayoutParams): IconLayou
     }
 
     const fontSize = Math.max(1, params.labelTextSize);
-    const labelWidth = measureLabelWidth(label, fontSize, params.labelTypeFace) + outlineStroke * 2;
-    const labelHeight = fontSize + outlineStroke * 2;
+    const vertical = isVerticalWritingMode(params.labelWritingMode ?? "");
+    const metrics = measureLabel(label, fontSize, params.labelTypeFace, outlineStroke, vertical);
+    const labelWidth = metrics.width;
+    const labelHeight = metrics.height;
     const { h, v } = parseLabelPosition(params.labelPosition);
     const gap = Math.max(outlineStroke, markerSize * 0.05);
 

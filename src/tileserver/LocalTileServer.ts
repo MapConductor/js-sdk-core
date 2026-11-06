@@ -94,10 +94,12 @@ export class LocalTileServer {
     sendSWRegisterAndWait(
         routeId: string,
         data: {
-            items: { lat: number; lng: number; iconIndex: number }[];
+            items: { lat: number; lng: number; iconIndex: number; labelIndex?: number }[];
             icons: { bitmap: ImageBitmap; anchor: { x: number; y: number }; size: { width: number; height: number } }[];
+            labels?: { bitmap: ImageBitmap; centerOffset: { x: number; y: number }; size: { width: number; height: number } }[];
             zoomScales: number[];
             extraIconScale: number;
+            declutterPx?: number;
         },
     ): Promise<void> {
         if (typeof navigator === 'undefined' || !navigator.serviceWorker?.controller) {
@@ -105,6 +107,7 @@ export class LocalTileServer {
             // Bailing out without this leaks one copy per distinct icon every
             // time the markers change on a page with no controlling SW.
             closeSWIcons(data.icons);
+            closeSWIcons(data.labels ?? []);
             return Promise.resolve();
         }
         const controller = navigator.serviceWorker.controller;
@@ -125,8 +128,10 @@ export class LocalTileServer {
                     routeId,
                     items: data.items,
                     icons: data.icons,
+                    labels: data.labels ?? [],
                     zoomScales: data.zoomScales,
                     extraIconScale: data.extraIconScale,
+                    declutterPx: data.declutterPx ?? 0,
                 },
                 [channel.port2],
             );
@@ -135,6 +140,7 @@ export class LocalTileServer {
             // 14 provider call sites keeps `await server.sendSWRegisterAndWait(
             // id, await renderer.toSWData())` a complete, leak-free handover.
             closeSWIcons(data.icons);
+            closeSWIcons(data.labels ?? []);
         });
     }
 

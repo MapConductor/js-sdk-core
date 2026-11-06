@@ -12,7 +12,8 @@ const TILE_CACHE_MAX = 1024;
 import { createDefaultIcon } from './ColorDefaultIcon';
 import { GeoGridIndex } from './GeoGridIndex';
 import { IconImageCache } from './IconImageCache';
-import type { PreparedMarker } from './MarkerTileTypes';
+import type { PreparedLabel, PreparedMarker } from './MarkerTileTypes';
+import { tilePartsOf, type MarkerTileLabel } from './MarkerTileLabel';
 
 function toWorldPixel(lat: number, lng: number, z: number): { wx: number; wy: number } {
     const scale = 256 * Math.pow(2, z);
@@ -34,6 +35,32 @@ function tileToGeoBounds(x: number, y: number, z: number, tileSize: number, padd
     const north = (latRad(y - pad) * 180) / Math.PI;
     const south = (latRad(y + 1 + pad) * 180) / Math.PI;
     return { north, south, west, east };
+}
+
+/** 本体の画像と、あればラベル。ラベルを分けて描けないアイコンは焼き込みの画像だけ。 */
+interface TileParts {
+    body: BitmapIcon;
+    label: MarkerTileLabel | null;
+}
+
+/**
+ * アンカー点から、本体とラベルを合わせた矩形の各辺までの距離（倍率を掛けた px）。
+ * タイルの外にあるかの判定と、隣のタイルからはみ出す分の見積もりに使う。
+ */
+function partsExtent(parts: TileParts, scale: number): { left: number; right: number; top: number; bottom: number } {
+    const { width, height } = markerTileDrawSize(parts.body, scale);
+    let left = width * parts.body.anchor.x;
+    let right = width * (1 - parts.body.anchor.x);
+    let top = height * parts.body.anchor.y;
+    let bottom = height * (1 - parts.body.anchor.y);
+    const label = parts.label;
+    if (label) {
+        left = Math.max(left, (label.width / 2 - label.centerOffsetX) * scale);
+        right = Math.max(right, (label.centerOffsetX + label.width / 2) * scale);
+        top = Math.max(top, (label.height / 2 - label.centerOffsetY) * scale);
+        bottom = Math.max(bottom, (label.centerOffsetY + label.height / 2) * scale);
+    }
+    return { left, right, top, bottom };
 }
 
 function markerTileDrawSize(bitmapIcon: BitmapIcon, scale: number): { width: number; height: number } {
@@ -101,10 +128,22 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         return item.icon?.toBitmapIcon() ?? this.defaultBitmapIcon;
     }
 
+    /**
+     * タイルに描くもの。ラベルを分けて渡せるアイコンなら本体とラベル、それ以外は焼き込みの画像。
+     * 当たり判定（`findHit`）はラベル込みの `bitmapIconOf` を使う。
+     */
+    private partsOf(item: T): TileParts {
+        return tilePartsOf(item.icon) ?? { body: this.bitmapIconOf(item), label: null };
+    }
+
+    private urlsOf(parts: TileParts): string[] {
+        return parts.label ? [parts.body.url, parts.label.url] : [parts.body.url];
+    }
+
     /** Decode every unique icon up front. Call before relying on the synchronous renderTileDataUrl() path. */
     async preloadIcons(): Promise<void> {
         const urls = new Set<string>();
-        for (const item of this.items) urls.add(this.bitmapIconOf(item).url);
+        for (const item of this.items) for (const url of this.urlsOf(this.partsOf(item))) urls.add(url);
         await Promise.all([...urls].map((url) => this.icons.ensure(url)));
     }
 
@@ -169,19 +208,20 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         // Determine the bound BEFORE the spatial query. Expanding from the first
         // candidates misses a large icon whose anchor lies outside that query.
         // Cache once per zoom, rather than scanning all markers for every tile.
-        const bitmaps = new Map<MarkerIcon, BitmapIcon>();
+        // ラベルも含める。隣のタイルの点のラベルがこのタイルへはみ出してくると、それを
+        // 探し漏らしたタイルの側でラベルが継ぎ目で切れる。
+        const partsByIcon = new Map<MarkerIcon, TileParts>();
+        const defaultParts: TileParts = { body: this.defaultBitmapIcon, label: null };
         let extent = 0;
         for (const item of this.items) {
-            let bitmap = this.defaultBitmapIcon;
+            let parts = defaultParts;
             if (item.icon) {
-                bitmap = bitmaps.get(item.icon) ?? item.icon.toBitmapIcon();
-                bitmaps.set(item.icon, bitmap);
+                parts = partsByIcon.get(item.icon) ?? this.partsOf(item);
+                partsByIcon.set(item.icon, parts);
             }
             const scale = Math.max(Math.max(this.iconScale(item, z), 0) * this.extraIconScale, 0);
-            const { width, height } = markerTileDrawSize(bitmap, scale);
-            extent = Math.max(extent,
-                width * Math.max(Math.abs(bitmap.anchor.x), Math.abs(1 - bitmap.anchor.x)),
-                height * Math.max(Math.abs(bitmap.anchor.y), Math.abs(1 - bitmap.anchor.y)));
+            const { left, right, top, bottom } = partsExtent(parts, scale);
+            extent = Math.max(extent, left, right, top, bottom);
         }
         const padding = Math.ceil(extent) + 2;
         this.queryPaddingByZoom.set(z, padding);
@@ -199,9 +239,11 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         const markers: PreparedMarker[] = [];
 
         for (const item of candidates) {
-            const bitmapIcon = this.bitmapIconOf(item);
+            const parts = this.partsOf(item);
+            const bitmapIcon = parts.body;
             const image = this.icons.get(bitmapIcon.url);
             if (!image) continue; // not decoded yet; skip for this render (self-heals once cached)
+            const labelImage = parts.label ? this.icons.get(parts.label.url) : null;
 
             const { wx, wy } = toWorldPixel(item.position.latitude, item.position.longitude, z);
             const centerNormX = wx - tileOriginWx;
@@ -214,14 +256,23 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
             const drawH = drawSize.height;
             const anchorX = bitmapIcon.anchor.x;
             const anchorY = bitmapIcon.anchor.y;
-            if (centerNormX - drawW * anchorX > tilePx || centerNormX + drawW * (1 - anchorX) < 0 ||
-                centerNormY - drawH * anchorY > tilePx || centerNormY + drawH * (1 - anchorY) < 0) continue;
+            const extent = partsExtent(parts, scale);
+            if (centerNormX - extent.left > tilePx || centerNormX + extent.right < 0 ||
+                centerNormY - extent.top > tilePx || centerNormY + extent.bottom < 0) continue;
 
-            const halfX = Math.max(Math.abs(drawW * anchorX), Math.abs(drawW * (1 - anchorX)));
-            const halfY = Math.max(Math.abs(drawH * anchorY), Math.abs(drawH * (1 - anchorY)));
-            maxHalfExtentPx = Math.max(maxHalfExtentPx, halfX, halfY);
+            maxHalfExtentPx = Math.max(maxHalfExtentPx, extent.left, extent.right, extent.top, extent.bottom);
 
-            markers.push({ image, centerNormX, centerNormY, drawW, drawH, anchorX, anchorY });
+            let label: PreparedLabel | null = null;
+            if (parts.label && labelImage) {
+                label = {
+                    image: labelImage,
+                    centerOffsetX: parts.label.centerOffsetX * scale,
+                    centerOffsetY: parts.label.centerOffsetY * scale,
+                    drawW: Math.max(parts.label.width * scale, 1),
+                    drawH: Math.max(parts.label.height * scale, 1),
+                };
+            }
+            markers.push({ image, centerNormX, centerNormY, drawW, drawH, anchorX, anchorY, label });
         }
 
         return { markers, maxHalfExtentPx };
@@ -230,8 +281,9 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
     /** Kick off (but don't await) decoding for any candidate not yet in the icon cache. */
     private warmIcons(candidates: T[]): void {
         for (const item of candidates) {
-            const url = this.bitmapIconOf(item).url;
-            if (!this.icons.get(url)) void this.icons.ensure(url);
+            for (const url of this.urlsOf(this.partsOf(item))) {
+                if (!this.icons.get(url)) void this.icons.ensure(url);
+            }
         }
     }
 
@@ -295,6 +347,17 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
                 h: Math.max(1, Math.round(m.drawH * r)),
                 worldX: m.centerNormX + tileOriginWx,
                 worldY: m.centerNormY + tileOriginWy,
+                // 書き出し位置は整数の画素に揃える。境界をまたぐラベルを両側のタイルが
+                // 同じ画素から描くので、継ぎ目で字が割れない。
+                label: m.label
+                    ? {
+                        image: m.label.image as CanvasImageSource,
+                        dx: Math.round((centerX + m.label.centerOffsetX - m.label.drawW / 2) * r),
+                        dy: Math.round((centerY + m.label.centerOffsetY - m.label.drawH / 2) * r),
+                        w: Math.max(1, Math.round(m.label.drawW * r)),
+                        h: Math.max(1, Math.round(m.label.drawH * r)),
+                    }
+                    : null,
             };
         });
 
@@ -332,23 +395,46 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
                 ? `${Math.floor(p.worldX / cell) - baseCellX},${Math.floor(p.worldY / cell) - baseCellY}`
                 : `${p.dx},${p.dy},${p.w},${p.h}`;
 
+        // ラベル付きを先に残す。ラベルは利用者が「この点の名前を見せたい」と選んだもので、
+        // 同じマス目の点のどれかと入れ替えてよいものではない。ラベル付きどうしは世界座標
+        // （worldY 優先、次に worldX）で決める。列挙順はタイルごとに違うので、順番で決めると
+        // 隣のタイルと別の勝者を選び、境界でラベルが割れる。android-sdk / ios-sdk と同じ。
+        const worldKey = (p: { worldX: number; worldY: number }): number => p.worldY * 1_048_576 + p.worldX;
+        const labelledWinner = new Map<string, number>();
         const seenIcon = new Map<string, CanvasImageSource>();
         for (let index = 0; index < placed.length; index++) {
             const p = placed[index];
             const key = groupKey(p);
             if (!declutter) {
                 const previous = seenIcon.get(key);
-                if (previous !== undefined && previous !== p.image) mixedIcons.add(key);
+                // 本体が同じでも文字が違えば重ねたまま描く（間引きなしのとき）。
+                if (previous !== undefined && (previous !== p.image || p.label || placed[lastAt.get(key) ?? index].label)) {
+                    mixedIcons.add(key);
+                }
                 seenIcon.set(key, p.image);
             }
             lastAt.set(key, index);
+            if (p.label) {
+                const winner = labelledWinner.get(key);
+                if (winner === undefined || worldKey(p) > worldKey(placed[winner])) labelledWinner.set(key, index);
+            }
         }
 
-        for (let index = 0; index < placed.length; index++) {
-            const p = placed[index];
+        const drawn: boolean[] = placed.map((p, index) => {
             const key = groupKey(p);
-            if (!mixedIcons.has(key) && lastAt.get(key) !== index) continue;
+            const winner = labelledWinner.get(key);
+            if (declutter && winner !== undefined) return winner === index;
+            return mixedIcons.has(key) || lastAt.get(key) === index;
+        });
+        for (let index = 0; index < placed.length; index++) {
+            if (!drawn[index]) continue;
+            const p = placed[index];
             offCtx.drawImage(p.image, p.dx, p.dy, p.w, p.h);
+        }
+        // 文字は本体をすべて描いたあと。ほかの点の下に字が隠れない。
+        for (let index = 0; index < placed.length; index++) {
+            const label = drawn[index] ? placed[index].label : null;
+            if (label) offCtx.drawImage(label.image, label.dx, label.dy, label.w, label.h);
         }
 
         // android-sdk / ios-sdk と同じデバッグオーバーレイ：padding 位置に上/左の枠線と
@@ -416,7 +502,7 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
 
         // Ensure icons for candidates are decoded before drawing (async path
         // can afford to wait, unlike the synchronous data-URL fallback).
-        await Promise.all([...new Set(candidates.map((c) => this.bitmapIconOf(c).url))].map((url) => this.icons.ensure(url)));
+        await Promise.all([...new Set(candidates.flatMap((c) => this.urlsOf(this.partsOf(c))))].map((url) => this.icons.ensure(url)));
 
         const tileOriginWx = x * tilePx;
         const tileOriginWy = y * tilePx;
@@ -476,14 +562,38 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
      * already does this, so the usual one-line call site needs nothing extra.
      */
     async toSWData(): Promise<{
-        items: { lat: number; lng: number; iconIndex: number }[];
+        items: { lat: number; lng: number; iconIndex: number; labelIndex: number }[];
         icons: { bitmap: ImageBitmap; anchor: { x: number; y: number }; size: { width: number; height: number } }[];
+        labels: { bitmap: ImageBitmap; centerOffset: { x: number; y: number }; size: { width: number; height: number } }[];
         zoomScales: number[];
         extraIconScale: number;
+        declutterPx: number;
     }> {
         const iconIndexByUrl = new Map<string, number>();
         const icons: { bitmap: ImageBitmap; anchor: { x: number; y: number }; size: { width: number; height: number } }[] = [];
-        const items: { lat: number; lng: number; iconIndex: number }[] = [];
+        const items: { lat: number; lng: number; iconIndex: number; labelIndex: number }[] = [];
+        // ラベルは本体と別に渡す（`MarkerTileLabel`）。同じ文字・同じ置き場所なら 1 枚を共有する。
+        const labelIndexByKey = new Map<string, number>();
+        const labels: { bitmap: ImageBitmap; centerOffset: { x: number; y: number }; size: { width: number; height: number } }[] = [];
+        const resolveLabelIndex = async (label: MarkerTileLabel | null): Promise<number> => {
+            if (!label) return -1;
+            const key = `${label.url}|${label.centerOffsetX}|${label.centerOffsetY}`;
+            const cached = labelIndexByKey.get(key);
+            if (cached !== undefined) return cached;
+            const decoded = await this.icons.ensure(label.url);
+            if (!decoded || !(typeof ImageBitmap !== 'undefined' && decoded instanceof ImageBitmap)) {
+                labelIndexByKey.set(key, -1);
+                return -1;
+            }
+            const index = labels.length;
+            labelIndexByKey.set(key, index);
+            labels.push({
+                bitmap: await copyIconBitmap(decoded),
+                centerOffset: { x: label.centerOffsetX, y: label.centerOffsetY },
+                size: { width: label.width, height: label.height },
+            });
+            return index;
+        };
 
         const resolveIconIndex = async (bitmapIcon: BitmapIcon): Promise<number | null> => {
             const cached = iconIndexByUrl.get(bitmapIcon.url);
@@ -509,10 +619,11 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
         const defaultIconIndex = await resolveIconIndex(this.defaultBitmapIcon);
 
         for (const item of this.items) {
-            const bitmapIcon = this.bitmapIconOf(item);
-            const iconIndex = (await resolveIconIndex(bitmapIcon)) ?? defaultIconIndex;
+            const parts = this.partsOf(item);
+            const iconIndex = (await resolveIconIndex(parts.body)) ?? defaultIconIndex;
             if (iconIndex === null) continue; // even the default icon failed to decode; nothing drawable
-            items.push({ lat: item.position.latitude, lng: item.position.longitude, iconIndex });
+            const labelIndex = await resolveLabelIndex(parts.label);
+            items.push({ lat: item.position.latitude, lng: item.position.longitude, iconIndex, labelIndex });
         }
 
         const representative = this.items[0];
@@ -530,10 +641,11 @@ export class MarkerTileRenderer<T extends { position: GeoPoint; icon?: MarkerIco
             console.debug(
                 '[MapConductor] MarkerTileRenderer.toSWData: items=', items.length,
                 'icons=', icons.length,
+                'labels=', labels.length,
             );
         }
 
-        return { items, icons, zoomScales, extraIconScale: this.extraIconScale };
+        return { items, icons, labels, zoomScales, extraIconScale: this.extraIconScale, declutterPx: this.declutterPx };
     }
 
     /**

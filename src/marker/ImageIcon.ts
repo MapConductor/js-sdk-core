@@ -2,8 +2,16 @@ import { combineHash, hashBool, hashNum, hashObj } from "../features/hash-utils"
 import { Settings } from "../settings";
 import { Offset } from "../types";
 import { DEFAULT_BASE_PROPERTIES, type MarkerLabelPosition } from "./DefaultIconTypes";
-import { type IconLayout } from "./DefaultIconGeometry";
+import { toSvgDataUrl, type IconLayout } from "./DefaultIconGeometry";
 import { computeIconLabelLayout } from "./IconLabelLayout";
+import {
+    DEFAULT_LABEL_WRITING_MODE,
+    createTileLabel,
+    isVerticalWritingMode,
+    labelSvgElements,
+    type LabelStyle,
+    type MarkerTileParts,
+} from "./MarkerTileLabel";
 import { AbstractMarkerIcon } from "./MarkerIcon";
 import { BitmapIcon } from "./MarkerOverlayRenderer";
 
@@ -31,6 +39,8 @@ export interface ImageIconOptions {
      * - `"center center"`（既定）は画像の中央に重ねる。
      */
     labelPosition?: MarkerLabelPosition;
+    /** ラベルの書字方向。書き方は `DefaultMarkerIconOptions.labelWritingMode` と同じ。 */
+    labelWritingMode?: string;
 }
 
 // Module-level bitmap icon cache keyed by hashCode.
@@ -91,8 +101,10 @@ export class ImageIcon extends AbstractMarkerIcon {
     readonly labelTypeFace: string;
     readonly labelStrokeColor: string;
     readonly labelPosition: MarkerLabelPosition;
+    readonly labelWritingMode: string;
     private readonly options: { anchor: Offset; infoAnchor: Offset };
     private cachedLayout: IconLayout | null = null;
+    private cachedTileParts: MarkerTileParts | null = null;
 
     constructor(image: ImageSource, options: ImageIconOptions = {}) {
         super();
@@ -110,6 +122,7 @@ export class ImageIcon extends AbstractMarkerIcon {
         this.labelTypeFace = options.labelTypeFace ?? DEFAULT_BASE_PROPERTIES.labelTypeFace;
         this.labelStrokeColor = options.labelStrokeColor ?? DEFAULT_BASE_PROPERTIES.labelStrokeColor;
         this.labelPosition = options.labelPosition ?? DEFAULT_BASE_PROPERTIES.labelPosition;
+        this.labelWritingMode = options.labelWritingMode ?? DEFAULT_LABEL_WRITING_MODE;
     }
 
     /**
@@ -176,8 +189,54 @@ export class ImageIcon extends AbstractMarkerIcon {
             labelTextSize: this.labelTextSize,
             labelTypeFace: this.labelTypeFace,
             labelPosition: this.labelPosition,
+            labelWritingMode: this.labelWritingMode,
         });
         return this.cachedLayout;
+    }
+
+    /**
+     * タイル描画用に、ラベルを除いた画像と、ラベルだけの画像に分けたもの（`MarkerTileLabel`）。
+     *
+     * 本体はラベルの無い `ImageIcon` と同じ画像なので、ラベルだけ違うアイコンの間で共有される。
+     *
+     * @internal
+     */
+    tileParts(): MarkerTileParts {
+        if (this.cachedTileParts) return this.cachedTileParts;
+        if (!this.label) {
+            this.cachedTileParts = { body: this.toBitmapIcon(), label: null };
+            return this.cachedTileParts;
+        }
+        const body = new ImageIcon(this.image, {
+            iconSize: this.iconSize,
+            scale: this.scale,
+            anchor: this.options.anchor,
+            infoAnchor: this.options.infoAnchor,
+            debug: this.debug,
+        }).toBitmapIcon();
+        const layout = this.computeLayout();
+        const anchorX = layout.markerOffsetX + this.options.anchor.x * layout.markerSize;
+        const anchorY = layout.markerOffsetY + this.options.anchor.y * layout.markerSize;
+        const label = createTileLabel(
+            this.labelStyle(layout),
+            { width: layout.labelWidth, height: layout.labelHeight, contentWidth: layout.labelWidth },
+            layout.labelCenterX - anchorX,
+            layout.labelCenterY - anchorY,
+        );
+        this.cachedTileParts = { body, label };
+        return this.cachedTileParts;
+    }
+
+    private labelStyle(layout: IconLayout): LabelStyle {
+        return {
+            text: this.label ?? "",
+            fontSize: this.labelTextSize,
+            typeFace: this.labelTypeFace,
+            textColor: this.labelTextColor ?? "#000000",
+            strokeColor: this.labelStrokeColor,
+            outline: layout.outlineStroke,
+            vertical: isVerticalWritingMode(this.labelWritingMode),
+        };
     }
 
     private labelProperties(): unknown {
@@ -188,6 +247,7 @@ export class ImageIcon extends AbstractMarkerIcon {
             labelTypeFace: this.labelTypeFace,
             labelStrokeColor: this.labelStrokeColor,
             labelPosition: this.labelPosition,
+            labelWritingMode: this.labelWritingMode,
         };
     }
 
@@ -244,14 +304,24 @@ export class ImageIcon extends AbstractMarkerIcon {
         if (!ctx) throw new Error("ImageIcon: Failed to get 2D context");
 
         ctx.drawImage(this.image as CanvasImageSource, layout.markerOffsetX, layout.markerOffsetY, scaledSize, scaledSize);
-        this.drawLabel(ctx, layout);
+        // Canvas には縦組みが無いので、縦書きのラベルは SVG に任せる（画像はその下に敷く）。
+        const verticalLabel = !!this.label && isVerticalWritingMode(this.labelWritingMode);
+        if (!verticalLabel) this.drawLabel(ctx, layout);
 
         if (this.debug) {
             this.drawDebugFrame(ctx);
         }
 
+        const url = verticalLabel
+            ? toSvgDataUrl([
+                `<svg xmlns="http://www.w3.org/2000/svg" width="${layout.bitmapWidth}" height="${layout.bitmapHeight}" viewBox="0 0 ${layout.bitmapWidth} ${layout.bitmapHeight}">`,
+                `<image href="${canvas.toDataURL()}" x="0" y="0" width="${layout.bitmapWidth}" height="${layout.bitmapHeight}"/>`,
+                labelSvgElements(this.labelStyle(layout), layout.labelCenterX, layout.labelCenterY),
+                "</svg>",
+            ].join(""))
+            : canvas.toDataURL();
         const result: BitmapIcon = {
-            url: canvas.toDataURL(),
+            url,
             anchor: this.anchor,
             size: { width: layout.bitmapWidth, height: layout.bitmapHeight },
             ...(this.label ? { hitBounds: this.hitBounds(layout) } : {}),
