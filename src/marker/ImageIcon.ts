@@ -1,4 +1,4 @@
-import { combineHash, hashBool, hashNum, hashObj } from "../features/hash-utils";
+import { combineHash, hashBool, hashNum, hashObj, hashStr } from "../features/hash-utils";
 import { Settings } from "../settings";
 import { Offset } from "../types";
 import { DEFAULT_BASE_PROPERTIES, type MarkerLabelPosition } from "./DefaultIconTypes";
@@ -14,6 +14,7 @@ import {
 } from "./MarkerTileLabel";
 import { AbstractMarkerIcon } from "./MarkerIcon";
 import { BitmapIcon } from "./MarkerOverlayRenderer";
+import { loadRemoteImage, peekRemoteImage, type RemoteImageResult } from "./RemoteImageLoader";
 
 export type ImageSource = HTMLImageElement | HTMLCanvasElement | ImageBitmap;
 
@@ -61,6 +62,22 @@ function getObjectIdentity(obj: object): number {
     return id;
 }
 
+/** URL の画像を読み終えるまでの代わり。何も描かない。 */
+let transparentPlaceholder: HTMLCanvasElement | null = null;
+
+function placeholderImage(): HTMLCanvasElement {
+    if (!transparentPlaceholder) {
+        transparentPlaceholder = document.createElement("canvas");
+        transparentPlaceholder.width = 1;
+        transparentPlaceholder.height = 1;
+    }
+    return transparentPlaceholder;
+}
+
+/** URL の画像の読み込み状態。ハッシュに混ぜる。 */
+const UrlImageState = { Pending: 1, Ready: 2, Failed: 3 } as const;
+type UrlImageState = (typeof UrlImageState)[keyof typeof UrlImageState];
+
 function getImageDimensions(image: ImageSource): { width: number; height: number } {
     if (image instanceof HTMLImageElement) {
         return { width: image.naturalWidth || image.width, height: image.naturalHeight || image.height };
@@ -85,13 +102,24 @@ function getImageIdentity(image: ImageSource): number {
 }
 
 /**
- * 任意の画像ソース（HTMLImageElement / HTMLCanvasElement / ImageBitmap）を
+ * 任意の画像ソース（HTMLImageElement / HTMLCanvasElement / ImageBitmap）、または画像の URL を
  * マーカーアイコンとして使用するクラス。
+ *
+ * ## URL を渡したとき
+ *
+ * `new ImageIcon("https://…/pin.png")` は SDK が画像を読む（`GroundImageState.imageUrl` と同じ使い方）。
+ *
+ * - 読み終えるまでは、同じ大きさ・アンカーの透明な画像として描く（ラベルはその間も描く）。
+ * - 読み終えたら、このアイコンを持つマーカーは描き直される。呼び出し側で何かする必要は無い。
+ * - 同じ URL は 1 回しか読まない。別のアイコンでも、読み終えた画像を使い回す。
+ * - CORS で許可された画像だけを描ける（canvas に描いてから地図へ渡すため）。許可されない、
+ *   または読めない画像は透明のままになり、コンソールに 1 回警告を出す。
  *
  * Android SDK の ImageIcon に対応する実装。
  */
 export class ImageIcon extends AbstractMarkerIcon {
-    readonly image: ImageSource;
+    /** URL で作ったときの、その URL。画像ソースで作ったときは null。 */
+    readonly imageUrl: string | null;
     readonly iconSize: number;
     readonly scale: number;
     readonly debug: boolean;
@@ -105,10 +133,27 @@ export class ImageIcon extends AbstractMarkerIcon {
     private readonly options: { anchor: Offset; infoAnchor: Offset };
     private cachedLayout: IconLayout | null = null;
     private cachedTileParts: MarkerTileParts | null = null;
+    private readonly source: ImageSource | null;
+    private urlState: UrlImageState | null = null;
+    private loadedImage: HTMLImageElement | null = null;
+    private settleListeners: (() => void)[] | null = null;
 
-    constructor(image: ImageSource, options: ImageIconOptions = {}) {
+    constructor(image: ImageSource | string, options: ImageIconOptions = {}) {
         super();
-        this.image = image;
+        if (typeof image === "string") {
+            this.imageUrl = image;
+            this.source = null;
+            const done = peekRemoteImage(image);
+            if (done !== undefined) {
+                this.settle(done);
+            } else {
+                this.urlState = UrlImageState.Pending;
+                void loadRemoteImage(image).then(result => this.settle(result));
+            }
+        } else {
+            this.imageUrl = null;
+            this.source = image;
+        }
         this.iconSize = options.iconSize ?? Settings.Default.iconSize;
         this.scale = options.scale ?? 1.0;
         this.options = {
@@ -123,6 +168,39 @@ export class ImageIcon extends AbstractMarkerIcon {
         this.labelStrokeColor = options.labelStrokeColor ?? DEFAULT_BASE_PROPERTIES.labelStrokeColor;
         this.labelPosition = options.labelPosition ?? DEFAULT_BASE_PROPERTIES.labelPosition;
         this.labelWritingMode = options.labelWritingMode ?? DEFAULT_LABEL_WRITING_MODE;
+    }
+
+    /**
+     * 描く画像。URL で作ったときは、読み終えるまで（または読めなかったとき）1px の透明な canvas。
+     */
+    get image(): ImageSource {
+        if (this.source) return this.source;
+        return this.loadedImage ?? placeholderImage();
+    }
+
+    /**
+     * URL の画像を読み終える（または失敗する）前なら、そのときに一度だけ `listener` を呼ぶ。
+     * 読み込み中でなければ何もせず false を返す。
+     *
+     * `MarkerState` がアイコンを受け取ったときに使う。読み終えるとハッシュが変わるので、
+     * マーカーはそれを変更として描き直す。
+     *
+     * @internal
+     */
+    onceImageSettled(listener: () => void): boolean {
+        if (this.urlState !== UrlImageState.Pending) return false;
+        (this.settleListeners ??= []).push(listener);
+        return true;
+    }
+
+    private settle(result: RemoteImageResult): void {
+        if (this.imageUrl === null || (this.urlState !== null && this.urlState !== UrlImageState.Pending)) return;
+        this.loadedImage = result;
+        this.urlState = result ? UrlImageState.Ready : UrlImageState.Failed;
+        this.cachedTileParts = null;
+        const listeners = this.settleListeners;
+        this.settleListeners = null;
+        listeners?.forEach(listener => listener());
     }
 
     /**
@@ -207,13 +285,16 @@ export class ImageIcon extends AbstractMarkerIcon {
             this.cachedTileParts = { body: this.toBitmapIcon(), label: null };
             return this.cachedTileParts;
         }
-        const body = new ImageIcon(this.image, {
+        const body = new ImageIcon(this.imageUrl ?? this.image, {
             iconSize: this.iconSize,
             scale: this.scale,
             anchor: this.options.anchor,
             infoAnchor: this.options.infoAnchor,
             debug: this.debug,
-        }).toBitmapIcon();
+        });
+        // 読み終えた後でも LRU から落ちていると読み込み中に戻るので、こちらの結果を渡す。
+        if (this.imageUrl !== null && this.urlState !== UrlImageState.Pending) body.settle(this.loadedImage);
+        const bodyIcon = body.toBitmapIcon();
         const layout = this.computeLayout();
         const anchorX = layout.markerOffsetX + this.options.anchor.x * layout.markerSize;
         const anchorY = layout.markerOffsetY + this.options.anchor.y * layout.markerSize;
@@ -223,7 +304,7 @@ export class ImageIcon extends AbstractMarkerIcon {
             layout.labelCenterX - anchorX,
             layout.labelCenterY - anchorY,
         );
-        this.cachedTileParts = { body, label };
+        this.cachedTileParts = { body: bodyIcon, label };
         return this.cachedTileParts;
     }
 
@@ -252,6 +333,9 @@ export class ImageIcon extends AbstractMarkerIcon {
     }
 
     private getImageIdentity(): number {
+        // URL の画像は URL と読み込み状態で見分ける。読み終えたときに一度だけハッシュが変わり、
+        // 透明な代わりの絵と読み終えた絵が別々にキャッシュされる。
+        if (this.imageUrl !== null) return combineHash(hashStr(this.imageUrl), this.urlState ?? 0);
         return getImageIdentity(this.image);
     }
 
@@ -303,7 +387,7 @@ export class ImageIcon extends AbstractMarkerIcon {
         const ctx = canvas.getContext("2d");
         if (!ctx) throw new Error("ImageIcon: Failed to get 2D context");
 
-        ctx.drawImage(this.image as CanvasImageSource, layout.markerOffsetX, layout.markerOffsetY, scaledSize, scaledSize);
+        if (this.imageUrl === null || this.loadedImage) ctx.drawImage(this.image as CanvasImageSource, layout.markerOffsetX, layout.markerOffsetY, scaledSize, scaledSize);
         // Canvas には縦組みが無いので、縦書きのラベルは SVG に任せる（画像はその下に敷く）。
         const verticalLabel = !!this.label && isVerticalWritingMode(this.labelWritingMode);
         if (!verticalLabel) this.drawLabel(ctx, layout);
