@@ -118,6 +118,9 @@ export class IconImageCache {
         // contexts where `Image` doesn't exist (e.g. a Worker).
         if (typeof Image !== 'undefined') {
             const img = new Image();
+            // An http(s) icon URL must come back CORS-clean, or drawing it
+            // taints the tile canvas and the tile encode throws.
+            if (!url.startsWith('data:')) img.crossOrigin = 'anonymous';
             img.src = url;
             try {
                 await img.decode();

@@ -113,6 +113,8 @@ class MarkerStateImpl implements MarkerState {
     private _onDragEnd: OnMarkerEventHandler | null;
     private _onAnimateStart: OnMarkerEventHandler | null;
     private _onAnimateEnd: OnMarkerEventHandler | null;
+    // 読み込みを待っているアイコン。同じアイコンを何度代入しても待ちを重ねない。
+    private _watchedIcon: MarkerIcon | null = null;
 
 
     // Created lazily on the first asObservable() call rather than at construction. Most markers
@@ -135,6 +137,7 @@ class MarkerStateImpl implements MarkerState {
         this._onAnimateStart = params.onAnimateStart ?? null;
         this._onAnimateEnd = params.onAnimateEnd ?? null;
         this._animation = params.animation ?? null;
+        this.watchIconImage(this._icon);
 
         this.id =
             params.id ??
@@ -253,7 +256,23 @@ class MarkerStateImpl implements MarkerState {
 
     setIcon(nextIcon: MarkerIcon | null): void {
         this._icon = nextIcon;
+        this.watchIconImage(nextIcon);
         this.emit();
+    }
+
+    /**
+     * URL の画像を読み込み中のアイコン（`new ImageIcon(url)`）なら、読み終えたときに描き直す。
+     * 読み終えるとアイコンのハッシュが変わるので、指紋が変わった変更として流れる。
+     * それまでに別のアイコンへ差し替えていたら何もしない。
+     */
+    private watchIconImage(icon: MarkerIcon | null): void {
+        const loading = icon as { onceImageSettled?: (listener: () => void) => boolean } | null;
+        if (icon === this._watchedIcon || typeof loading?.onceImageSettled !== "function") return;
+        const waiting = loading.onceImageSettled(() => {
+            if (this._watchedIcon === icon) this._watchedIcon = null;
+            if (this._icon === icon) this.emit();
+        });
+        if (waiting) this._watchedIcon = icon;
     }
 
     setClickable(nextClickable: boolean): void {

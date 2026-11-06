@@ -2389,13 +2389,24 @@ interface ImageIconOptions {
     labelWritingMode?: string;
 }
 /**
- * 任意の画像ソース（HTMLImageElement / HTMLCanvasElement / ImageBitmap）を
+ * 任意の画像ソース（HTMLImageElement / HTMLCanvasElement / ImageBitmap）、または画像の URL を
  * マーカーアイコンとして使用するクラス。
+ *
+ * ## URL を渡したとき
+ *
+ * `new ImageIcon("https://…/pin.png")` は SDK が画像を読む（`GroundImageState.imageUrl` と同じ使い方）。
+ *
+ * - 読み終えるまでは、同じ大きさ・アンカーの透明な画像として描く（ラベルはその間も描く）。
+ * - 読み終えたら、このアイコンを持つマーカーは描き直される。呼び出し側で何かする必要は無い。
+ * - 同じ URL は 1 回しか読まない。別のアイコンでも、読み終えた画像を使い回す。
+ * - CORS で許可された画像だけを描ける（canvas に描いてから地図へ渡すため）。許可されない、
+ *   または読めない画像は透明のままになり、コンソールに 1 回警告を出す。
  *
  * Android SDK の ImageIcon に対応する実装。
  */
 declare class ImageIcon extends AbstractMarkerIcon {
-    readonly image: ImageSource;
+    /** URL で作ったときの、その URL。画像ソースで作ったときは null。 */
+    readonly imageUrl: string | null;
     readonly iconSize: number;
     readonly scale: number;
     readonly debug: boolean;
@@ -2409,7 +2420,16 @@ declare class ImageIcon extends AbstractMarkerIcon {
     private readonly options;
     private cachedLayout;
     private cachedTileParts;
-    constructor(image: ImageSource, options?: ImageIconOptions);
+    private readonly source;
+    private urlState;
+    private loadedImage;
+    private settleListeners;
+    constructor(image: ImageSource | string, options?: ImageIconOptions);
+    /**
+     * 描く画像。URL で作ったときは、読み終えるまで（または読めなかったとき）1px の透明な canvas。
+     */
+    get image(): ImageSource;
+    private settle;
     /**
      * ビットマップに対する割合。ラベルを横や上に置くとビットマップがその側へ伸びるので、
      * 画像に対する指定値（`requestedAnchor`）をレイアウトから直す。ラベルが無ければ指定値のまま。
