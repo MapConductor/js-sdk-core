@@ -11,6 +11,9 @@ import { PolygonManagerInterface } from "./PolygonManager";
 import { PolygonAddParams, PolygonChangeParams, PolygonOverlayRenderer } from "./PolygonOverlayRenderer";
 import { PolygonEvent, OnPolygonEventHandler, PolygonState } from "./PolygonState";
 import { Mutex } from "../base/Mutex";
+import type { PolygonTiler } from "./PolygonTiler";
+
+const NO_IDS: ReadonlySet<string> = new Set();
 
 function fingerPrintsEqual(
     a: ReturnType<PolygonState["fingerPrint"]>,
@@ -37,6 +40,14 @@ export abstract class PolygonController<ActualPolygon>
     public readonly polygonManager: PolygonManagerInterface<ActualPolygon>;
     public readonly renderer: PolygonOverlayRenderer<ActualPolygon>;
     public clickListener: OnPolygonEventHandler | null;
+    /**
+     * Set by a provider that can show polygon tiles (see {@link PolygonTiler}).
+     * Polygons it tiles stay in {@link polygonManager}, for taps, with no
+     * native overlay: their entity's `polygon` is null and the renderer never
+     * sees them.
+     */
+    public tiler: PolygonTiler | null = null;
+    private tiledIds: ReadonlySet<string> = NO_IDS;
     private semaphore = new Mutex();
 
     constructor({
@@ -73,7 +84,17 @@ export abstract class PolygonController<ActualPolygon>
 
     async add(data: PolygonState[]): Promise<void> {
         await this.semaphore.withLock(async () => {
-            const previous = new Set(this.polygonManager.allEntities().map((e) => e.state.id));
+            const wasTiled = this.tiledIds;
+            const tiled = this.tiler ? await this.tiler.route(data) : NO_IDS;
+            this.tiledIds = tiled;
+            if (tiled.size > 0) data = data.filter((state) => !tiled.has(state.id));
+            // Only natively drawn polygons are diffed against the renderer.
+            const previous = new Set(
+                this.polygonManager
+                    .allEntities()
+                    .map((e) => e.state.id)
+                    .filter((id) => !wasTiled.has(id)),
+            );
             const added: PolygonAddParams[] = [];
             const updated: PolygonChangeParams<ActualPolygon>[] = [];
             const removed: PolygonEntity<ActualPolygon>[] = [];
@@ -134,6 +155,23 @@ export abstract class PolygonController<ActualPolygon>
                 });
             }
 
+            // Tiled polygons: kept for taps, nothing native. Those that left
+            // the tiles and the list are forgotten; those that left the tiles
+            // for native drawing were added above.
+            const nativeIds = wasTiled.size > 0 ? new Set(data.map((state) => state.id)) : NO_IDS;
+            for (const id of wasTiled) {
+                if (!tiled.has(id) && !nativeIds.has(id) && this.polygonManager.hasEntity(id)) {
+                    this.polygonManager.removeEntity(id);
+                }
+            }
+            if (tiled.size > 0) {
+                for (const state of this.tiler!.tiledStates()) {
+                    this.polygonManager.registerEntity(
+                        createPolygonEntity({ polygon: null as unknown as ActualPolygon, state }),
+                    );
+                }
+            }
+
             await this.renderer.onPostProcess();
         });
     }
@@ -142,6 +180,11 @@ export abstract class PolygonController<ActualPolygon>
         await this.semaphore.withLock(async () => {
             const prevEntity = this.polygonManager.getEntity(state.id);
             if (!prevEntity) return;
+            if (this.tiledIds.has(state.id)) {
+                this.polygonManager.registerEntity(createPolygonEntity({ polygon: prevEntity.polygon, state }));
+                this.tiler?.update(state);
+                return;
+            }
 
             const currentFinger = state.fingerPrint();
             const prevFinger = prevEntity.fingerPrint;
@@ -164,7 +207,10 @@ export abstract class PolygonController<ActualPolygon>
 
     async clear(): Promise<void> {
         await this.semaphore.withLock(async () => {
-            await this.renderer.onRemove(this.polygonManager.allEntities());
+            const tiled = this.tiledIds;
+            this.tiledIds = NO_IDS;
+            await this.tiler?.clear();
+            await this.renderer.onRemove(this.polygonManager.allEntities().filter((e) => !tiled.has(e.state.id)));
             this.polygonManager.clear();
         });
     }

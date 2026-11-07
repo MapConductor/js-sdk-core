@@ -11,3 +11,4 @@ export * from "./PolygonUnion";
 export * from "./EncodedPolyline";
 export * from "./PolygonTilingOptions";
 export * from "./PolygonTileSet";
+export * from "./PolygonTiler";

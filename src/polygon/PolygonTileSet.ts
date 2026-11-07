@@ -1,5 +1,6 @@
 import { LocalTileServer, type SWPolygon } from '../tileserver/LocalTileServer';
-import { tilePixelRatio } from '../tileserver/TilePixelRatio';
+import { tilePixelRatio, tilePixelRatioSuffix } from '../tileserver/TilePixelRatio';
+import type { TileRequest } from '../tileserver/TileRequest';
 import type { GeoPoint } from '../features/GeoPoint';
 import { encodePolyline } from './EncodedPolyline';
 import type { PolygonState } from './PolygonState';
@@ -81,6 +82,11 @@ export class PolygonTileSet {
         await this.server.waitForController();
         const ok = await this.server.sendSWPolygonsAndWait(this.routeId, polygons);
         if (!ok) return null;
+        // Some providers (Leaflet, Google Maps, deck.gl, ...) read `/__tiles/`
+        // URLs from LocalTileServer on the main thread instead of loading them.
+        // Answer them by fetching the same tile, which the service worker
+        // intercepts and draws: the drawing stays off the main thread.
+        this.server.register(this.routeId, { renderTile: (request) => this.fetchTile(request) });
         this.indexById = indexById;
         this.registered = true;
         this.version++;
@@ -119,6 +125,16 @@ export class PolygonTileSet {
         if (this.registered) this.server.unregister(this.routeId);
         this.registered = false;
         this.indexById.clear();
+    }
+
+    private async fetchTile(request: TileRequest): Promise<Uint8Array | null> {
+        const ratio = tilePixelRatioSuffix(request.pixelRatio);
+        const response = await fetch(
+            `${this.server.baseUrl}/${this.routeId}/${TILE_SIZE}/${this.version}/${request.z}/${request.x}/${request.y}${ratio}.png`,
+        );
+        // A 503 is a tile the worker could not draw now; throwing says "failed", not "empty".
+        if (!response.ok) throw new Error(`polygon tile ${response.status}`);
+        return new Uint8Array(await response.arrayBuffer());
     }
 
     private async flush(): Promise<void> {
