@@ -147,6 +147,12 @@ const POLYGON_MAX_CELLS = 256;
 /** Simplified copies kept per route, most recent zooms first. */
 const POLYGON_ZOOMS_KEPT = 4;
 const DP_TOLERANCE_PX = 0.5;
+/**
+ * Below this size on screen a polygon's outline is left out: a 1 px line round
+ * a 3 px parcel is the whole parcel, and a city of them zoomed out turns into
+ * the outline colour.
+ */
+const MIN_OUTLINED_PX = 4;
 
 function decodePolyline6(encoded) {
     const out = [];
@@ -432,7 +438,7 @@ function simplifiedAt(provider, index, z, tileSize) {
                     const hole = simplifyRing(p.rings[r], scale);
                     if (hole) rings.push(hole);
                 }
-                result = { rings };
+                result = { rings, outlined: Math.max(w, h) >= MIN_OUTLINED_PX };
             } else {
                 result = { dot: [Math.round(((p.bbox[0] + p.bbox[2]) / 2) * scale), Math.round(((p.bbox[1] + p.bbox[3]) / 2) * scale)] };
             }
@@ -465,7 +471,7 @@ async function renderPolygonTile(provider, x, y, z, tileSize, pixelRatio = 1) {
         const shape = simplifiedAt(provider, index, z, tileSize);
         if (!shape) continue;
         const fillVisible = isVisibleColor(p.fill);
-        const strokeVisible = p.strokeWidth > 0 && isVisibleColor(p.stroke);
+        const strokeVisible = p.strokeWidth > 0 && isVisibleColor(p.stroke) && (shape.dot != null || shape.outlined);
         if (shape.dot) {
             ctx.fillStyle = fillVisible ? p.fill : p.stroke;
             if (!fillVisible && !strokeVisible) continue;
