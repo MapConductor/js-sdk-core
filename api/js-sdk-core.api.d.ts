@@ -3254,7 +3254,7 @@ interface MarkerTilingOptions {
     readonly cacheSize: number;
     /**
      * Per-marker icon scale multiplier applied during tile rendering.
-     * `(zoom: number, state: MarkerState) => number`
+     * `(state: MarkerState, zoom: number) => number`
      */
     readonly iconScaleCallback: ((state: MarkerState, zoom: number) => number) | null;
     /**
