@@ -171,12 +171,15 @@ export class PolygonManager<ActualPolygon> implements PolygonManagerInterface<Ac
         by: number;
         eps: number;
     }): boolean {
+        // 線分までの距離が eps（度）以内なら辺上とみなす。
+        // 以前は外積と内積を eps と直接比べていた。内積は度の 2 乗なので、
+        // `(p-a)·(p-b) <= 1e-6` は「辺の中点から約 0.001°（~100 m）以内」を意味し、
+        // 短い辺を持つ建物ほど、離れたタップを辺上として拾っていた。
         const dx = bx - ax, dy = by - ay;
-        const cross = dx * (py - ay) - dy * (px - ax);
-        const segLen = Math.sqrt(dx * dx + dy * dy);
-        if (Math.abs(cross) > eps * Math.max(1, segLen)) return false;
-        const dot = (px - ax) * (px - bx) + (py - ay) * (py - by);
-        return dot <= eps * Math.max(1, segLen);
+        const lenSq = dx * dx + dy * dy;
+        const t = lenSq > 0 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq)) : 0;
+        const ex = px - (ax + t * dx), ey = py - (ay + t * dy);
+        return ex * ex + ey * ey <= eps * eps;
     }
 
     private unwrapLongitudesAround(points: GeoPoint[], refLng: number): [number, number][] {
