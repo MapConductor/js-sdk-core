@@ -31,6 +31,11 @@ export function unionHoleRings(holes: GeoPoint[][]): GeoPoint[][] {
             .map(hole => toRing(hole, origin))
             .filter((ring): ring is Vec[] => ring != null);
         if (rings.length <= 1) return holes;
+        // Holes that neither cross, touch nor contain one another are already
+        // their own union. Checking that is linear; the union is quadratic in
+        // the hole edges, which a street-network parcel with 80 holes and
+        // 8,000 hole vertices turns into seconds.
+        if (holesAreDisjoint(rings)) return holes;
 
         const merged = unionRings(rings);
         if (merged.length === 0) return holes;
@@ -265,6 +270,76 @@ function intersectionPoints(seg: Edge, other: Edge): Vec[] {
     const u = cross(qp, r) / rxs;
     if (t < -EPS || t > 1 + EPS || u < -EPS || u > 1 + EPS) return [];
     return [add2(seg.a, scale(r, clamp01(t)))];
+}
+
+/**
+ * True when no two rings cross, touch or nest. Edges are binned into a uniform
+ * grid and only pairs sharing a cell are tested, so the cost grows with the
+ * edge count rather than its square.
+ */
+function holesAreDisjoint(rings: Vec[][]): boolean {
+    const boxes = rings.map(ringBox);
+    // A ring inside another: one of its vertices is inside it.
+    for (let i = 0; i < rings.length; i++) {
+        const p = rings[i][0];
+        for (let j = 0; j < rings.length; j++) {
+            if (i === j) continue;
+            const b = boxes[j];
+            if (p.x >= b.minX && p.x <= b.maxX && p.y >= b.minY && p.y <= b.maxY && pointInRing(p, rings[j])) {
+                return false;
+            }
+        }
+    }
+
+    const edges: { edge: Edge; ring: number }[] = [];
+    for (let r = 0; r < rings.length; r++) {
+        const ring = rings[r];
+        for (let i = 0; i < ring.length; i++) edges.push({ edge: { a: ring[i], b: ring[(i + 1) % ring.length] }, ring: r });
+    }
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const b of boxes) {
+        minX = Math.min(minX, b.minX); minY = Math.min(minY, b.minY);
+        maxX = Math.max(maxX, b.maxX); maxY = Math.max(maxY, b.maxY);
+    }
+    const side = Math.max(1, Math.min(1024, Math.ceil(Math.sqrt(edges.length))));
+    // Padded by EPS so an edge lying on a cell border is in both cells.
+    const cellW = (maxX - minX) / side || 1;
+    const cellH = (maxY - minY) / side || 1;
+    const cellOf = (v: number, min: number, size: number) => Math.max(0, Math.min(side - 1, Math.floor((v - min) / size)));
+    const cells = new Map<number, number[]>();
+    for (let e = 0; e < edges.length; e++) {
+        const { a, b } = edges[e].edge;
+        const x0 = cellOf(Math.min(a.x, b.x) - EPS, minX, cellW), x1 = cellOf(Math.max(a.x, b.x) + EPS, minX, cellW);
+        const y0 = cellOf(Math.min(a.y, b.y) - EPS, minY, cellH), y1 = cellOf(Math.max(a.y, b.y) + EPS, minY, cellH);
+        for (let cx = x0; cx <= x1; cx++) {
+            for (let cy = y0; cy <= y1; cy++) {
+                const key = cx * side + cy;
+                const bucket = cells.get(key);
+                if (bucket) bucket.push(e);
+                else cells.set(key, [e]);
+            }
+        }
+    }
+    for (const bucket of cells.values()) {
+        for (let i = 0; i < bucket.length; i++) {
+            for (let j = i + 1; j < bucket.length; j++) {
+                const p = edges[bucket[i]], q = edges[bucket[j]];
+                if (p.ring !== q.ring && intersectionPoints(p.edge, q.edge).length > 0) return false;
+            }
+        }
+    }
+    return true;
+}
+
+function ringBox(ring: Vec[]): { minX: number; minY: number; maxX: number; maxY: number } {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of ring) {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+    }
+    return { minX, minY, maxX, maxY };
 }
 
 /** How many rings' interiors contain the point. */

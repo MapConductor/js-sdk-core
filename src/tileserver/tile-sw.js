@@ -124,6 +124,383 @@ function queryGrid(grid, items, south, north, west, east) {
     return out;
 }
 
+// ── Polygon tiles ────────────────────────────────────────────────────────────
+//
+// The main thread sends every tiled polygon once ('sw-register-polygons'), its
+// rings as polyline6 strings (Google's Encoded Polyline at 1e-6 degrees; see
+// js-sdk-core EncodedPolyline.ts). Here they become Web Mercator coordinates in
+// [0, 1], with the outline wound one way and the holes the other, so a
+// `nonzero` fill leaves out the union of the holes without computing it.
+//
+// Each zoom gets its own simplified copy of a polygon, built the first time a
+// tile at that zoom needs it: vertices snapped to that zoom's pixel grid,
+// repeats dropped, Douglas-Peucker at half a pixel, and a polygon smaller than
+// a pixel drawn as one pixel. Taps never see any of this -- they are resolved
+// on the main thread against the original shapes.
+
+const swPolygonProviders = new Map();
+
+/** Cells of the polygon index, in Web Mercator units: one z12 tile. */
+const POLYGON_CELL = 1 / 4096;
+/** A polygon covering more cells than this is kept in a list every query checks. */
+const POLYGON_MAX_CELLS = 256;
+/** Simplified copies kept per route, most recent zooms first. */
+const POLYGON_ZOOMS_KEPT = 4;
+const DP_TOLERANCE_PX = 0.5;
+
+function decodePolyline6(encoded) {
+    const out = [];
+    let index = 0, lat = 0, lng = 0;
+    const read = () => {
+        let result = 0, shift = 0, byte;
+        do {
+            byte = encoded.charCodeAt(index++) - 63;
+            result += (byte & 0x1f) * 2 ** shift;
+            shift += 5;
+        } while (byte >= 0x20);
+        return result % 2 === 1 ? -(result + 1) / 2 : result / 2;
+    };
+    while (index < encoded.length) {
+        lat += read();
+        lng += read();
+        out.push(lat / 1e6, lng / 1e6);
+    }
+    return out;
+}
+
+function toMercatorRing(latLngs) {
+    const n = latLngs.length / 2;
+    const ring = new Float64Array(n * 2);
+    for (let i = 0; i < n; i++) {
+        const lat = Math.max(-85.05112878, Math.min(85.05112878, latLngs[i * 2]));
+        const s = Math.sin((lat * Math.PI) / 180);
+        ring[i * 2] = (latLngs[i * 2 + 1] + 180) / 360;
+        ring[i * 2 + 1] = 0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI);
+    }
+    return ring;
+}
+
+function signedArea(ring) {
+    let area = 0;
+    const n = ring.length / 2;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+        area += ring[j * 2] * ring[i * 2 + 1] - ring[i * 2] * ring[j * 2 + 1];
+    }
+    return area / 2;
+}
+
+function reversedRing(ring) {
+    const n = ring.length / 2;
+    const out = new Float64Array(ring.length);
+    for (let i = 0; i < n; i++) {
+        out[i * 2] = ring[(n - 1 - i) * 2];
+        out[i * 2 + 1] = ring[(n - 1 - i) * 2 + 1];
+    }
+    return out;
+}
+
+function decodeSwPolygon(p) {
+    const rings = [];
+    for (let r = 0; r < p.rings.length; r++) {
+        let ring = toMercatorRing(decodePolyline6(p.rings[r]));
+        if (ring.length < 6) {
+            if (r === 0) return null;
+            continue;
+        }
+        // Outline positive, holes negative: opposite windings under `nonzero`.
+        const area = signedArea(ring);
+        if ((r === 0 && area < 0) || (r > 0 && area > 0)) ring = reversedRing(ring);
+        rings.push(ring);
+    }
+    const outer = rings[0];
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (let i = 0; i < outer.length; i += 2) {
+        if (outer[i] < minX) minX = outer[i];
+        if (outer[i] > maxX) maxX = outer[i];
+        if (outer[i + 1] < minY) minY = outer[i + 1];
+        if (outer[i + 1] > maxY) maxY = outer[i + 1];
+    }
+    return {
+        rings,
+        bbox: [minX, minY, maxX, maxY],
+        fill: p.fill,
+        stroke: p.stroke,
+        strokeWidth: p.strokeWidth,
+    };
+}
+
+function isVisibleColor(color) {
+    if (!color || color === 'transparent') return false;
+    const m = /^rgba\([^)]*,\s*([\d.]+)\s*\)$/.exec(color);
+    return !m || parseFloat(m[1]) > 0;
+}
+
+function buildPolygonIndex(polygons) {
+    const cells = new Map();
+    const large = [];
+    for (let i = 0; i < polygons.length; i++) {
+        const p = polygons[i];
+        if (!p) continue;
+        const cx0 = Math.floor(p.bbox[0] / POLYGON_CELL), cx1 = Math.floor(p.bbox[2] / POLYGON_CELL);
+        const cy0 = Math.floor(p.bbox[1] / POLYGON_CELL), cy1 = Math.floor(p.bbox[3] / POLYGON_CELL);
+        if ((cx1 - cx0 + 1) * (cy1 - cy0 + 1) > POLYGON_MAX_CELLS) {
+            large.push(i);
+            continue;
+        }
+        for (let cx = cx0; cx <= cx1; cx++) {
+            for (let cy = cy0; cy <= cy1; cy++) {
+                const key = cx * 1048576 + cy;
+                const bucket = cells.get(key);
+                if (bucket) bucket.push(i);
+                else cells.set(key, [i]);
+            }
+        }
+    }
+    return { cells, large };
+}
+
+function registerSwPolygons(msg) {
+    const polygons = msg.polygons.map(decodeSwPolygon);
+    let maxStrokePx = 0;
+    for (const p of polygons) if (p && isVisibleColor(p.stroke)) maxStrokePx = Math.max(maxStrokePx, p.strokeWidth);
+    swPolygonProviders.set(msg.routeId, {
+        polygons,
+        index: buildPolygonIndex(polygons),
+        maxStrokePx,
+        simplified: new Map(),
+        stamp: new Uint32Array(polygons.length),
+        stampValue: 0,
+        // Bumped by every update, so a tile drawn before it is not cached after it.
+        generation: 0,
+    });
+}
+
+function updateSwPolygons(msg) {
+    const provider = swPolygonProviders.get(msg.routeId);
+    if (!provider) return;
+    provider.generation++;
+    const touched = [];
+    for (const u of msg.updates) {
+        const before = provider.polygons[u.index];
+        const after = decodeSwPolygon(u.polygon);
+        provider.polygons[u.index] = after;
+        for (const perZoom of provider.simplified.values()) perZoom[u.index] = undefined;
+        if (before) touched.push(before.bbox);
+        if (after) touched.push(after.bbox);
+        if (after && isVisibleColor(after.stroke)) provider.maxStrokePx = Math.max(provider.maxStrokePx, after.strokeWidth);
+        // A shape that moved needs the index rebuilt; a restyle does not.
+        if (before && after && before.bbox.some((v, k) => v !== after.bbox[k])) provider.index = buildPolygonIndex(provider.polygons);
+    }
+    dropPolygonTilesIn(msg.routeId, touched, provider.maxStrokePx);
+}
+
+/**
+ * Tiles of a polygon route are cached without the version segment of their
+ * URL, so a version bump (which the map needs to ask again at all) finds every
+ * tile a change did not touch still cached. The tiles that do overlap a
+ * changed polygon are dropped here.
+ */
+function polygonTileCacheKey(routeId, tileSize, z, x, y, pixelRatio) {
+    return 'poly:' + routeId + '/' + tileSize + '/' + z + '/' + x + '/' + y + '@' + pixelRatio;
+}
+
+function dropPolygonTilesIn(routeId, boxes, strokePx) {
+    const prefix = 'poly:' + routeId + '/';
+    for (const key of Array.from(tileCache.keys())) {
+        if (!key.startsWith(prefix)) continue;
+        const [tileSize, z, x, rest] = key.slice(prefix.length).split('/');
+        const y = parseInt(rest, 10);
+        const scale = +tileSize * 2 ** +z;
+        const pad = (strokePx + 2) / scale;
+        const tx0 = (+x * +tileSize) / scale - pad, tx1 = ((+x + 1) * +tileSize) / scale + pad;
+        const ty0 = (y * +tileSize) / scale - pad, ty1 = ((y + 1) * +tileSize) / scale + pad;
+        if (boxes.some((b) => b[0] <= tx1 && b[2] >= tx0 && b[1] <= ty1 && b[3] >= ty0)) {
+            tileCacheBytes -= tileCache.get(key).byteLength;
+            tileCache.delete(key);
+        }
+    }
+}
+
+function dropAllPolygonTiles(routeId) {
+    const prefix = 'poly:' + routeId + '/';
+    for (const key of Array.from(tileCache.keys())) {
+        if (key.startsWith(prefix)) {
+            tileCacheBytes -= tileCache.get(key).byteLength;
+            tileCache.delete(key);
+        }
+    }
+}
+
+function queryPolygons(provider, minX, minY, maxX, maxY) {
+    provider.stampValue = (provider.stampValue + 1) >>> 0;
+    if (provider.stampValue === 0) {
+        provider.stamp.fill(0);
+        provider.stampValue = 1;
+    }
+    const stamp = provider.stamp, v = provider.stampValue;
+    const out = [];
+    const take = (i) => {
+        if (stamp[i] === v) return;
+        stamp[i] = v;
+        const b = provider.polygons[i]?.bbox;
+        if (b && b[0] <= maxX && b[2] >= minX && b[1] <= maxY && b[3] >= minY) out.push(i);
+    };
+    for (const i of provider.index.large) take(i);
+    const cx0 = Math.floor(minX / POLYGON_CELL), cx1 = Math.floor(maxX / POLYGON_CELL);
+    const cy0 = Math.floor(minY / POLYGON_CELL), cy1 = Math.floor(maxY / POLYGON_CELL);
+    for (let cx = cx0; cx <= cx1; cx++) {
+        for (let cy = cy0; cy <= cy1; cy++) {
+            const bucket = provider.index.cells.get(cx * 1048576 + cy);
+            if (bucket) for (const i of bucket) take(i);
+        }
+    }
+    // Draw order is registration order, which the main thread sorted by zIndex.
+    return out.sort((a, b) => a - b);
+}
+
+/** Douglas-Peucker on snapped integer points [x0, y0, x1, y1, ...]; returns the kept points. */
+function douglasPeucker(points, tolerance) {
+    const n = points.length / 2;
+    if (n < 3) return points;
+    const keep = new Uint8Array(n);
+    keep[0] = keep[n - 1] = 1;
+    const stack = [0, n - 1];
+    while (stack.length) {
+        const b = stack.pop(), a = stack.pop();
+        const ax = points[a * 2], ay = points[a * 2 + 1], bx = points[b * 2], by = points[b * 2 + 1];
+        const dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy);
+        let best = -1, bestIndex = -1;
+        for (let i = a + 1; i < b; i++) {
+            const px = points[i * 2], py = points[i * 2 + 1];
+            const d = len ? Math.abs(dy * (px - ax) - dx * (py - ay)) / len : Math.hypot(px - ax, py - ay);
+            if (d > best) { best = d; bestIndex = i; }
+        }
+        if (best > tolerance) {
+            keep[bestIndex] = 1;
+            stack.push(a, bestIndex, bestIndex, b);
+        }
+    }
+    const out = [];
+    for (let i = 0; i < n; i++) if (keep[i]) out.push(points[i * 2], points[i * 2 + 1]);
+    return out;
+}
+
+function simplifyRing(ring, scale) {
+    const snapped = [];
+    let px = NaN, py = NaN;
+    for (let i = 0; i < ring.length; i += 2) {
+        const x = Math.round(ring[i] * scale), y = Math.round(ring[i + 1] * scale);
+        if (x === px && y === py) continue;
+        snapped.push(x, y);
+        px = x; py = y;
+    }
+    const simplified = douglasPeucker(snapped, DP_TOLERANCE_PX);
+    return simplified.length >= 6 ? simplified : null;
+}
+
+/**
+ * The polygon as drawn at zoom `z`: `{ rings }` of world-pixel points, `{ dot }`
+ * for a polygon under a pixel, or null when nothing of it is visible.
+ */
+function simplifiedAt(provider, index, z, tileSize) {
+    const key = z + '/' + tileSize;
+    let perZoom = provider.simplified.get(key);
+    if (!perZoom) {
+        perZoom = new Array(provider.polygons.length);
+        provider.simplified.set(key, perZoom);
+        while (provider.simplified.size > POLYGON_ZOOMS_KEPT) {
+            provider.simplified.delete(provider.simplified.keys().next().value);
+        }
+    } else {
+        provider.simplified.delete(key);
+        provider.simplified.set(key, perZoom);
+    }
+    const cached = perZoom[index];
+    if (cached !== undefined) return cached;
+    const p = provider.polygons[index];
+    const scale = tileSize * 2 ** z;
+    let result = null;
+    if (p) {
+        const w = (p.bbox[2] - p.bbox[0]) * scale, h = (p.bbox[3] - p.bbox[1]) * scale;
+        if (w < 1 && h < 1) {
+            result = { dot: [Math.floor(((p.bbox[0] + p.bbox[2]) / 2) * scale), Math.floor(((p.bbox[1] + p.bbox[3]) / 2) * scale)] };
+        } else {
+            const outer = simplifyRing(p.rings[0], scale);
+            if (outer) {
+                const rings = [outer];
+                for (let r = 1; r < p.rings.length; r++) {
+                    const hole = simplifyRing(p.rings[r], scale);
+                    if (hole) rings.push(hole);
+                }
+                result = { rings };
+            } else {
+                result = { dot: [Math.round(((p.bbox[0] + p.bbox[2]) / 2) * scale), Math.round(((p.bbox[1] + p.bbox[3]) / 2) * scale)] };
+            }
+        }
+    }
+    perZoom[index] = result;
+    return result;
+}
+
+async function renderPolygonTile(provider, x, y, z, tileSize, pixelRatio = 1) {
+    const scale = tileSize * 2 ** z;
+    const originX = x * tileSize, originY = y * tileSize;
+    const pad = provider.maxStrokePx / 2 + 1;
+    const candidates = queryPolygons(
+        provider,
+        (originX - pad) / scale, (originY - pad) / scale,
+        (originX + tileSize + pad) / scale, (originY + tileSize + pad) / scale,
+    );
+    if (candidates.length === 0) return { kind: 'empty' };
+
+    const r = pixelRatio;
+    const canvas = new OffscreenCanvas(tileSize * r, tileSize * r);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return { kind: 'failed' };
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    let drew = false;
+    for (const index of candidates) {
+        const p = provider.polygons[index];
+        const shape = simplifiedAt(provider, index, z, tileSize);
+        if (!shape) continue;
+        const fillVisible = isVisibleColor(p.fill);
+        const strokeVisible = p.strokeWidth > 0 && isVisibleColor(p.stroke);
+        if (shape.dot) {
+            ctx.fillStyle = fillVisible ? p.fill : p.stroke;
+            if (!fillVisible && !strokeVisible) continue;
+            ctx.fillRect((shape.dot[0] - originX) * r, (shape.dot[1] - originY) * r, r, r);
+            drew = true;
+            continue;
+        }
+        const ringPath = (ring, path) => {
+            path.moveTo((ring[0] - originX) * r, (ring[1] - originY) * r);
+            for (let i = 2; i < ring.length; i += 2) path.lineTo((ring[i] - originX) * r, (ring[i + 1] - originY) * r);
+            path.closePath();
+        };
+        if (fillVisible) {
+            const path = new Path2D();
+            for (const ring of shape.rings) ringPath(ring, path);
+            ctx.fillStyle = p.fill;
+            ctx.fill(path, 'nonzero');
+            drew = true;
+        }
+        if (strokeVisible) {
+            // Outline only, as the map SDKs draw it.
+            const outline = new Path2D();
+            ringPath(shape.rings[0], outline);
+            ctx.strokeStyle = p.stroke;
+            ctx.lineWidth = p.strokeWidth * r;
+            ctx.stroke(outline);
+            drew = true;
+        }
+    }
+    if (!drew) return { kind: 'empty' };
+    const blob = await canvas.convertToBlob({ type: 'image/png' });
+    if (!blob || blob.size === 0) return { kind: 'failed' };
+    return { kind: 'tile', blob };
+}
+
 self.addEventListener('install', () => {
     self.skipWaiting();
 });
@@ -153,9 +530,21 @@ self.addEventListener('message', (event) => {
         if (event.ports && event.ports[0]) {
             event.ports[0].postMessage({ ok: true });
         }
+    } else if (msg.type === 'sw-register-polygons') {
+        registerSwPolygons(msg);
+        dropAllPolygonTiles(msg.routeId);
+        if (event.ports && event.ports[0]) {
+            event.ports[0].postMessage({ ok: true });
+        }
+    } else if (msg.type === 'sw-update-polygons') {
+        updateSwPolygons(msg);
+        if (event.ports && event.ports[0]) {
+            event.ports[0].postMessage({ ok: true });
+        }
     } else if (msg.type === 'sw-unregister') {
         swProviders.delete(msg.routeId);
         dropCachedTiles(msg.routeId);
+        if (swPolygonProviders.delete(msg.routeId)) dropAllPolygonTiles(msg.routeId);
         console.log('[tile-sw] sw-unregister:', msg.routeId);
     }
 });
@@ -504,6 +893,34 @@ self.addEventListener('fetch', (event) => {
     if (!parsed) return;
 
     const { routeId, tileSize, x, y, z, pixelRatio } = parsed;
+    const polygonProvider = swPolygonProviders.get(routeId);
+    if (polygonProvider && canRenderOffscreen()) {
+        const key = polygonTileCacheKey(routeId, tileSize, z, x, y, pixelRatio);
+        const cached = cachedTile(key);
+        if (cached) {
+            event.respondWith(pngResponse(cached));
+            return;
+        }
+        const generation = polygonProvider.generation;
+        event.respondWith(
+            renderPolygonTile(polygonProvider, x, y, z, tileSize, pixelRatio)
+                .then(async (outcome) => {
+                    if (outcome.kind === 'empty') return emptyTileResponse();
+                    if (outcome.kind === 'failed') return failedTileResponse();
+                    const bytes = await outcome.blob.arrayBuffer();
+                    // The route may have been replaced or changed while this tile was drawn.
+                    if (swPolygonProviders.get(routeId) === polygonProvider && polygonProvider.generation === generation) {
+                        cacheTile(key, bytes);
+                    }
+                    return pngResponse(bytes);
+                })
+                .catch((err) => {
+                    console.warn('[tile-sw] polygon tile failed:', err);
+                    return failedTileResponse();
+                }),
+        );
+        return;
+    }
     const swProvider = swProviders.get(routeId);
     const offscreenOk = canRenderOffscreen();
     console.log('[tile-sw] fetch z=' + z + ' x=' + x + ' y=' + y, 'swProvider:', !!swProvider, 'offscreen:', offscreenOk, 'clientId:', event.clientId);

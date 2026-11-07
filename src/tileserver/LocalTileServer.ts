@@ -18,6 +18,18 @@ import { closeSWIcons } from '../marker/swIconBitmaps';
  * `renderTile()` executes off the main thread. The worker should call
  * `createTileWorkerHandler()` from `@mapconductor/js-sdk-core`.
  */
+/**
+ * One polygon as the tile service worker draws it. Rings are polyline6
+ * strings (Encoded Polyline at 1e-6 degrees), outline first, then holes in any
+ * winding and unmerged: the worker fills with `nonzero` after orienting them.
+ */
+export interface SWPolygon {
+    readonly rings: readonly string[];
+    readonly fill: string;
+    readonly stroke: string;
+    readonly strokeWidth: number;
+}
+
 export class LocalTileServer {
     private readonly providers = new Map<string, TileProvider>();
     private static instance: LocalTileServer | null = null;
@@ -141,6 +153,39 @@ export class LocalTileServer {
             // id, await renderer.toSWData())` a complete, leak-free handover.
             closeSWIcons(data.icons);
             closeSWIcons(data.labels ?? []);
+        });
+    }
+
+    /**
+     * Hand the service worker the polygons it draws for `routeId`
+     * (see `PolygonTileSet`). Resolves once it has them, so the raster source
+     * can be added straight after; false when there is no controlling service
+     * worker, in which case nothing will draw these tiles.
+     */
+    sendSWPolygonsAndWait(routeId: string, polygons: readonly SWPolygon[]): Promise<boolean> {
+        return this.postToSWAndWait({ type: 'sw-register-polygons', routeId, polygons });
+    }
+
+    /** Replace some of a route's polygons in place; `index` is their position in the registered list. */
+    sendSWPolygonUpdates(routeId: string, updates: readonly { index: number; polygon: SWPolygon }[]): Promise<boolean> {
+        return this.postToSWAndWait({ type: 'sw-update-polygons', routeId, updates });
+    }
+
+    private postToSWAndWait(message: object): Promise<boolean> {
+        if (typeof navigator === 'undefined' || !navigator.serviceWorker?.controller) {
+            return Promise.resolve(false);
+        }
+        const controller = navigator.serviceWorker.controller;
+        return new Promise<boolean>((resolve) => {
+            const channel = new MessageChannel();
+            // Polygons are megabytes, and the worker decodes them before
+            // answering; a slow answer is not a missing one.
+            const fallback = setTimeout(() => resolve(false), 30_000);
+            channel.port1.onmessage = () => {
+                clearTimeout(fallback);
+                resolve(true);
+            };
+            controller.postMessage(message, [channel.port2]);
         });
     }
 
