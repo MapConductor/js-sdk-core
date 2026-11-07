@@ -5456,6 +5456,11 @@ declare function computeOffsetOrigin$1({ to, distance, heading, }: {
 }): GeoPoint | null;
 declare function computeLength$1(path: GeoPoint[]): number;
 declare function computeArea$1(path: GeoPoint[]): number;
+/**
+ * Signed area of a closed path in square meters.
+ * Positive for a clockwise ring, negative for a counter-clockwise ring
+ * (as seen on a north-up map, e.g. SW -> NW -> NE -> SE is clockwise and positive).
+ */
 declare function computeSignedArea$1(path: GeoPoint[]): number;
 declare function interpolate$1({ from, to, fraction, }: {
     from: GeoPoint;
@@ -5499,6 +5504,11 @@ declare function computeOffsetOrigin({ to, distance, heading, }: {
     heading: number;
 }): GeoPoint | null;
 declare function computeLength(path: GeoPoint[]): number;
+/**
+ * Ellipsoidal (authalic-sphere) signed area of a closed path in square meters.
+ * The sign follows `Spherical.computeSignedArea`: positive for a clockwise ring,
+ * negative for a counter-clockwise ring (as seen on a north-up map).
+ */
 declare function computeSignedArea(path: GeoPoint[]): number;
 declare function computeArea(path: GeoPoint[]): number;
 declare function interpolate({ from, to, fraction, }: {
