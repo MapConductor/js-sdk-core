@@ -117,7 +117,7 @@ export function createPolygonState(params: {
     // 最大4回 unionHoleRings が走る（unionHoleRings は CW に巻き直すため再入力で再処理になる）。
     let holes = params.holes ?? [];
     let strokeColor = params.strokeColor ?? "#000000";
-    let strokeWidth = params.strokeWidth ?? 2;
+    let strokeWidth = params.strokeWidth ?? 1;
     let fillColor = params.fillColor ?? "transparent";
     let geodesic = params.geodesic ?? false;
     let clickable = params.clickable ?? true;

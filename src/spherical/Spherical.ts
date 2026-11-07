@@ -120,6 +120,11 @@ export function computeArea(path: GeoPoint[]): number {
     return Math.abs(computeSignedArea(path));
 }
 
+/**
+ * Signed area of a closed path in square meters.
+ * Positive for a clockwise ring, negative for a counter-clockwise ring
+ * (as seen on a north-up map, e.g. SW -> NW -> NE -> SE is clockwise and positive).
+ */
 export function computeSignedArea(path: GeoPoint[]): number {
     if (path.length < 3) return 0.0;
 

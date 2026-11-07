@@ -289,6 +289,11 @@ function authalicSinLatitude(latitudeDeg: number): number {
     return q / AUTHALIC_QP;
 }
 
+/**
+ * Ellipsoidal (authalic-sphere) signed area of a closed path in square meters.
+ * The sign follows `Spherical.computeSignedArea`: positive for a clockwise ring,
+ * negative for a counter-clockwise ring (as seen on a north-up map).
+ */
 export function computeSignedArea(path: GeoPoint[]): number {
     if (path.length < 3) return 0.0;
 
