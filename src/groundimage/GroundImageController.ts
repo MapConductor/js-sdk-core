@@ -11,6 +11,7 @@ import { GroundImageManagerInterface } from "./GroundImageManager";
 import { GroundImageAddParams, GroundImageChangeParams, GroundImageOverlayRenderer } from "./GroundImageOverlayRenderer";
 import { GroundImageEvent, OnGroundImageEventHandler, GroundImageState } from "./GroundImageState";
 import { Mutex } from "../base/Mutex";
+import { notifyOverlaysAdded } from "../overlay/OverlayAdded";
 
 function fingerPrintsEqual(
     a: ReturnType<GroundImageState["fingerPrint"]>,
@@ -71,6 +72,8 @@ export abstract class GroundImageController<ActualGroundImage>
     }
 
     async add(data: GroundImageState[]): Promise<void> {
+        // Newly on the map; their onAdded runs once the add is done.
+        const nowOnMap: GroundImageState[] = [];
         await this.semaphore.withLock(async () => {
             const previous = new Set(this.groundImageManager.allEntities().map((e) => e.state.id));
             const added: GroundImageAddParams[] = [];
@@ -115,6 +118,7 @@ export abstract class GroundImageController<ActualGroundImage>
                         this.groundImageManager.registerEntity(
                             createGroundImageEntity({ groundImage: img, state: added[i].state }),
                         );
+                        nowOnMap.push(added[i].state);
                     }
                 });
             }
@@ -132,6 +136,7 @@ export abstract class GroundImageController<ActualGroundImage>
 
             await this.renderer.onPostProcess();
         });
+        notifyOverlaysAdded(nowOnMap);
     }
 
     async update(state: GroundImageState): Promise<void> {

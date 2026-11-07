@@ -11,6 +11,7 @@ import { CircleManagerInterface } from "./CircleManager";
 import { CircleAddParams, CircleChangeParams, CircleOverlayRenderer } from "./CircleOverlayRenderer";
 import { CircleEvent, CircleState, OnCircleEventHandler } from "./CircleState";
 import { Mutex } from "../base/Mutex";
+import { notifyOverlaysAdded } from "../overlay/OverlayAdded";
 
 function fingerPrintsEqual(a: ReturnType<CircleState["fingerPrint"]>, b: ReturnType<CircleState["fingerPrint"]>): boolean {
     return (
@@ -70,6 +71,8 @@ export abstract class CircleController<ActualCircle>
     }
 
     async add(data: CircleState[]): Promise<void> {
+        // Newly on the map; their onAdded runs once the add is done.
+        const nowOnMap: CircleState[] = [];
         await this.semaphore.withLock(async () => {
             const previous = new Set(this.circleManager.allEntities().map((e) => e.state.id));
             const added: CircleAddParams[] = [];
@@ -111,6 +114,7 @@ export abstract class CircleController<ActualCircle>
                         this.circleManager.registerEntity(
                             createCircleEntity({ circle, state: added[i].state }),
                         );
+                        nowOnMap.push(added[i].state);
                     }
                 });
             }
@@ -128,6 +132,7 @@ export abstract class CircleController<ActualCircle>
 
             await this.renderer.onPostProcess();
         });
+        notifyOverlaysAdded(nowOnMap);
     }
 
     async update(state: CircleState): Promise<void> {

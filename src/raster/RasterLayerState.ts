@@ -32,6 +32,9 @@ export interface RasterLayerEvent {
 
 export type OnRasterLayerEventHandler = (event: RasterLayerEvent) => void;
 
+/** Receives the state whose layer was just added to the map. See `RasterLayerState.onAdded`. */
+export type OnRasterLayerAddedHandler = (state: RasterLayerState) => void;
+
 export interface RasterLayerState {
     readonly id: string;
     source: RasterLayerSource;
@@ -41,6 +44,15 @@ export interface RasterLayerState {
     userAgent: string;
     debug: boolean;
     extraHeaders: Record<string, string> | null;
+    /**
+     * Called once each time this layer goes from not being on the map to being on it,
+     * after the map SDK's layer for it has been created (its tiles may still be loading).
+     * Not called for an in-place change; called again if it is removed and added again.
+     * Clearing or destroying the map calls nothing. Runs after the add has finished.
+     *
+     * Not part of the id, fingerprint, equality or hash: replacing it redraws nothing.
+     */
+    onAdded: OnRasterLayerAddedHandler | null;
     fingerPrint(): RasterLayerFingerPrint;
     copy(opts?: RasterLayerStateCopyParams): RasterLayerState;
     equals(other: unknown): boolean;
@@ -57,6 +69,7 @@ export interface RasterLayerStateCopyParams {
     debug?: boolean;
     extraHeaders?: Record<string, string> | null;
     id?: string | null;
+    onAdded?: OnRasterLayerAddedHandler | null;
 }
 
 const fingerPrintEquals = (a: RasterLayerFingerPrint, b: RasterLayerFingerPrint): boolean =>
@@ -78,6 +91,7 @@ export function createRasterLayerState(params: {
     debug?: boolean;
     extraHeaders?: Record<string, string> | null;
     id?: string | null;
+    onAdded?: OnRasterLayerAddedHandler | null;
 }): RasterLayerState {
     let source = params.source;
     let opacity = params.opacity ?? 1.0;
@@ -86,6 +100,7 @@ export function createRasterLayerState(params: {
     let userAgent = params.userAgent ?? DEFAULT_USER_AGENT;
     let debug = params.debug ?? false;
     let extraHeaders = params.extraHeaders ?? null;
+    let onAdded = params.onAdded ?? null;
 
     const generateId = (): string => {
         let result = hashObj(source);
@@ -134,6 +149,7 @@ export function createRasterLayerState(params: {
             userAgent: opts.userAgent ?? userAgent,
             debug: opts.debug ?? debug,
             extraHeaders: "extraHeaders" in opts ? opts.extraHeaders ?? null : extraHeaders,
+            onAdded: "onAdded" in opts ? opts.onAdded ?? null : onAdded,
         });
 
     const equals = (other: unknown): boolean => {
@@ -157,6 +173,9 @@ export function createRasterLayerState(params: {
         set debug(v: boolean) { debug = v; emit(); },
         get extraHeaders() { return extraHeaders; },
         set extraHeaders(v: Record<string, string> | null) { extraHeaders = v; emit(); },
+        get onAdded() { return onAdded; },
+        // No emit: onAdded is not part of the fingerprint, so changing it redraws nothing.
+        set onAdded(v: OnRasterLayerAddedHandler | null) { onAdded = v; },
         fingerPrint,
         copy,
         equals,

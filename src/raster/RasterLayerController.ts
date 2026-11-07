@@ -11,6 +11,7 @@ import { RasterLayerAddParams, RasterLayerChangeParams, RasterLayerOverlayRender
 import { OnRasterLayerEventHandler, RasterLayerEvent, RasterLayerState } from "./RasterLayerState";
 import { RasterHeaderRuleSet, RasterHeaderSupport } from "./RasterHeaderRules";
 import { Mutex } from "../base/Mutex";
+import { notifyOverlaysAdded } from "../overlay/OverlayAdded";
 
 function fingerPrintsEqual(
     a: ReturnType<RasterLayerState["fingerPrint"]>,
@@ -98,6 +99,8 @@ export abstract class RasterLayerController<ActualLayer extends object>
 
     async add(data: RasterLayerState[]): Promise<void> {
         this.syncHeaders(data);
+        // Newly on the map; their onAdded runs once the add is done.
+        const nowOnMap: RasterLayerState[] = [];
         await this.semaphore.withLock(async () => {
             const previous = new Set(
                 this.rasterLayerManager.allEntities()
@@ -147,6 +150,7 @@ export abstract class RasterLayerController<ActualLayer extends object>
                         this.rasterLayerManager.registerEntity(
                             createRasterLayerEntity({ layer, state: added[i].state }),
                         );
+                        nowOnMap.push(added[i].state);
                     }
                 });
             }
@@ -165,6 +169,7 @@ export abstract class RasterLayerController<ActualLayer extends object>
             await this.renderer.onPostProcess();
         });
         this.syncHeaders();
+        notifyOverlaysAdded(nowOnMap);
     }
 
     async update(state: RasterLayerState): Promise<void> {
@@ -193,6 +198,7 @@ export abstract class RasterLayerController<ActualLayer extends object>
 
     async upsert(state: RasterLayerState): Promise<void> {
         this.syncHeaders([state]);
+        let added = false;
         await this.semaphore.withLock(async () => {
             this.upsertedIds.add(state.id);
             const prevEntity = this.rasterLayerManager.getEntity(state.id);
@@ -202,6 +208,7 @@ export abstract class RasterLayerController<ActualLayer extends object>
                     this.rasterLayerManager.registerEntity(
                         createRasterLayerEntity({ layer: layers[0], state }),
                     );
+                    added = true;
                 }
                 await this.renderer.onPostProcess();
                 return;
@@ -223,6 +230,7 @@ export abstract class RasterLayerController<ActualLayer extends object>
             }
             await this.renderer.onPostProcess();
         });
+        if (added) notifyOverlaysAdded([state]);
     }
 
     async removeById(id: string): Promise<void> {

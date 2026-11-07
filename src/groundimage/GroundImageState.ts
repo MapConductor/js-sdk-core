@@ -20,6 +20,9 @@ export interface GroundImageEvent {
 
 export type OnGroundImageEventHandler = (event: GroundImageEvent) => void;
 
+/** Receives the state whose overlay was just added to the map. See `GroundImageState.onAdded`. */
+export type OnGroundImageAddedHandler = (state: GroundImageState) => void;
+
 export interface GroundImageState {
     readonly id: string;
     bounds: GeoRectBounds;
@@ -37,6 +40,19 @@ export interface GroundImageState {
     clickable: boolean;
     extra: Serializable | null;
     onClick: OnGroundImageEventHandler | null;
+    /**
+     * Called once each time this overlay goes from not being on the map to being on it:
+     * after the map SDK's object for it has been created, or, when it is drawn in tiles,
+     * after the URL template of those tiles has been handed to the map as a raster layer
+     * (the tile images may still be loading then). Not called for an in-place change,
+     * nor when it moves between native drawing and tiles while staying on the map;
+     * called again if it is removed and added again. Clearing or destroying the map calls
+     * nothing. Runs after the add has finished, never from inside the drawing code.
+     *
+     * Like `onClick`, it is not part of the id, fingerprint, equality or hash: replacing
+     * it redraws nothing.
+     */
+    onAdded: OnGroundImageAddedHandler | null;
     fingerPrint(): GroundImageFingerPrint;
     copy(opts?: GroundImageStateCopyParams): GroundImageState;
     equals(other: unknown): boolean;
@@ -52,6 +68,7 @@ export interface GroundImageStateCopyParams {
     clickable?: boolean;
     extra?: Serializable | null;
     onClick?: OnGroundImageEventHandler | null;
+    onAdded?: OnGroundImageAddedHandler | null;
     id?: string | null;
 }
 
@@ -78,6 +95,7 @@ export function createGroundImageState(params: {
     id?: string | null;
     extra?: Serializable | null;
     onClick?: OnGroundImageEventHandler | null;
+    onAdded?: OnGroundImageAddedHandler | null;
 }): GroundImageState {
     let bounds = params.bounds;
     let imageUrl = params.imageUrl;
@@ -86,6 +104,7 @@ export function createGroundImageState(params: {
     let clickable = params.clickable ?? true;
     let extra = params.extra ?? null;
     let onClick = params.onClick ?? null;
+    let onAdded = params.onAdded ?? null;
 
     const generateId = (): string => {
         let result = hashObj(bounds);
@@ -138,6 +157,7 @@ export function createGroundImageState(params: {
             clickable: opts.clickable ?? clickable,
             extra: "extra" in opts ? opts.extra ?? null : extra,
             onClick: "onClick" in opts ? opts.onClick ?? null : onClick,
+            onAdded: "onAdded" in opts ? opts.onAdded ?? null : onAdded,
         });
 
     const equals = (other: unknown): boolean => {
@@ -161,6 +181,9 @@ export function createGroundImageState(params: {
         set extra(v: Serializable | null) { extra = v; emit(); },
         get onClick() { return onClick; },
         set onClick(v: OnGroundImageEventHandler | null) { onClick = v; emit(); },
+        get onAdded() { return onAdded; },
+        // No emit: onAdded is not part of the fingerprint, so changing it redraws nothing.
+        set onAdded(v: OnGroundImageAddedHandler | null) { onAdded = v; },
         fingerPrint,
         copy,
         equals,

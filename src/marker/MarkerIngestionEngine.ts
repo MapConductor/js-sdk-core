@@ -26,6 +26,13 @@ export interface MarkerIngestionResult<ActualMarker> {
      * ロック内で await すると他のマーカー操作をブロックし、アニメーション同士も直列化する）。
      */
     entitiesToAnimate: MarkerEntity<ActualMarker>[];
+    /**
+     * Markers that were not on the map before this ingest and are now: natively
+     * drawn ones whose `renderer.onAdd` returned a marker, and newly tiled ones.
+     * A tiled one is on the map only once the caller has handed the tiles to the
+     * map (`tiledDataChanged` is then true). The caller runs their `onAdded`.
+     */
+    addedStates: MarkerState[];
 }
 
 /** イベントループに1回制御を返す。android-sdk のバッチ間 `yield()` に対応する。 */
@@ -74,6 +81,7 @@ export async function ingestMarkers<ActualMarker>(params: {
     const updated: ChangeParams<ActualMarker>[] = [];
     const removedActualMarkers: MarkerEntity<ActualMarker>[] = [];
     const entitiesToAnimate: MarkerEntity<ActualMarker>[] = [];
+    const addedStates: MarkerState[] = [];
     let tiledDataChanged = false;
 
     for (const state of data) {
@@ -166,6 +174,7 @@ export async function ingestMarkers<ActualMarker>(params: {
             }
         } else if (wantsTiled) {
             tiledMarkerIds.add(state.id);
+            addedStates.push(state);
             markerManager.registerEntity(
                 createMarkerEntity<ActualMarker>({
                     marker: null,
@@ -211,6 +220,7 @@ export async function ingestMarkers<ActualMarker>(params: {
                 isRendered: true,
             });
             markerManager.registerEntity(entity);
+            addedStates.push(entity.state);
             onMarkerAdded?.(entity);
             if (entity.state.getAnimation() != null) entitiesToAnimate.push(entity);
         });
@@ -247,5 +257,6 @@ export async function ingestMarkers<ActualMarker>(params: {
         tiledDataChanged,
         hasTiledMarkers: tiledMarkerIds.size > 0,
         entitiesToAnimate,
+        addedStates,
     };
 }

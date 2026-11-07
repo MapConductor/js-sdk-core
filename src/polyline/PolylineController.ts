@@ -11,6 +11,7 @@ import { PolylineHitResult, PolylineManagerInterface } from "./PolylineManager";
 import { PolylineAddParams, PolylineChangeParams, PolylineOverlayRenderer } from "./PolylineOverlayRenderer";
 import { OnPolylineEventHandler, PolylineEvent, PolylineState } from "./PolylineState";
 import { Mutex } from "../base/Mutex";
+import { notifyOverlaysAdded } from "../overlay/OverlayAdded";
 
 function fingerPrintsEqual(
     a: ReturnType<PolylineState["fingerPrint"]>,
@@ -72,6 +73,8 @@ export abstract class PolylineController<ActualPolyline>
     }
 
     async add(data: PolylineState[]): Promise<void> {
+        // Newly on the map; their onAdded runs once the add is done.
+        const nowOnMap: PolylineState[] = [];
         await this.semaphore.withLock(async () => {
             const previous = new Set(this.polylineManager.allEntities().map((e) => e.state.id));
             const added: PolylineAddParams[] = [];
@@ -116,6 +119,7 @@ export abstract class PolylineController<ActualPolyline>
                         this.polylineManager.registerEntity(
                             createPolylineEntity({ polyline, state: added[i].state }),
                         );
+                        nowOnMap.push(added[i].state);
                     }
                 });
             }
@@ -133,6 +137,7 @@ export abstract class PolylineController<ActualPolyline>
 
             await this.renderer.onPostProcess();
         });
+        notifyOverlaysAdded(nowOnMap);
     }
 
     async update(state: PolylineState): Promise<void> {

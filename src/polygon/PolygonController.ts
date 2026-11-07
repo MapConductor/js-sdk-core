@@ -11,6 +11,7 @@ import { PolygonManagerInterface } from "./PolygonManager";
 import { PolygonAddParams, PolygonChangeParams, PolygonOverlayRenderer } from "./PolygonOverlayRenderer";
 import { PolygonEvent, OnPolygonEventHandler, PolygonState } from "./PolygonState";
 import { Mutex } from "../base/Mutex";
+import { notifyOverlaysAdded } from "../overlay/OverlayAdded";
 import type { PolygonTiler } from "./PolygonTiler";
 
 const NO_IDS: ReadonlySet<string> = new Set();
@@ -83,6 +84,8 @@ export abstract class PolygonController<ActualPolygon>
     }
 
     async add(data: PolygonState[]): Promise<void> {
+        // Newly on the map; their onAdded runs once the add is done.
+        const nowOnMap: PolygonState[] = [];
         await this.semaphore.withLock(async () => {
             const wasTiled = this.tiledIds;
             const tiled = this.tiler ? await this.tiler.route(data) : NO_IDS;
@@ -95,6 +98,9 @@ export abstract class PolygonController<ActualPolygon>
                     .map((e) => e.state.id)
                     .filter((id) => !wasTiled.has(id)),
             );
+            // On the map before this add, natively or in tiles. Moving between
+            // the two is not an add.
+            const nativeBefore = tiled.size > 0 ? new Set(previous) : previous;
             const added: PolygonAddParams[] = [];
             const updated: PolygonChangeParams<ActualPolygon>[] = [];
             const removed: PolygonEntity<ActualPolygon>[] = [];
@@ -140,6 +146,7 @@ export abstract class PolygonController<ActualPolygon>
                         this.polygonManager.registerEntity(
                             createPolygonEntity({ polygon, state: added[i].state }),
                         );
+                        if (!wasTiled.has(added[i].state.id)) nowOnMap.push(added[i].state);
                     }
                 });
             }
@@ -166,6 +173,8 @@ export abstract class PolygonController<ActualPolygon>
             }
             if (tiled.size > 0) {
                 for (const state of this.tiler!.tiledStates()) {
+                    // The tiles' template reached the map in route() (onTemplate).
+                    if (!wasTiled.has(state.id) && !nativeBefore.has(state.id)) nowOnMap.push(state);
                     this.polygonManager.registerEntity(
                         createPolygonEntity({ polygon: null as unknown as ActualPolygon, state }),
                     );
@@ -174,6 +183,7 @@ export abstract class PolygonController<ActualPolygon>
 
             await this.renderer.onPostProcess();
         });
+        notifyOverlaysAdded(nowOnMap);
     }
 
     async update(state: PolygonState): Promise<void> {
