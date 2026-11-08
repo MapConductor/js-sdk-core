@@ -32,6 +32,50 @@ export function densifyAndNormalize(
     return interpolated.map((point) => point.normalize());
 }
 
+/**
+ * ポリゴンのリング（外周・穴）を測地線（大圏）で密度化する。
+ *
+ * `WGS84Geodesic.createInterpolatePoints` は隣り合う点の間しか補間しないため、開いたリング
+ * （末尾 ≠ 先頭）を渡すと閉じる辺（末尾 → 先頭）が補間されず、描画側で閉じたときに直線の弦に
+ * なる。ポリゴンの輪郭はリングを閉じてからポリラインとして密度化するので、塗りと輪郭で
+ * 閉じる辺の形が食い違う。ここでは閉じる辺も含めて補間する。
+ *
+ * 入力が開いたリングなら開いたまま（末尾に先頭の重複点を付けない）、閉じたリングなら閉じた
+ * まま返す。正規化はしない。頂点 2 未満の入力はそのまま `createInterpolatePoints` に渡す。
+ */
+export function densifyGeodesicRing(
+    ring: GeoPoint[],
+    maxSegmentLength: number = 10000.0,
+): GeoPoint[] {
+    if (ring.length < 2 || isClosedRing(ring)) {
+        return WGS84Geodesic.createInterpolatePoints(ring, maxSegmentLength);
+    }
+    const densified = WGS84Geodesic.createInterpolatePoints(
+        [...ring, ring[0]],
+        maxSegmentLength,
+    );
+    return densified.slice(0, -1);
+}
+
+function isClosedRing(ring: GeoPoint[]): boolean {
+    const first = ring[0];
+    const last = ring[ring.length - 1];
+    return first.latitude === last.latitude && first.longitude === last.longitude;
+}
+
+/**
+ * リング用の densifyAndNormalize。geodesic のときは閉じる辺も補間する（densifyGeodesicRing）。
+ * geodesic=false は従来どおり densifyAndNormalize と同じ。
+ */
+function densifyRingAndNormalize(
+    ring: GeoPoint[],
+    geodesic: boolean,
+    maxSegmentLength: number = 10000.0,
+): GeoPoint[] {
+    if (!geodesic) return densifyAndNormalize(ring, false, maxSegmentLength);
+    return densifyGeodesicRing(ring, maxSegmentLength).map((point) => point.normalize());
+}
+
 // ─── 分割版パイプライン（経度 ±180 に制約のある SDK 向け） ─────────────────────
 //
 // 経度 ±180 を超える座標を受け付けない SDK は、密度化・正規化後に子午線で分割した複数
@@ -66,14 +110,14 @@ export function buildPolygonRings(
 ): PolygonRings {
     if (points.length < 3) return { outerRings: [], holeRings: [] };
     const outerRings = splitRingByMeridian(
-        densifyAndNormalize(points, geodesic),
+        densifyRingAndNormalize(points, geodesic),
         geodesic,
     ).filter((ring) => ring.length >= 3);
     const includeHoles = holes.length > 0 && outerRings.length === 1;
     const holeRings = includeHoles
         ? holes
               .filter((hole) => hole.length >= 3)
-              .map((hole) => densifyAndNormalize(hole, geodesic))
+              .map((hole) => densifyRingAndNormalize(hole, geodesic))
               .filter((hole) => hole.length >= 3)
         : [];
     return { outerRings, holeRings };
@@ -128,14 +172,14 @@ export function buildUnwrappedPolygonRings(
 ): PolygonRings {
     if (points.length < 3) return { outerRings: [], holeRings: [] };
     const outer = unwrapContinuous(
-        densifyAndNormalize(points, geodesic, maxSegmentLength),
+        densifyRingAndNormalize(points, geodesic, maxSegmentLength),
     );
     const anchor = outer[0].longitude;
     const holeRings = holes
         .filter((hole) => hole.length >= 3)
         .map((hole) =>
             unwrapContinuous(
-                densifyAndNormalize(hole, geodesic, maxSegmentLength),
+                densifyRingAndNormalize(hole, geodesic, maxSegmentLength),
                 anchor,
             ),
         )
