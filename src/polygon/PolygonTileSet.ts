@@ -35,6 +35,7 @@ export class PolygonTileSet {
     private version = 0;
     private registered = false;
     private pending = new Map<string, PolygonState>();
+    private pendingRemovals: number[] = [];
     private flushTimer: ReturnType<typeof setTimeout> | null = null;
 
     /**
@@ -107,6 +108,20 @@ export class PolygonTileSet {
         if (this.flushTimer == null) this.flushTimer = setTimeout(() => void this.flush(), UPDATE_COALESCE_MS);
     }
 
+    /**
+     * Takes one polygon out of the tiles. Its slot in the worker's list is
+     * left empty, so the others keep their indices and only the tiles it was
+     * in are drawn again.
+     */
+    remove(id: string): void {
+        const index = this.indexById.get(id);
+        if (index === undefined) return;
+        this.indexById.delete(id);
+        this.pending.delete(id);
+        this.pendingRemovals.push(index);
+        if (this.flushTimer == null) this.flushTimer = setTimeout(() => void this.flush(), UPDATE_COALESCE_MS);
+    }
+
     template(): string {
         return this.server.urlTemplate({
             routeId: this.routeId,
@@ -142,7 +157,9 @@ export class PolygonTileSet {
         const updates = [...this.pending.values()]
             .map((state) => ({ index: this.indexById.get(state.id), polygon: toSWPolygon(state) }))
             .filter((u): u is { index: number; polygon: SWPolygon } => u.index !== undefined);
+        for (const index of this.pendingRemovals) updates.push({ index, polygon: EMPTY_SW_POLYGON });
         this.pending.clear();
+        this.pendingRemovals = [];
         if (updates.length === 0 || !this.registered) return;
         if (!(await this.server.sendSWPolygonUpdates(this.routeId, updates))) return;
         this.version++;
@@ -153,8 +170,12 @@ export class PolygonTileSet {
         if (this.flushTimer != null) clearTimeout(this.flushTimer);
         this.flushTimer = null;
         this.pending.clear();
+        this.pendingRemovals = [];
     }
 }
+
+/** A polygon with no rings: the worker keeps its slot and draws nothing there. */
+const EMPTY_SW_POLYGON: SWPolygon = { rings: [], fill: 'transparent', stroke: 'transparent', strokeWidth: 0 };
 
 function toSWPolygon(state: PolygonState): SWPolygon {
     return {

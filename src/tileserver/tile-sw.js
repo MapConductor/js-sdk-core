@@ -206,6 +206,8 @@ function reversedRing(ring) {
 }
 
 function decodeSwPolygon(p) {
+    // No rings: a polygon taken out of the tiles, its slot kept so the others keep their indices.
+    if (p.rings.length === 0) return null;
     const rings = [];
     for (let r = 0; r < p.rings.length; r++) {
         let ring = toMercatorRing(decodePolyline6(p.rings[r]));
