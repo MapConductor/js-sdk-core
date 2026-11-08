@@ -150,6 +150,36 @@ export abstract class BaseMapViewController {
     this.overlayControllers.push(controller);
   }
 
+  /**
+   * `clearOverlays()` の中身。プロバイダは自分のコントローラを渡して呼ぶだけでよい。
+   *
+   * 1. `own` を渡された順に 1 つずつ clear する（今までプロバイダが並べていたもの）。
+   * 2. 続けて、登録済みのうち `own` に無く、スロットに参加している（`kind` を持つ）
+   *    コントローラを登録順に clear する。拡張が足すストラテジ駆動のマーカー
+   *    （MarkerClusterGroup や MarkerRenderingSupport で作った `StrategyMarkerController`）がここに入る。
+   *
+   * 以前はプロバイダの `clearOverlays()` が自分の 6 つしか clear しておらず、
+   * クラスタリングなどのマーカーは `clearOverlays()` の後も地図に残った。
+   * カメラ購読だけのために登録するもの（heatmap など、スロットに参加しないもの）は
+   * オーバーレイを持たないので触らない。
+   *
+   * android-sdk / ios-sdk の `clearOverlays()` も同じ範囲を clear する。
+   *
+   * @internal ドライバー実装点。
+   */
+  protected async clearOverlayControllers(
+    own: readonly { clear(): Promise<void> | void }[],
+  ): Promise<void> {
+    for (const controller of own) await controller.clear();
+    const ownSet = new Set<unknown>(own);
+    for (const controller of [...this.overlayControllers]) {
+      if (ownSet.has(controller)) continue;
+      if (!isSlottedOverlayController(controller)) continue;
+      if (typeof controller.clear !== 'function') continue;
+      await controller.clear();
+    }
+  }
+
   /** 登録を解除する。拡張コンポーネントのアンマウント時に呼ぶ。 */
   unregisterOverlayController(controller: OverlayControllerLike): void {
     const index = this.overlayControllers.indexOf(controller);

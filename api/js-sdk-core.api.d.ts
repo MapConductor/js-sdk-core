@@ -449,6 +449,11 @@ declare const CANONICAL_ORDER: readonly OverlayKind[];
 interface OverlayControllerLike {
     onCameraChanged?(mapCameraPosition: MapCameraPosition): Promise<void> | void;
     destroy?(): void;
+    /**
+     * 載せているものを全部外す。`BaseMapViewController.clearOverlayControllers` が呼ぶ
+     * （プロバイダ自身のもの以外は、スロットに参加しているものだけ）。
+     */
+    clear?(): Promise<void> | void;
     readonly kind?: OverlayKind;
     hasId?(id: string): boolean;
     compositionAny?(data: unknown[]): Promise<void>;
