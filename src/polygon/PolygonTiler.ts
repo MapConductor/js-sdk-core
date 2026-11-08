@@ -24,7 +24,8 @@ export function polygonTileRasterLayerState(template: string, tileSize = 256): R
  *    now in tiles; the controller keeps those in its `PolygonManager` (taps are
  *    resolved there, against the original shapes) but gives the map SDK nothing
  *    for them, and removes any native polygon it had drawn for one.
- * 2. {@link update} for an in-place change of a tiled polygon.
+ * 2. {@link update} for an in-place change of a tiled polygon, or {@link remove}
+ *    when the change means it can no longer be tiled.
  * 3. {@link onTemplate} is how the tiles reach the map: a URL template to show
  *    as a raster layer, or null to remove it. A provider with a RasterLayer
  *    controller hands {@link polygonTileRasterLayerState} to its `upsert`.
@@ -74,6 +75,20 @@ export class PolygonTiler {
     /** An in-place change of a tiled polygon; only the tiles it touches are redrawn. */
     update(state: PolygonState): void {
         this.tileSet.update(state);
+    }
+
+    /**
+     * Takes one polygon out of the tiles, for a change that left it no longer
+     * {@link PolygonTileSet.canTile}; only the tiles it was in are redrawn. The
+     * controller then hands it to the map SDK.
+     */
+    remove(id: string): void {
+        if (!this.tiled.has(id)) return;
+        const tiled = new Set(this.tiled);
+        tiled.delete(id);
+        this.tiled = tiled;
+        this.states = this.states.filter((state) => state.id !== id);
+        this.tileSet.remove(id);
     }
 
     async clear(): Promise<void> {

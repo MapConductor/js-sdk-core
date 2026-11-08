@@ -12,6 +12,7 @@ import { PolygonAddParams, PolygonChangeParams, PolygonOverlayRenderer } from ".
 import { PolygonEvent, OnPolygonEventHandler, PolygonState } from "./PolygonState";
 import { Mutex } from "../base/Mutex";
 import type { PolygonTiler } from "./PolygonTiler";
+import { PolygonTileSet } from "./PolygonTileSet";
 
 const NO_IDS: ReadonlySet<string> = new Set();
 
@@ -181,8 +182,26 @@ export abstract class PolygonController<ActualPolygon>
             const prevEntity = this.polygonManager.getEntity(state.id);
             if (!prevEntity) return;
             if (this.tiledIds.has(state.id)) {
-                this.polygonManager.registerEntity(createPolygonEntity({ polygon: prevEntity.polygon, state }));
-                this.tiler?.update(state);
+                if (PolygonTileSet.canTile(state)) {
+                    this.polygonManager.registerEntity(createPolygonEntity({ polygon: prevEntity.polygon, state }));
+                    this.tiler?.update(state);
+                    return;
+                }
+                // No longer drawable in a tile (geodesic, half the world wide, or
+                // under 3 points): the map SDK draws it from now on. Still on the
+                // map, so this is not an add. Whether the rest stay in tiles is
+                // left to the next add(), which decides tiling for the whole list.
+                const tiled = new Set(this.tiledIds);
+                tiled.delete(state.id);
+                this.tiledIds = tiled;
+                this.tiler?.remove(state.id);
+                const polygons = await this.renderer.onAdd([{ state }]);
+                if (polygons[0] != null) {
+                    this.polygonManager.registerEntity(createPolygonEntity({ polygon: polygons[0], state }));
+                } else {
+                    this.polygonManager.removeEntity(state.id);
+                }
+                await this.renderer.onPostProcess();
                 return;
             }
 
