@@ -33,28 +33,29 @@ export function densifyAndNormalize(
 }
 
 /**
- * ポリゴンのリング（外周・穴）を測地線（大圏）で密度化する。
+ * ポリゴンのリング（外周・穴）を、閉じる辺（末尾 → 先頭）も含めて密度化する。
  *
- * `WGS84Geodesic.createInterpolatePoints` は隣り合う点の間しか補間しないため、開いたリング
- * （末尾 ≠ 先頭）を渡すと閉じる辺（末尾 → 先頭）が補間されず、描画側で閉じたときに直線の弦に
+ * geodesic なら大圏（`WGS84Geodesic`）、そうでなければ緯度経度の線形補間（`Planar`）。
+ * どちらの `createInterpolatePoints` も隣り合う点の間しか補間しないため、開いたリング
+ * （末尾 ≠ 先頭）をそのまま渡すと閉じる辺だけが補間されず、描画側で閉じたときに直線の弦に
  * なる。ポリゴンの輪郭はリングを閉じてからポリラインとして密度化するので、塗りと輪郭で
- * 閉じる辺の形が食い違う。ここでは閉じる辺も含めて補間する。
+ * 閉じる辺の形が食い違う（geodesic=false でも、線形補間の辺はメルカトル上でわずかに曲がる）。
+ * ここでは閉じる辺も他の辺と同じ方式で補間する。
  *
  * 入力が開いたリングなら開いたまま（末尾に先頭の重複点を付けない）、閉じたリングなら閉じた
  * まま返す。正規化はしない。頂点 2 未満の入力はそのまま `createInterpolatePoints` に渡す。
  */
-export function densifyGeodesicRing(
+export function densifyPolygonRing(
     ring: GeoPoint[],
+    geodesic: boolean,
     maxSegmentLength: number = 10000.0,
 ): GeoPoint[] {
-    if (ring.length < 2 || isClosedRing(ring)) {
-        return WGS84Geodesic.createInterpolatePoints(ring, maxSegmentLength);
-    }
-    const densified = WGS84Geodesic.createInterpolatePoints(
-        [...ring, ring[0]],
-        maxSegmentLength,
-    );
-    return densified.slice(0, -1);
+    const densify = (points: GeoPoint[]): GeoPoint[] =>
+        geodesic
+            ? WGS84Geodesic.createInterpolatePoints(points, maxSegmentLength)
+            : Planar.createInterpolatePoints(points, maxSegmentLength);
+    if (ring.length < 2 || isClosedRing(ring)) return densify(ring);
+    return densify([...ring, ring[0]]).slice(0, -1);
 }
 
 function isClosedRing(ring: GeoPoint[]): boolean {
@@ -64,16 +65,17 @@ function isClosedRing(ring: GeoPoint[]): boolean {
 }
 
 /**
- * リング用の densifyAndNormalize。geodesic のときは閉じる辺も補間する（densifyGeodesicRing）。
- * geodesic=false は従来どおり densifyAndNormalize と同じ。
+ * リング用の densifyAndNormalize。閉じる辺も補間する（densifyPolygonRing）。
+ * densifyAndNormalize と同じく、maxSegmentLength は geodesic のときだけ使う（線形補間は 10 km）。
  */
 function densifyRingAndNormalize(
     ring: GeoPoint[],
     geodesic: boolean,
     maxSegmentLength: number = 10000.0,
 ): GeoPoint[] {
-    if (!geodesic) return densifyAndNormalize(ring, false, maxSegmentLength);
-    return densifyGeodesicRing(ring, maxSegmentLength).map((point) => point.normalize());
+    return densifyPolygonRing(ring, geodesic, geodesic ? maxSegmentLength : 10000.0).map((point) =>
+        point.normalize(),
+    );
 }
 
 // ─── 分割版パイプライン（経度 ±180 に制約のある SDK 向け） ─────────────────────

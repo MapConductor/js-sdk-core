@@ -1,5 +1,5 @@
 import { GeoPoint } from "../features";
-import { densifyGeodesicRing } from "../geometry/OverlayGeometry";
+import { densifyPolygonRing } from "../geometry/OverlayGeometry";
 import { PolygonEntity } from "./PolygonEntity";
 
 function normalizeLng(lng: number): number {
@@ -67,7 +67,7 @@ export class PolygonManager<ActualPolygon> implements PolygonManagerInterface<Ac
 
             let ring: GeoPoint[];
             try {
-                ring = state.geodesic ? densifyGeodesicRing(basePoints) : basePoints;
+                ring = state.geodesic ? densifyPolygonRing(basePoints, true) : basePoints;
             } catch {
                 ring = basePoints;
             }
@@ -81,7 +81,7 @@ export class PolygonManager<ActualPolygon> implements PolygonManagerInterface<Ac
                     if (hole.length < 3) continue;
                     let holeRing: GeoPoint[];
                     try {
-                        holeRing = state.geodesic ? densifyGeodesicRing(hole) : hole;
+                        holeRing = state.geodesic ? densifyPolygonRing(hole, true) : hole;
                     } catch {
                         holeRing = hole;
                     }
