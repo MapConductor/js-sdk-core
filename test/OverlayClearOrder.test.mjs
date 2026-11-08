@@ -2,10 +2,13 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+    AbstractMarkerController,
     CircleController,
     CircleManager,
     GroundImageController,
     GroundImageManager,
+    HexGeocellImpl,
+    MarkerManager,
     PolygonController,
     PolygonManager,
     PolylineController,
@@ -17,6 +20,7 @@ import {
     createGeoPoint,
     createGeoRectBounds,
     createGroundImageState,
+    createMarkerState,
     createPolygonState,
     createPolylineState,
     createRasterLayerState,
@@ -46,6 +50,7 @@ class GlRenderer {
     async onAdd(data) { return data.map((p) => p.state.id); }
     async onChange(data) { return data.map((p) => p.current.state.id); }
     async onRemove(_data) {}
+    async onAnimate(_entity) {}
     async onCameraChanged(_camera) {}
     async onPostProcess() { this.drawn = this.manager.allEntities().map((e) => e.state.id).sort(); }
 }
@@ -99,6 +104,16 @@ const kinds = [
         states: () => [
             createRasterLayerState({ source: RasterLayerSource.UrlTemplate({ template: 'https://example.com/a/{z}/{x}/{y}.png' }), id: 'p1' }),
             createRasterLayerState({ source: RasterLayerSource.UrlTemplate({ template: 'https://example.com/b/{z}/{x}/{y}.png' }), id: 'p2' }),
+        ],
+    },
+    {
+        // MapLibre / Mapbox などのマーカーの描画担当も onRemove では地図に触らない。
+        name: 'marker',
+        make: (manager, renderer) => new (class extends AbstractMarkerController {})({ markerManager: manager, renderer }),
+        manager: () => new MarkerManager(HexGeocellImpl.defaultGeocell()),
+        states: () => [
+            createMarkerState({ position: a, id: 'p1' }),
+            createMarkerState({ position: b, id: 'p2' }),
         ],
     },
 ];
