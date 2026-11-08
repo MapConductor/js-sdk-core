@@ -253,3 +253,22 @@ test('タイルにできる変更はタイルのまま（地図 SDK には渡さ
   assert.ok((await tileFills(template(), T.z, T.x, T.y)).includes('rgba(9,9,9,1)'));
   await controller.clear();
 });
+
+test('タイルから地図 SDK の描画へ移っても onAdded は呼ばれない（地図に載ったまま）', async () => {
+  const { controller, native } = setup();
+  const list = tokyo();
+  const added = [];
+  for (const s of list) s.onAdded = (state) => added.push(state.id);
+  await controller.add(list);
+  assert.deepEqual(added.sort(), ['a', 'b', 'c', 'osaka'], 'once each, in tiles');
+  added.length = 0;
+
+  list[0].geodesic = true;
+  await controller.update(list[0]);
+  await settle();
+  assert.deepEqual(native.added, ['a']);
+  // The same list again: still on the map, natively now.
+  await controller.add(list);
+  assert.deepEqual(added, []);
+  await controller.clear();
+});
