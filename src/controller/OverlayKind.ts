@@ -8,7 +8,7 @@
  * かといってコンストラクタを持たせると、状態型がプロバイダ固有になったときに破綻する。
  * 種別という別の軸で持つ。
  *
- * **描画順（zIndex）とは別軸**であることに注意。現状 polygon(3) > groundImage(2) だが、
+ * **描画順（{@link OVERLAY_STACK_ORDER}）とは別軸**であることに注意。重なりは groundImage が polygon の下だが、
  * クリックの探索は groundImage が先。
  *
  * android-sdk / ios-sdk にも同名・同じ並びで置く。

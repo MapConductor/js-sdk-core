@@ -30,7 +30,8 @@ function fingerPrintsEqual(a: ReturnType<CircleState["fingerPrint"]>, b: ReturnT
 export abstract class CircleController<ActualCircle>
     implements SlottedOverlayController, OverlayController<CircleState, CircleEntity<ActualCircle>, CircleEvent>
 {
-    readonly zIndex: number = 3;
+    // Above the polygons (3), under the polylines (5): OVERLAY_STACK_ORDER.
+    readonly zIndex: number = 4;
     public readonly circleManager: CircleManagerInterface<ActualCircle>;
     public readonly renderer: CircleOverlayRenderer<ActualCircle>;
     public clickListener: OnCircleEventHandler | null;
