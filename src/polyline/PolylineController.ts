@@ -161,8 +161,10 @@ export abstract class PolylineController<ActualPolyline>
     async clear(): Promise<void> {
         await this.semaphore.withLock(async () => {
             await this.renderer.onRemove(this.polylineManager.allEntities());
-            await this.renderer.onPostProcess();
+            // manager を空にしてから onPostProcess を呼ぶ。GL 系の描画担当は remove では何もせず、
+            // onPostProcess で manager の全部を描き直すので、逆の順だと clear() 後も地図に残る。
             this.polylineManager.clear();
+            await this.renderer.onPostProcess();
         });
     }
 
