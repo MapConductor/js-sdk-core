@@ -537,6 +537,8 @@ interface RasterLayerEvent {
     state: RasterLayerState;
 }
 type OnRasterLayerEventHandler = (event: RasterLayerEvent) => void;
+/** Receives the state whose layer was just added to the map. See `RasterLayerState.onAdded`. */
+type OnRasterLayerAddedHandler = (state: RasterLayerState) => void;
 interface RasterLayerState {
     readonly id: string;
     source: RasterLayerSource;
@@ -546,6 +548,15 @@ interface RasterLayerState {
     userAgent: string;
     debug: boolean;
     extraHeaders: Record<string, string> | null;
+    /**
+     * Called once each time this layer goes from not being on the map to being on it,
+     * after the map SDK's layer for it has been created (its tiles may still be loading).
+     * Not called for an in-place change; called again if it is removed and added again.
+     * Clearing or destroying the map calls nothing. Runs after the add has finished.
+     *
+     * Not part of the id, fingerprint, equality or hash: replacing it redraws nothing.
+     */
+    onAdded: OnRasterLayerAddedHandler | null;
     fingerPrint(): RasterLayerFingerPrint;
     copy(opts?: RasterLayerStateCopyParams): RasterLayerState;
     equals(other: unknown): boolean;
@@ -563,6 +574,7 @@ interface RasterLayerStateCopyParams {
     debug?: boolean;
     extraHeaders?: Record<string, string> | null;
     id?: string | null;
+    onAdded?: OnRasterLayerAddedHandler | null;
 }
 declare function createRasterLayerState(params: {
     source: RasterLayerSource;
@@ -573,6 +585,7 @@ declare function createRasterLayerState(params: {
     debug?: boolean;
     extraHeaders?: Record<string, string> | null;
     id?: string | null;
+    onAdded?: OnRasterLayerAddedHandler | null;
 }): RasterLayerState;
 
 interface TileRequest {
@@ -665,6 +678,16 @@ interface SWPolygon {
     readonly stroke: string;
     readonly strokeWidth: number;
 }
+/**
+ * One polyline as the tile service worker draws it: an open path as a
+ * polyline6 string (Encoded Polyline at 1e-6 degrees), stroked `strokeWidth`
+ * CSS pixels wide with round caps and joins. An empty path draws nothing.
+ */
+interface SWPolyline {
+    readonly path: string;
+    readonly stroke: string;
+    readonly strokeWidth: number;
+}
 declare class LocalTileServer {
     readonly baseUrl: string;
     private readonly providers;
@@ -738,6 +761,17 @@ declare class LocalTileServer {
     sendSWPolygonUpdates(routeId: string, updates: readonly {
         index: number;
         polygon: SWPolygon;
+    }[]): Promise<boolean>;
+    /**
+     * Hand the service worker the polylines it draws for `routeId`
+     * (see `PolylineTileSet`). Resolves once it has them; false when there is
+     * no controlling service worker.
+     */
+    sendSWPolylinesAndWait(routeId: string, polylines: readonly SWPolyline[]): Promise<boolean>;
+    /** Replace some of a route's polylines in place; `index` is their position in the registered list. */
+    sendSWPolylineUpdates(routeId: string, updates: readonly {
+        index: number;
+        polyline: SWPolyline;
     }[]): Promise<boolean>;
     private postToSWAndWait;
     private postToSW;
@@ -1267,6 +1301,30 @@ declare abstract class MapViewBase<TState extends MapViewStateInterface<MapDesig
     protected abstract createController(holder: THolder): Promise<TController>;
 }
 
+/**
+ * Options for polyline tiling.
+ *
+ * When enabled and a map holds enough polylines, they are drawn into raster
+ * tiles by the tile service worker instead of being handed to the map SDK one
+ * by one. Taps are still resolved against the original paths in
+ * `PolylineManager`, so tiling changes how polylines look, never what a tap hits.
+ *
+ * The counterpart of {@link PolygonTilingOptions}, with the same thresholds.
+ */
+interface PolylineTilingOptions {
+    readonly enabled: boolean;
+    /** Tile once a map holds at least this many polylines… */
+    readonly minPolylineCount: number;
+    /** …or at least this many vertices across them, whichever comes first. */
+    readonly minVertexCount: number;
+}
+declare namespace PolylineTilingOptions {
+    const Default: PolylineTilingOptions;
+    const Disabled: PolylineTilingOptions;
+    /** The one place the threshold is decided; callers must not restate it. */
+    function shouldUseTiles(options: PolylineTilingOptions, polylineCount: number, vertexCount: number): boolean;
+}
+
 type OnMapInitializedHandler = () => void;
 /**
  * Core controller interface that all map SDK modules must implement.
@@ -1319,6 +1377,16 @@ interface MapViewControllerInterface {
     registerOverlayController?(controller: OverlayControllerLike): void;
     /** 登録を解除する。`BaseMapViewController` が実装を提供する。 */
     unregisterOverlayController?(controller: OverlayControllerLike): void;
+    /**
+     * Replaces when this map draws its polylines as tiles (the provider's
+     * `polylineTilingOptions` set it when the map was created). It takes effect
+     * the next time the polylines are handed to the map, which decides again for
+     * the whole list; polylines that then move between tiles and native drawing
+     * stay on the map, and their `onAdded` is not called again. Nothing happens
+     * on a map whose provider does not tile polylines.
+     * `BaseMapViewController` が実装を提供する。
+     */
+    setPolylineTilingOptions?(options: PolylineTilingOptions): void;
     /**
      * 範囲が収まるようにカメラを合わせる。
      * 引数は android-sdk の `fitBounds(bounds, padding: Int)` に揃えてある。
@@ -2169,6 +2237,19 @@ interface MarkerState {
     onDragEnd: OnMarkerEventHandler | null;
     onAnimateStart: OnMarkerEventHandler | null;
     onAnimateEnd: OnMarkerEventHandler | null;
+    /**
+     * Called once each time this marker goes from not being on the map to being on it:
+     * after the map SDK's marker has been created, or, when it is drawn in tiles, after
+     * the URL template of those tiles has been handed to the map as a raster layer (the
+     * tile images may still be loading then). Not called for an in-place change, nor
+     * when the marker moves between native drawing and tiles while staying on the map;
+     * called again if it is removed and added again. Clearing or destroying the map calls
+     * nothing. Runs after the add has finished, never from inside the drawing code.
+     *
+     * Like `onClick`, it is not part of the id, fingerprint, equality or hash: replacing
+     * it redraws nothing.
+     */
+    onAdded: OnMarkerEventHandler | null;
     animate(animation: MarkerAnimation | null): void;
     getAnimation(): MarkerAnimation | null;
     setPosition(position: GeoPoint): void;
@@ -2199,6 +2280,7 @@ interface MarkerStateCopyParams {
     onDragEnd?: OnMarkerEventHandler | null;
     onAnimateStart?: OnMarkerEventHandler | null;
     onAnimateEnd?: OnMarkerEventHandler | null;
+    onAdded?: OnMarkerEventHandler | null;
 }
 interface CreateMarkerStateParams {
     position: GeoPoint;
@@ -2215,6 +2297,7 @@ interface CreateMarkerStateParams {
     onDragEnd?: OnMarkerEventHandler | null;
     onAnimateStart?: OnMarkerEventHandler | null;
     onAnimateEnd?: OnMarkerEventHandler | null;
+    onAdded?: OnMarkerEventHandler | null;
 }
 declare function createMarkerState(params: CreateMarkerStateParams): MarkerState;
 declare const fingerPrintEquals: (left: MarkerFingerPrint, right: MarkerFingerPrint) => boolean;
@@ -2234,6 +2317,8 @@ interface PolylineEvent {
     clicked: GeoPoint;
 }
 type OnPolylineEventHandler = (event: PolylineEvent) => void;
+/** Receives the state whose overlay was just added to the map. See `PolylineState.onAdded`. */
+type OnPolylineAddedHandler = (state: PolylineState) => void;
 interface PolylineState {
     readonly id: string;
     points: GeoPoint[];
@@ -2252,6 +2337,19 @@ interface PolylineState {
     zIndex: number;
     extra: Serializable | null;
     onClick: OnPolylineEventHandler | null;
+    /**
+     * Called once each time this overlay goes from not being on the map to being on it:
+     * after the map SDK's object for it has been created, or, when it is drawn in tiles,
+     * after the URL template of those tiles has been handed to the map as a raster layer
+     * (the tile images may still be loading then). Not called for an in-place change,
+     * nor when it moves between native drawing and tiles while staying on the map;
+     * called again if it is removed and added again. Clearing or destroying the map calls
+     * nothing. Runs after the add has finished, never from inside the drawing code.
+     *
+     * Like `onClick`, it is not part of the id, fingerprint, equality or hash: replacing
+     * it redraws nothing.
+     */
+    onAdded: OnPolylineAddedHandler | null;
     fingerPrint(): PolylineFingerPrint;
     copy(opts?: PolylineStateCopyParams): PolylineState;
     equals(other: unknown): boolean;
@@ -2270,6 +2368,7 @@ interface PolylineStateCopyParams {
     zIndex?: number;
     extra?: Serializable | null;
     onClick?: OnPolylineEventHandler | null;
+    onAdded?: OnPolylineAddedHandler | null;
 }
 declare function createPolylineState(params: {
     points: GeoPoint[];
@@ -2281,6 +2380,7 @@ declare function createPolylineState(params: {
     zIndex?: number;
     extra?: Serializable | null;
     onClick?: OnPolylineEventHandler | null;
+    onAdded?: OnPolylineAddedHandler | null;
 }): PolylineState;
 
 declare abstract class AbstractMarkerOverlayRenderer<MapViewHolderType extends MapViewHolder<unknown, unknown>, ActualMarker> implements MarkerOverlayRenderer<ActualMarker> {
@@ -2962,6 +3062,13 @@ interface MarkerIngestionResult<ActualMarker> {
      * ロック内で await すると他のマーカー操作をブロックし、アニメーション同士も直列化する）。
      */
     entitiesToAnimate: MarkerEntity<ActualMarker>[];
+    /**
+     * Markers that were not on the map before this ingest and are now: natively
+     * drawn ones whose `renderer.onAdd` returned a marker, and newly tiled ones.
+     * A tiled one is on the map only once the caller has handed the tiles to the
+     * map (`tiledDataChanged` is then true). The caller runs their `onAdded`.
+     */
+    addedStates: MarkerState[];
 }
 /**
  * マーカー取り込みの共有ロジック。
@@ -3614,6 +3721,8 @@ interface PolygonEvent {
     clicked: GeoPoint;
 }
 type OnPolygonEventHandler = (event: PolygonEvent) => void;
+/** Receives the state whose overlay was just added to the map. See `PolygonState.onAdded`. */
+type OnPolygonAddedHandler = (state: PolygonState) => void;
 interface PolygonState {
     readonly id: string;
     points: GeoPoint[];
@@ -3634,6 +3743,19 @@ interface PolygonState {
     zIndex: number;
     extra: Serializable | null;
     onClick: OnPolygonEventHandler | null;
+    /**
+     * Called once each time this overlay goes from not being on the map to being on it:
+     * after the map SDK's object for it has been created, or, when it is drawn in tiles,
+     * after the URL template of those tiles has been handed to the map as a raster layer
+     * (the tile images may still be loading then). Not called for an in-place change,
+     * nor when it moves between native drawing and tiles while staying on the map;
+     * called again if it is removed and added again. Clearing or destroying the map calls
+     * nothing. Runs after the add has finished, never from inside the drawing code.
+     *
+     * Like `onClick`, it is not part of the id, fingerprint, equality or hash: replacing
+     * it redraws nothing.
+     */
+    onAdded: OnPolygonAddedHandler | null;
     fingerPrint(): PolygonFingerPrint;
     copy(opts?: PolygonStateCopyParams): PolygonState;
     equals(other: unknown): boolean;
@@ -3654,6 +3776,7 @@ interface PolygonStateCopyParams {
     zIndex?: number;
     extra?: Serializable | null;
     onClick?: OnPolygonEventHandler | null;
+    onAdded?: OnPolygonAddedHandler | null;
 }
 declare function createPolygonState(params: {
     points: GeoPoint[];
@@ -3667,6 +3790,7 @@ declare function createPolygonState(params: {
     zIndex?: number;
     extra?: Serializable | null;
     onClick?: OnPolygonEventHandler | null;
+    onAdded?: OnPolygonAddedHandler | null;
 }): PolygonState;
 
 interface CircleFingerPrint {
@@ -3686,6 +3810,8 @@ interface CircleEvent {
     clicked: GeoPoint;
 }
 type OnCircleEventHandler = (event: CircleEvent) => void;
+/** Receives the state whose overlay was just added to the map. See `CircleState.onAdded`. */
+type OnCircleAddedHandler = (state: CircleState) => void;
 interface CircleState {
     readonly id: string;
     center: GeoPoint;
@@ -3698,6 +3824,19 @@ interface CircleState {
     extra: Serializable | null;
     zIndex: number | null;
     onClick: OnCircleEventHandler | null;
+    /**
+     * Called once each time this overlay goes from not being on the map to being on it:
+     * after the map SDK's object for it has been created, or, when it is drawn in tiles,
+     * after the URL template of those tiles has been handed to the map as a raster layer
+     * (the tile images may still be loading then). Not called for an in-place change,
+     * nor when it moves between native drawing and tiles while staying on the map;
+     * called again if it is removed and added again. Clearing or destroying the map calls
+     * nothing. Runs after the add has finished, never from inside the drawing code.
+     *
+     * Like `onClick`, it is not part of the id, fingerprint, equality or hash: replacing
+     * it redraws nothing.
+     */
+    onAdded: OnCircleAddedHandler | null;
     fingerPrint(): CircleFingerPrint;
     copy(opts?: CircleStateCopyParams): CircleState;
     equals(other: unknown): boolean;
@@ -3717,6 +3856,7 @@ interface CircleStateCopyParams {
     extra?: Serializable | null;
     zIndex?: number | null;
     onClick?: OnCircleEventHandler | null;
+    onAdded?: OnCircleAddedHandler | null;
     id?: string | null;
 }
 declare function createCircleState(params: {
@@ -3730,6 +3870,7 @@ declare function createCircleState(params: {
     extra?: Serializable | null;
     zIndex?: number | null;
     onClick?: OnCircleEventHandler | null;
+    onAdded?: OnCircleAddedHandler | null;
     id?: string | null;
 }): CircleState;
 
@@ -3747,6 +3888,8 @@ interface GroundImageEvent {
     clicked: GeoPoint | null;
 }
 type OnGroundImageEventHandler = (event: GroundImageEvent) => void;
+/** Receives the state whose overlay was just added to the map. See `GroundImageState.onAdded`. */
+type OnGroundImageAddedHandler = (state: GroundImageState) => void;
 interface GroundImageState {
     readonly id: string;
     bounds: GeoRectBounds;
@@ -3764,6 +3907,19 @@ interface GroundImageState {
     clickable: boolean;
     extra: Serializable | null;
     onClick: OnGroundImageEventHandler | null;
+    /**
+     * Called once each time this overlay goes from not being on the map to being on it:
+     * after the map SDK's object for it has been created, or, when it is drawn in tiles,
+     * after the URL template of those tiles has been handed to the map as a raster layer
+     * (the tile images may still be loading then). Not called for an in-place change,
+     * nor when it moves between native drawing and tiles while staying on the map;
+     * called again if it is removed and added again. Clearing or destroying the map calls
+     * nothing. Runs after the add has finished, never from inside the drawing code.
+     *
+     * Like `onClick`, it is not part of the id, fingerprint, equality or hash: replacing
+     * it redraws nothing.
+     */
+    onAdded: OnGroundImageAddedHandler | null;
     fingerPrint(): GroundImageFingerPrint;
     copy(opts?: GroundImageStateCopyParams): GroundImageState;
     equals(other: unknown): boolean;
@@ -3780,6 +3936,7 @@ interface GroundImageStateCopyParams {
     clickable?: boolean;
     extra?: Serializable | null;
     onClick?: OnGroundImageEventHandler | null;
+    onAdded?: OnGroundImageAddedHandler | null;
     id?: string | null;
 }
 declare const GROUND_IMAGE_DEFAULT_TILE_SIZE = 512;
@@ -3792,6 +3949,7 @@ declare function createGroundImageState(params: {
     id?: string | null;
     extra?: Serializable | null;
     onClick?: OnGroundImageEventHandler | null;
+    onAdded?: OnGroundImageAddedHandler | null;
 }): GroundImageState;
 
 /**
@@ -3844,6 +4002,11 @@ declare abstract class BaseMapViewController {
      * `BaseMapViewController.registerOverlayController` に対応する。
      */
     registerOverlayController(controller: OverlayControllerLike): void;
+    /**
+     * Replaces the polyline tiling options of this map's polyline controller.
+     * See `MapViewControllerInterface.setPolylineTilingOptions`.
+     */
+    setPolylineTilingOptions(options: PolylineTilingOptions): void;
     /** 登録を解除する。拡張コンポーネントのアンマウント時に呼ぶ。 */
     unregisterOverlayController(controller: OverlayControllerLike): void;
     /**
@@ -4399,9 +4562,7 @@ declare function polygonTileRasterLayerState(template: string, tileSize?: number
 declare class PolygonTiler {
     readonly options: PolygonTilingOptions;
     onTemplate: ((template: string | null, tileSize: number) => void | Promise<void>) | null;
-    private readonly tileSet;
-    private tiled;
-    private states;
+    private readonly shapes;
     constructor(options?: PolygonTilingOptions);
     /** Re-decides tiling for `data` and resolves to the ids drawn as tiles. */
     route(data: readonly PolygonState[]): Promise<ReadonlySet<string>>;
@@ -4541,14 +4702,8 @@ declare function decodePolyline(encoded: string, precision?: number): number[];
 declare class PolygonTileSet {
     readonly routeId: string;
     onTemplateChanged: ((template: string) => void) | null;
-    private readonly server;
-    private readonly pixelRatio;
-    private indexById;
-    private version;
-    private registered;
-    private pending;
-    private pendingRemovals;
-    private flushTimer;
+    private readonly shapes;
+    constructor();
     /**
      * Whether a polygon can be drawn in a tile. Geodesic edges are curves the
      * tile does not trace, and a ring spanning half the world or more crosses
@@ -4577,9 +4732,6 @@ declare class PolygonTileSet {
     template(): string;
     get tileSize(): number;
     dispose(): void;
-    private fetchTile;
-    private flush;
-    private cancelPending;
 }
 
 interface PolylineEntity<ActualPolyline> {
@@ -4647,6 +4799,7 @@ interface PolylineManagerInterface<ActualPolyline> {
 }
 declare class PolylineManager<ActualPolyline> implements PolylineManagerInterface<ActualPolyline> {
     private readonly entities;
+    private readonly boxes;
     registerEntity(entity: PolylineEntity<ActualPolyline>): void;
     updateEntity(entity: PolylineEntity<ActualPolyline>): void;
     removeEntity(id: string): PolylineEntity<ActualPolyline> | null;
@@ -4654,7 +4807,71 @@ declare class PolylineManager<ActualPolyline> implements PolylineManagerInterfac
     hasEntity(id: string): boolean;
     allEntities(): PolylineEntity<ActualPolyline>[];
     clear(): void;
+    /**
+     * The clickable polyline nearest to `position` that `position` hits, and the
+     * point on it nearest to `position`; null when it hits none.
+     *
+     * A tap hits a line when it is within the size of a finger
+     * (`TAP_TOLERANCE_PX`) of the line's edge: of its centre line plus half its
+     * `strokeWidth`, both in CSS pixels at the camera's zoom. Lines are tested
+     * as they were given (geodesic ones along the geodesic), never as a tile
+     * drew them. A line whose bounding box, grown by that distance, does not
+     * hold the tap is skipped without looking at its segments.
+     */
     find(position: GeoPoint, cameraPosition?: MapCameraPosition | null): PolylineHitResult<ActualPolyline> | null;
+    /**
+     * Whether `position` is within `thresholdMeters` of the line's bounding box.
+     * Generous on purpose (it only skips work): a false "maybe" costs a segment
+     * test, a false "no" would lose a hit.
+     */
+    private mayHit;
+    private boxOf;
+}
+
+/** The id of the raster layer that shows tiled polylines. */
+declare const POLYLINE_TILE_LAYER_ID = "mc-polyline-tiles";
+/** The raster layer state for tiled polylines at `template`. */
+declare function polylineTileRasterLayerState(template: string, tileSize?: number): RasterLayerState;
+/**
+ * Decides which of a map's polylines are drawn as tiles, keeps them registered
+ * with the tile service worker, and tells the provider where the tiles are.
+ * The counterpart of {@link PolygonTiler}, used the same way:
+ * 1. {@link route} with the full list on every composition. It returns the ids
+ *    now in tiles; the controller keeps those in its `PolylineManager` (taps are
+ *    resolved there, against the original paths) but gives the map SDK nothing
+ *    for them, and removes any native polyline it had drawn for one.
+ * 2. {@link update} for an in-place change of a tiled polyline, or {@link remove}
+ *    when the change means it can no longer be tiled.
+ * 3. {@link onTemplate} is how the tiles reach the map: a URL template to show
+ *    as a raster layer, or null to remove it. A provider with a RasterLayer
+ *    controller hands {@link polylineTileRasterLayerState} to its `upsert`.
+ *    The layer belongs to the polyline band: over the circles, under the
+ *    natively drawn polylines and the markers.
+ */
+declare class PolylineTiler {
+    options: PolylineTilingOptions;
+    onTemplate: ((template: string | null, tileSize: number) => void | Promise<void>) | null;
+    private readonly shapes;
+    /**
+     * @param options When to tile. It may be replaced later: the next {@link route}
+     *   decides again with the new value (the polylines already routed stay as
+     *   they are until then).
+     */
+    constructor(options?: PolylineTilingOptions);
+    /** Re-decides tiling for `data` and resolves to the ids drawn as tiles. */
+    route(data: readonly PolylineState[]): Promise<ReadonlySet<string>>;
+    /** The states drawn as tiles, as of the last {@link route}. */
+    tiledStates(): readonly PolylineState[];
+    isTiled(id: string): boolean;
+    /** An in-place change of a tiled polyline; only the tiles it touches are redrawn. */
+    update(state: PolylineState): void;
+    /**
+     * Takes one polyline out of the tiles, for a change that left it no longer
+     * {@link PolylineTileSet.canTile}; only the tiles it was in are redrawn. The
+     * controller then hands it to the map SDK.
+     */
+    remove(id: string): void;
+    clear(): Promise<void>;
 }
 
 declare abstract class PolylineController<ActualPolyline> implements SlottedOverlayController, OverlayController<PolylineState, PolylineEntity<ActualPolyline>, PolylineEvent> {
@@ -4662,6 +4879,14 @@ declare abstract class PolylineController<ActualPolyline> implements SlottedOver
     readonly polylineManager: PolylineManagerInterface<ActualPolyline>;
     readonly renderer: PolylineOverlayRenderer<ActualPolyline>;
     clickListener: OnPolylineEventHandler | null;
+    /**
+     * Set by a provider that can show polyline tiles (see {@link PolylineTiler}).
+     * Polylines it tiles stay in {@link polylineManager}, for taps, with no
+     * native overlay: their entity's `polyline` is null and the renderer never
+     * sees them.
+     */
+    tiler: PolylineTiler | null;
+    private tiledIds;
     private semaphore;
     private currentCameraPosition;
     constructor({ polylineManager, renderer, clickListener, }: {
@@ -4705,6 +4930,59 @@ declare class PolylineOverlay implements MapOverlayInterface<PolylineState> {
     constructor(collector: OverlayCollector<PolylineState>);
     subscribe(fn: (data: ReadonlyMap<string, PolylineState>) => void): () => void;
     render(data: ReadonlyMap<string, PolylineState>, controller: MapViewControllerInterface): Promise<void>;
+}
+
+/**
+ * The polylines of one map that are drawn as raster tiles, and their route on
+ * the tile service worker. The counterpart of {@link PolygonTileSet}.
+ *
+ * A tile draws each polyline as one open path, `strokeWidth` CSS pixels wide
+ * whatever the zoom, with round caps and joins, and draws the part of a line
+ * that overhangs the tile too, so a line crossing a tile edge continues in the
+ * next tile at the same place and width. A line shorter than a pixel at a zoom
+ * is drawn as a dot as wide as the line.
+ *
+ * In-place changes go through {@link update}; each one ends in a new template
+ * (with a new version in it), reported to {@link onTemplateChanged}.
+ *
+ * Needs a service worker that can draw with OffscreenCanvas; {@link setPolylines}
+ * resolves to null without one, and the provider should draw the polylines
+ * itself instead.
+ */
+declare class PolylineTileSet {
+    readonly routeId: string;
+    onTemplateChanged: ((template: string) => void) | null;
+    private readonly shapes;
+    constructor();
+    /**
+     * Whether a polyline can be drawn in a tile. Geodesic segments are curves
+     * the tile does not trace, a line spanning half the world or more crosses
+     * the antimeridian, and a single point is not a line; the map SDK draws
+     * all of them.
+     */
+    static canTile(state: PolylineState): boolean;
+    static vertexCount(states: readonly PolylineState[]): number;
+    /**
+     * Registers `states` (replacing whatever was registered) and resolves to
+     * the URL template of their tiles, or null when no service worker can
+     * draw them.
+     */
+    setPolylines(states: readonly PolylineState[]): Promise<string | null>;
+    has(id: string): boolean;
+    /**
+     * One polyline changed in place. A change of zIndex reorders the list and
+     * needs {@link setPolylines} instead; everything else is applied here.
+     */
+    update(state: PolylineState): void;
+    /**
+     * Takes one polyline out of the tiles. Its slot in the worker's list is
+     * left empty, so the others keep their indices and only the tiles it was
+     * in are drawn again.
+     */
+    remove(id: string): void;
+    template(): string;
+    get tileSize(): number;
+    dispose(): void;
 }
 
 interface GroundImageEntity<ActualGroundImage> {
@@ -5797,5 +6075,5 @@ declare function segmentIntersectsRegion({ start, end, region, geodesic, }: {
 
 declare function splitByMeridian(points: GeoPoint[], geodesic: boolean): GeoPoint[][];
 
-export { AbstractCircleOverlayRenderer, AbstractGroundImageOverlayRenderer, AbstractMarkerController, AbstractMarkerIcon, AbstractMarkerOverlayRenderer, AbstractMarkerRenderingStrategy, AbstractPolygonOverlayRenderer, AbstractPolylineOverlayRenderer, AbstractViewportStrategy, AbstractZoomAltitudeConverter, BLANK_MAP_STYLE, BLANK_MAP_STYLE_URL, BaseMapViewController, CANONICAL_ORDER, CircleController, CircleManager, CircleOverlay, CollectorMarkerOverlayRenderer, ColorDefaultIcon, DEFAULT_CIRCLE_SEGMENTS, DEFAULT_RASTER_LAYER_USER_AGENT, DefaultMarkerEventController, DefaultMarkerIcon, Direction6, Direction6Delta, DriverConformanceViolation, Earth, EmptyMapServiceRegistry, GROUND_IMAGE_DEFAULT_TILE_SIZE, GeoGridIndex, GeoPoint, GroundImageController, GroundImageManager, GroundImageOverlay, GroundScaleZoomAltitudeConverter, HexGeocellImpl, IconImageCache, ImageDefaultIcon, ImageIcon, InitState, LocalTileServer, MAP_CAPABILITIES, MARKER_HIT_RADIUS_MOUSE_PX, MARKER_HIT_RADIUS_TOUCH_PX, MARKER_HIT_SEARCH_RADIUS_PX, MARKER_RENDER_BATCH_SIZE, MAX_TILE_PIXEL_RATIO, MapCameraPosition, MapCapabilityStatus, MapDiagnostics, MapDriverConformance, MapOverlayRegistry, MapPaddings, MapProjection, MapProvider, MapProviderType, MapServiceRegistrations, MapUISettings, MapUISettingsDiagnostics, MapViewBase, MapViewHolderBase, MapViewState, MapViewStyleHost, MarkerAnimation, MarkerGrid, MarkerIconSize, MarkerManager, MarkerOverlay, MarkerRenderingSupportKey, MarkerTileRenderer, MarkerTilingOptions, MutableMapServiceRegistry, Mutex, NoCameraRestriction, OVERLAY_KINDS, OVERLAY_STACK_ORDER, OverlayCollector, OverlayGeoJson, OverlayHitResolver, POLYGON_TILE_LAYER_ID, Planar, PolygonController, PolygonManager, PolygonOverlay, PolygonTileSet, PolygonTiler, PolygonTilingOptions, PolylineController, PolylineManager, PolylineOverlay, RasterHeaderRuleSet, RasterLayerController, RasterLayerManager, RasterLayerOverlay, RasterLayerSource, RasterTilePreferenceKey, ScreenProjectionRequirement, Settings, Spherical, StrategyMarkerController, StyleMutationStore, TRANSPARENT_TILE_PNG, TileRenderFailedError, TileScheme, TileServerRegistry, VectorStyleAsDesign, VectorStyleMutationSupportKey, VectorStyleSupportKey, WEB_MERCATOR_MAX_EXTENT_METERS, WEB_MERCATOR_MAX_LATITUDE, WGS84, WGS84Geodesic, WebMercator, WebMercatorZoomAltitudeConverter, applyGlMapUISettings, applyStyleMutations, bearingFromNativeHeading, bearingFromNativeRotation, bounceInterpolation, bridgeHolesIntoSingleRing, bridgeHolesIntoSingleRingWrapAware, buildPolygonRings, buildPolylineSegments, buildUnwrappedPolygonRings, buildUnwrappedPolylinePath, buildVisibleRegion, calculateMetersPerPixel, capabilityOfGesture, circleToRing, closeRing, closestPointOnSegment, combineHash, compareOverlayStackKeys, computeArea$1 as computeArea, computeDistanceBetween$1 as computeDistanceBetween, computeFitBoundsCameraPosition, computeHeading$1 as computeHeading, computeLength$1 as computeLength, computeOffset$1 as computeOffset, computeOffsetOrigin$1 as computeOffsetOrigin, computeSignedArea$1 as computeSignedArea, computeDistanceBetween as computeWGS84DistanceBetween, createCircleEntity, createCircleState, createCollectorMarkerRenderingSupport, createDefaultIcon, createFingerPrint, createGeoPoint, createGeoRectBounds, createGroundImageEntity, createGroundImageState, createHexCell, createHexCoord, createIdentifiedHexCell, createMapCameraPosition, createMapServiceKey, createMarkerEntity, createMarkerFingerPrint, createMarkerState, createOffset, createOppositeMeridianPoint, createOverlayHit, createPolygonEntity, createPolygonState, createPolylineEntity, createPolylineState, createRandomId, createRasterLayerEntity, createRasterLayerState, createSegmentBounds, createSubject, createTileWorkerHandler, decodePolyline, densifyAndNormalize, densifyPolygonRing, describeStyleMutations, encodePolyline, expandBounds, fingerPrintEquals, fromGeoPoint, fromLatLng, fromLatLong, fromLngLat, fromLongLat, generateIdFromHashes, getNeighbors, hashBool, hashDefaultMarkerIcon, hashGeoPoint, hashNullable, hashNum, hashObj, hashStr, hexCellToIdPrefix, hexCoordToString, ingestMarkers, interpolate$1 as interpolate, interpolateAtMeridianGeodesic, interpolateAtMeridianLinear, interpolate as interpolateWGS84, isEmptyCameraRestriction, isFullySupported, isKnownUnsupported, isNativeDescribableStyle, isNativeMapExtensionCapable, isSlottedOverlayController, isUsable, longHashCode, mapCapabilityFromId, mapViewStateInternal, markerHitShape, markerIconExtentPx, markerIconHashCode, markerSearchBounds, normalizeLngDegrees, overlayStackBand, overlayStackBeforeId, overlayStackZ, parseStyleMutations, parseTilePixelRatio, pickMarkerHit, pickMarkerIndex, polygonTileRasterLayerState, preferMarkerHit, resolveAttributionRules, resolveCameraRestriction, resolveHoles, resolveMapUISettings, resolveRasterAttributions, reverseStyleMutation, segmentIntersectsRegion, splitByMeridian, splitRingByMeridian, styleMutationLayerId, styleMutationProperty, styleMutationTarget, tilePixelRatio, tilePixelRatioSuffix, toDegrees, toInt, toNativeHeading, toNativeRotation, toRadians, unionHoleRings, unionHoles, unionHolesInPlace, vectorStyleKey, viewportSizeOf, withRasterHeaderTransform, wrapClickedPoint };
-export type { AddParams, AnyMarkerRenderingSupport, AttributionRule, BitmapIcon, CameraOptions, CameraRestriction, ChangeParams, ChangeParamsInterface, CircleAddParams, CircleCapable, CircleChangeParams, CircleEntity, CircleEvent, CircleFingerPrint, CircleManagerInterface, CircleOptions, CircleOverlayRenderer, CircleState, CircleStateCopyParams, CreateMarkerStateParams, DefaultMarkerIconOptions, FitBoundsCameraResult, GeoPointInterface, GeoRectBounds, GlGestureHandler, GlGestureHandlers, GlMarkerDragMap, GlTouchZoomRotateHandler, GroundImageAddParams, GroundImageCapable, GroundImageChangeParams, GroundImageEntity, GroundImageEvent, GroundImageFingerPrint, GroundImageManagerInterface, GroundImageOverlayRenderer, GroundImageState, GroundImageStateCopyParams, GroundOverlayOptions, HexCell, HexCoord, HexGeocell, HexGeocell as HexGeocellInterface, IdentifiedHexCell, ImageDefaultIconOptions, ImageIconOptions, ImageSource, InfoBubbleEntry, MapCameraPositionCopyParams, MapCameraPositionInterface, MapCapability, MapConfig, MapDesignTypeInterface, MapDiagnosticLevel, MapDiagnosticsSink, MapGesture, MapOverlayInterface, MapPaddingsInterface, MapServiceKey, MapServiceRegistration, MapServiceRegistry, MapStyleHost, MapStyleInstallation, MapViewBaseProps, MapViewControllerInterface, MapViewHolder, MapViewStateInterface, MapViewStateInternal, MapViewStateOptions, MapViewStyle, MarkerAnimationOverlayEntry, MarkerAnimationOverlayHost, MarkerCapable, MarkerEntity, MarkerEventController, MarkerEventHost, MarkerFingerPrint, MarkerHit, MarkerHitRect, MarkerIcon, MarkerIngestionResult, MarkerLabelHorizontalPosition, MarkerLabelPosition, MarkerLabelVerticalPosition, MarkerManagerStats, MarkerOptions, MarkerOverlayRenderer, MarkerRenderingStrategy, MarkerRenderingSupport, MarkerState, MarkerStateCopyParams, NativeDescribableStyle, NativeMapExtensionCapable, NativeMapExtensionDescriptor, NativeMapExtensionEvent, NativeMapExtensionEventHandler, NativeStyleDescriptor, Offset, OnCameraMoveHandler, OnCircleEventHandler, OnGroundImageEventHandler, OnMapEventHandler, OnMapInitializedHandler, OnMapLoadedHandler, OnMarkerEventHandler, OnPolygonEventHandler, OnPolylineEventHandler, OnRasterLayerEventHandler, OverlayController, OverlayControllerLike, OverlayHit, OverlayKind, OverlayRendererInterface, OverlayStackKey, PolygonAddParams, PolygonCapable, PolygonChangeParams, PolygonEntity, PolygonEvent, PolygonFingerPrint, PolygonManagerInterface, PolygonOptions, PolygonOverlayRenderer, PolygonRings, PolygonState, PolygonStateCopyParams, PolylineAddParams, PolylineCapable, PolylineChangeParams, PolylineEntity, PolylineEvent, PolylineFingerPrint, PolylineHitResult, PolylineManagerInterface, PolylineOptions, PolylineOverlayRenderer, PolylineState, PolylineStateCopyParams, PreparedLabel, PreparedMarker, Projection, RasterAttributionRule, RasterHeaderRule, RasterHeaderSupport, RasterLayerAddParams, RasterLayerCapable, RasterLayerChangeParams, RasterLayerEntity, RasterLayerEvent, RasterLayerFingerPrint, RasterLayerManagerInterface, RasterLayerMounting, RasterLayerOverlayRenderer, RasterLayerState, RasterLayerStateCopyParams, RasterRequestParameters, RasterTilePreference, RasterTransformRequest, SWPolygon, ScreenOffsetResult, Serializable, SlottedOverlayController, StyleMutation, StylePatchableMap, TileOutcome, TileProvider, TileRenderRequest, TileRenderResponse, TileRequest, VectorStyleMutationSupport, VectorStyleSupport, ViewportSize, VisibleRegion };
+export { AbstractCircleOverlayRenderer, AbstractGroundImageOverlayRenderer, AbstractMarkerController, AbstractMarkerIcon, AbstractMarkerOverlayRenderer, AbstractMarkerRenderingStrategy, AbstractPolygonOverlayRenderer, AbstractPolylineOverlayRenderer, AbstractViewportStrategy, AbstractZoomAltitudeConverter, BLANK_MAP_STYLE, BLANK_MAP_STYLE_URL, BaseMapViewController, CANONICAL_ORDER, CircleController, CircleManager, CircleOverlay, CollectorMarkerOverlayRenderer, ColorDefaultIcon, DEFAULT_CIRCLE_SEGMENTS, DEFAULT_RASTER_LAYER_USER_AGENT, DefaultMarkerEventController, DefaultMarkerIcon, Direction6, Direction6Delta, DriverConformanceViolation, Earth, EmptyMapServiceRegistry, GROUND_IMAGE_DEFAULT_TILE_SIZE, GeoGridIndex, GeoPoint, GroundImageController, GroundImageManager, GroundImageOverlay, GroundScaleZoomAltitudeConverter, HexGeocellImpl, IconImageCache, ImageDefaultIcon, ImageIcon, InitState, LocalTileServer, MAP_CAPABILITIES, MARKER_HIT_RADIUS_MOUSE_PX, MARKER_HIT_RADIUS_TOUCH_PX, MARKER_HIT_SEARCH_RADIUS_PX, MARKER_RENDER_BATCH_SIZE, MAX_TILE_PIXEL_RATIO, MapCameraPosition, MapCapabilityStatus, MapDiagnostics, MapDriverConformance, MapOverlayRegistry, MapPaddings, MapProjection, MapProvider, MapProviderType, MapServiceRegistrations, MapUISettings, MapUISettingsDiagnostics, MapViewBase, MapViewHolderBase, MapViewState, MapViewStyleHost, MarkerAnimation, MarkerGrid, MarkerIconSize, MarkerManager, MarkerOverlay, MarkerRenderingSupportKey, MarkerTileRenderer, MarkerTilingOptions, MutableMapServiceRegistry, Mutex, NoCameraRestriction, OVERLAY_KINDS, OVERLAY_STACK_ORDER, OverlayCollector, OverlayGeoJson, OverlayHitResolver, POLYGON_TILE_LAYER_ID, POLYLINE_TILE_LAYER_ID, Planar, PolygonController, PolygonManager, PolygonOverlay, PolygonTileSet, PolygonTiler, PolygonTilingOptions, PolylineController, PolylineManager, PolylineOverlay, PolylineTileSet, PolylineTiler, PolylineTilingOptions, RasterHeaderRuleSet, RasterLayerController, RasterLayerManager, RasterLayerOverlay, RasterLayerSource, RasterTilePreferenceKey, ScreenProjectionRequirement, Settings, Spherical, StrategyMarkerController, StyleMutationStore, TRANSPARENT_TILE_PNG, TileRenderFailedError, TileScheme, TileServerRegistry, VectorStyleAsDesign, VectorStyleMutationSupportKey, VectorStyleSupportKey, WEB_MERCATOR_MAX_EXTENT_METERS, WEB_MERCATOR_MAX_LATITUDE, WGS84, WGS84Geodesic, WebMercator, WebMercatorZoomAltitudeConverter, applyGlMapUISettings, applyStyleMutations, bearingFromNativeHeading, bearingFromNativeRotation, bounceInterpolation, bridgeHolesIntoSingleRing, bridgeHolesIntoSingleRingWrapAware, buildPolygonRings, buildPolylineSegments, buildUnwrappedPolygonRings, buildUnwrappedPolylinePath, buildVisibleRegion, calculateMetersPerPixel, capabilityOfGesture, circleToRing, closeRing, closestPointOnSegment, combineHash, compareOverlayStackKeys, computeArea$1 as computeArea, computeDistanceBetween$1 as computeDistanceBetween, computeFitBoundsCameraPosition, computeHeading$1 as computeHeading, computeLength$1 as computeLength, computeOffset$1 as computeOffset, computeOffsetOrigin$1 as computeOffsetOrigin, computeSignedArea$1 as computeSignedArea, computeDistanceBetween as computeWGS84DistanceBetween, createCircleEntity, createCircleState, createCollectorMarkerRenderingSupport, createDefaultIcon, createFingerPrint, createGeoPoint, createGeoRectBounds, createGroundImageEntity, createGroundImageState, createHexCell, createHexCoord, createIdentifiedHexCell, createMapCameraPosition, createMapServiceKey, createMarkerEntity, createMarkerFingerPrint, createMarkerState, createOffset, createOppositeMeridianPoint, createOverlayHit, createPolygonEntity, createPolygonState, createPolylineEntity, createPolylineState, createRandomId, createRasterLayerEntity, createRasterLayerState, createSegmentBounds, createSubject, createTileWorkerHandler, decodePolyline, densifyAndNormalize, densifyPolygonRing, describeStyleMutations, encodePolyline, expandBounds, fingerPrintEquals, fromGeoPoint, fromLatLng, fromLatLong, fromLngLat, fromLongLat, generateIdFromHashes, getNeighbors, hashBool, hashDefaultMarkerIcon, hashGeoPoint, hashNullable, hashNum, hashObj, hashStr, hexCellToIdPrefix, hexCoordToString, ingestMarkers, interpolate$1 as interpolate, interpolateAtMeridianGeodesic, interpolateAtMeridianLinear, interpolate as interpolateWGS84, isEmptyCameraRestriction, isFullySupported, isKnownUnsupported, isNativeDescribableStyle, isNativeMapExtensionCapable, isSlottedOverlayController, isUsable, longHashCode, mapCapabilityFromId, mapViewStateInternal, markerHitShape, markerIconExtentPx, markerIconHashCode, markerSearchBounds, normalizeLngDegrees, notifyOverlaysAdded, overlayStackBand, overlayStackBeforeId, overlayStackZ, parseStyleMutations, parseTilePixelRatio, pickMarkerHit, pickMarkerIndex, polygonTileRasterLayerState, polylineTileRasterLayerState, preferMarkerHit, resolveAttributionRules, resolveCameraRestriction, resolveHoles, resolveMapUISettings, resolveRasterAttributions, reverseStyleMutation, segmentIntersectsRegion, splitByMeridian, splitRingByMeridian, styleMutationLayerId, styleMutationProperty, styleMutationTarget, tilePixelRatio, tilePixelRatioSuffix, toDegrees, toInt, toNativeHeading, toNativeRotation, toRadians, unionHoleRings, unionHoles, unionHolesInPlace, vectorStyleKey, viewportSizeOf, withRasterHeaderTransform, wrapClickedPoint };
+export type { AddParams, AnyMarkerRenderingSupport, AttributionRule, BitmapIcon, CameraOptions, CameraRestriction, ChangeParams, ChangeParamsInterface, CircleAddParams, CircleCapable, CircleChangeParams, CircleEntity, CircleEvent, CircleFingerPrint, CircleManagerInterface, CircleOptions, CircleOverlayRenderer, CircleState, CircleStateCopyParams, CreateMarkerStateParams, DefaultMarkerIconOptions, FitBoundsCameraResult, GeoPointInterface, GeoRectBounds, GlGestureHandler, GlGestureHandlers, GlMarkerDragMap, GlTouchZoomRotateHandler, GroundImageAddParams, GroundImageCapable, GroundImageChangeParams, GroundImageEntity, GroundImageEvent, GroundImageFingerPrint, GroundImageManagerInterface, GroundImageOverlayRenderer, GroundImageState, GroundImageStateCopyParams, GroundOverlayOptions, HexCell, HexCoord, HexGeocell, HexGeocell as HexGeocellInterface, IdentifiedHexCell, ImageDefaultIconOptions, ImageIconOptions, ImageSource, InfoBubbleEntry, MapCameraPositionCopyParams, MapCameraPositionInterface, MapCapability, MapConfig, MapDesignTypeInterface, MapDiagnosticLevel, MapDiagnosticsSink, MapGesture, MapOverlayInterface, MapPaddingsInterface, MapServiceKey, MapServiceRegistration, MapServiceRegistry, MapStyleHost, MapStyleInstallation, MapViewBaseProps, MapViewControllerInterface, MapViewHolder, MapViewStateInterface, MapViewStateInternal, MapViewStateOptions, MapViewStyle, MarkerAnimationOverlayEntry, MarkerAnimationOverlayHost, MarkerCapable, MarkerEntity, MarkerEventController, MarkerEventHost, MarkerFingerPrint, MarkerHit, MarkerHitRect, MarkerIcon, MarkerIngestionResult, MarkerLabelHorizontalPosition, MarkerLabelPosition, MarkerLabelVerticalPosition, MarkerManagerStats, MarkerOptions, MarkerOverlayRenderer, MarkerRenderingStrategy, MarkerRenderingSupport, MarkerState, MarkerStateCopyParams, NativeDescribableStyle, NativeMapExtensionCapable, NativeMapExtensionDescriptor, NativeMapExtensionEvent, NativeMapExtensionEventHandler, NativeStyleDescriptor, Offset, OnCameraMoveHandler, OnCircleAddedHandler, OnCircleEventHandler, OnGroundImageAddedHandler, OnGroundImageEventHandler, OnMapEventHandler, OnMapInitializedHandler, OnMapLoadedHandler, OnMarkerEventHandler, OnPolygonAddedHandler, OnPolygonEventHandler, OnPolylineAddedHandler, OnPolylineEventHandler, OnRasterLayerAddedHandler, OnRasterLayerEventHandler, OverlayController, OverlayControllerLike, OverlayHit, OverlayKind, OverlayRendererInterface, OverlayStackKey, PolygonAddParams, PolygonCapable, PolygonChangeParams, PolygonEntity, PolygonEvent, PolygonFingerPrint, PolygonManagerInterface, PolygonOptions, PolygonOverlayRenderer, PolygonRings, PolygonState, PolygonStateCopyParams, PolylineAddParams, PolylineCapable, PolylineChangeParams, PolylineEntity, PolylineEvent, PolylineFingerPrint, PolylineHitResult, PolylineManagerInterface, PolylineOptions, PolylineOverlayRenderer, PolylineState, PolylineStateCopyParams, PreparedLabel, PreparedMarker, Projection, RasterAttributionRule, RasterHeaderRule, RasterHeaderSupport, RasterLayerAddParams, RasterLayerCapable, RasterLayerChangeParams, RasterLayerEntity, RasterLayerEvent, RasterLayerFingerPrint, RasterLayerManagerInterface, RasterLayerMounting, RasterLayerOverlayRenderer, RasterLayerState, RasterLayerStateCopyParams, RasterRequestParameters, RasterTilePreference, RasterTransformRequest, SWPolygon, SWPolyline, ScreenOffsetResult, Serializable, SlottedOverlayController, StyleMutation, StylePatchableMap, TileOutcome, TileProvider, TileRenderRequest, TileRenderResponse, TileRequest, VectorStyleMutationSupport, VectorStyleSupport, ViewportSize, VisibleRegion };
