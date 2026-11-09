@@ -117,9 +117,83 @@ function unionRings(rings: Vec[][]): Vec[][] {
     return traceRings(boundary);
 }
 
+// Reach of intersectionPoints beyond a segment's box (degrees). Its collinear
+// test accepts an edge up to EPS / |seg| off the line, and a segment shorter
+// than sqrt(EPS) = 1e-6 is skipped there, so that is at most 2e-6.
+const MEET_PAD = 4e-6;
+
+/**
+ * Edges filed in a uniform grid over their bounding boxes, so a search asks
+ * only the edges near a box instead of all of them. A box covering every cell
+ * an edge's box touches finds every edge that box can meet.
+ */
+class EdgeGrid {
+    private readonly side: number;
+    private readonly minX: number;
+    private readonly minY: number;
+    private readonly cellW: number;
+    private readonly cellH: number;
+    private readonly cells = new Map<number, number[]>();
+    private readonly seen: Int32Array;
+    private stamp = 0;
+
+    constructor(edges: Edge[], pad: number) {
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const e of edges) {
+            minX = Math.min(minX, e.a.x, e.b.x); maxX = Math.max(maxX, e.a.x, e.b.x);
+            minY = Math.min(minY, e.a.y, e.b.y); maxY = Math.max(maxY, e.a.y, e.b.y);
+        }
+        this.side = Math.max(1, Math.min(1024, Math.ceil(Math.sqrt(edges.length))));
+        this.minX = minX;
+        this.minY = minY;
+        this.cellW = (maxX - minX) / this.side || 1;
+        this.cellH = (maxY - minY) / this.side || 1;
+        this.seen = new Int32Array(edges.length);
+        for (let i = 0; i < edges.length; i++) {
+            const { a, b } = edges[i];
+            this.forCells(Math.min(a.x, b.x) - pad, Math.min(a.y, b.y) - pad, Math.max(a.x, b.x) + pad, Math.max(a.y, b.y) + pad, key => {
+                const bucket = this.cells.get(key);
+                if (bucket) bucket.push(i);
+                else this.cells.set(key, [i]);
+            });
+        }
+    }
+
+    /** Indices of the edges filed in a cell the box touches, each once, in no order. */
+    near(minX: number, minY: number, maxX: number, maxY: number, out: number[]): number[] {
+        out.length = 0;
+        const stamp = ++this.stamp;
+        this.forCells(minX, minY, maxX, maxY, key => {
+            const bucket = this.cells.get(key);
+            if (!bucket) return;
+            for (const i of bucket) {
+                if (this.seen[i] === stamp) continue;
+                this.seen[i] = stamp;
+                out.push(i);
+            }
+        });
+        return out;
+    }
+
+    private forCells(minX: number, minY: number, maxX: number, maxY: number, visit: (key: number) => void): void {
+        const x0 = this.cell(minX, this.minX, this.cellW), x1 = this.cell(maxX, this.minX, this.cellW);
+        const y0 = this.cell(minY, this.minY, this.cellH), y1 = this.cell(maxY, this.minY, this.cellH);
+        for (let cx = x0; cx <= x1; cx++) {
+            for (let cy = y0; cy <= y1; cy++) visit(cx * this.side + cy);
+        }
+    }
+
+    private cell(v: number, min: number, size: number): number {
+        return Math.max(0, Math.min(this.side - 1, Math.floor((v - min) / size)));
+    }
+}
+
 /** Split every edge at all points where another edge crosses or touches it. */
 function splitEdges(edges: Edge[]): Edge[] {
     const result: Edge[] = [];
+    // Only an edge whose box comes within MEET_PAD of this one's can meet it.
+    const grid = new EdgeGrid(edges, MEET_PAD);
+    const near: number[] = [];
     for (let i = 0; i < edges.length; i++) {
         const seg = edges[i];
         const dir = sub(seg.b, seg.a);
@@ -134,7 +208,8 @@ function splitEdges(edges: Edge[]): Edge[] {
         };
         add(seg.a);
         add(seg.b);
-        for (let j = 0; j < edges.length; j++) {
+        const box = edgeBounds(seg);
+        for (const j of grid.near(box.minX - MEET_PAD, box.minY - MEET_PAD, box.maxX + MEET_PAD, box.maxY + MEET_PAD, near)) {
             if (i === j) continue;
             for (const p of intersectionPoints(seg, edges[j])) add(p);
         }
@@ -158,6 +233,9 @@ function splitEdges(edges: Edge[]): Edge[] {
 function classifyBoundary(subEdges: Edge[], rings: Vec[][]): Edge[] {
     const out: Edge[] = [];
     const seen = new Set<string>();
+    const grid = new EdgeGrid(subEdges, 0);
+    const near: number[] = [];
+    const ringsBounds = rings.map(ringBounds);
     for (const seg of subEdges) {
         const dir = sub(seg.b, seg.a);
         const len = Math.hypot(dir.x, dir.y);
@@ -173,9 +251,9 @@ function classifyBoundary(subEdges: Edge[], rings: Vec[][]): Edge[] {
         // and is dropped, and the traced ring cuts across a hole.
         const nx = -dir.y / len;
         const ny = dir.x / len;
-        const off = Math.min(len * 0.25, 0.5 * clearance(mid, 2e-5, subEdges));
-        const leftInside = coverage({ x: mid.x + nx * off, y: mid.y + ny * off }, rings) > 0;
-        const rightInside = coverage({ x: mid.x - nx * off, y: mid.y - ny * off }, rings) > 0;
+        const off = Math.min(len * 0.25, 0.5 * clearance(mid, CLEARANCE_CAP, subEdges, grid, near));
+        const leftInside = coverage({ x: mid.x + nx * off, y: mid.y + ny * off }, rings, ringsBounds) > 0;
+        const rightInside = coverage({ x: mid.x - nx * off, y: mid.y - ny * off }, rings, ringsBounds) > 0;
         if (leftInside === rightInside) continue; // interior on both/neither side
 
         // Orient so the interior is on the left.
@@ -189,14 +267,20 @@ function classifyBoundary(subEdges: Edge[], rings: Vec[][]): Edge[] {
     return out;
 }
 
+// Farthest a side sample is taken from a sub-edge's mid-point, doubled (degrees).
+const CLEARANCE_CAP = 2e-5;
+
 /**
  * Distance from `point` (the mid-point of a sub-edge) to the nearest sub-edge
  * that does not pass through it, or `cap` when none is closer. The sub-edge
  * itself and its duplicates from other rings pass through it and are skipped.
+ * Only the sub-edges filed near the box `cap` around the point are asked; any
+ * closer than `cap` is among them.
  */
-function clearance(point: Vec, cap: number, subEdges: Edge[]): number {
+function clearance(point: Vec, cap: number, subEdges: Edge[], grid: EdgeGrid, near: number[]): number {
     let best = cap;
-    for (const e of subEdges) {
+    for (const index of grid.near(point.x - cap, point.y - cap, point.x + cap, point.y + cap, near)) {
+        const e = subEdges[index];
         if (
             Math.min(e.a.x, e.b.x) > point.x + best || Math.max(e.a.x, e.b.x) < point.x - best ||
             Math.min(e.a.y, e.b.y) > point.y + best || Math.max(e.a.y, e.b.y) < point.y - best
@@ -299,11 +383,16 @@ function intersectionPoints(seg: Edge, other: Edge): Vec[] {
     return [add2(seg.a, scale(r, clamp01(t)))];
 }
 
-/** How many rings' interiors contain the point. */
-function coverage(point: Vec, rings: Vec[][]): number {
+/**
+ * How many rings' interiors contain the point. A ring whose latitudes do not
+ * straddle the point's has no edge pointInRing would count, so it is skipped.
+ */
+function coverage(point: Vec, rings: Vec[][], boxes: Bounds[]): number {
     let count = 0;
-    for (const ring of rings) {
-        if (pointInRing(point, ring)) count++;
+    for (let i = 0; i < rings.length; i++) {
+        const box = boxes[i];
+        if (point.y < box.minY || point.y >= box.maxY) continue;
+        if (pointInRing(point, rings[i])) count++;
     }
     return count;
 }
@@ -349,6 +438,31 @@ function toRing(hole: GeoPoint[], origin: Vec): Vec[] | null {
         points.pop();
     }
     return points.length >= 3 ? points : null;
+}
+
+interface Bounds {
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+}
+
+function edgeBounds(e: Edge): Bounds {
+    return {
+        minX: Math.min(e.a.x, e.b.x), minY: Math.min(e.a.y, e.b.y),
+        maxX: Math.max(e.a.x, e.b.x), maxY: Math.max(e.a.y, e.b.y),
+    };
+}
+
+function ringBounds(ring: Vec[]): Bounds {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of ring) {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+    }
+    return { minX, minY, maxX, maxY };
 }
 
 function signedArea(ring: Vec[]): number {
