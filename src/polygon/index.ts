@@ -8,3 +8,7 @@ export * from "./PolygonOverlay";
 export * from "./PolygonOverlayRenderer";
 export * from "./PolygonState";
 export * from "./PolygonUnion";
+export * from "./EncodedPolyline";
+export * from "./PolygonTilingOptions";
+export * from "./PolygonTileSet";
+export * from "./PolygonTiler";

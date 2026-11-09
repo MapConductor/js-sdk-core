@@ -11,6 +11,10 @@ import { PolygonManagerInterface } from "./PolygonManager";
 import { PolygonAddParams, PolygonChangeParams, PolygonOverlayRenderer } from "./PolygonOverlayRenderer";
 import { PolygonEvent, OnPolygonEventHandler, PolygonState } from "./PolygonState";
 import { Mutex } from "../base/Mutex";
+import type { PolygonTiler } from "./PolygonTiler";
+import { PolygonTileSet } from "./PolygonTileSet";
+
+const NO_IDS: ReadonlySet<string> = new Set();
 
 function fingerPrintsEqual(
     a: ReturnType<PolygonState["fingerPrint"]>,
@@ -37,6 +41,14 @@ export abstract class PolygonController<ActualPolygon>
     public readonly polygonManager: PolygonManagerInterface<ActualPolygon>;
     public readonly renderer: PolygonOverlayRenderer<ActualPolygon>;
     public clickListener: OnPolygonEventHandler | null;
+    /**
+     * Set by a provider that can show polygon tiles (see {@link PolygonTiler}).
+     * Polygons it tiles stay in {@link polygonManager}, for taps, with no
+     * native overlay: their entity's `polygon` is null and the renderer never
+     * sees them.
+     */
+    public tiler: PolygonTiler | null = null;
+    private tiledIds: ReadonlySet<string> = NO_IDS;
     private semaphore = new Mutex();
 
     constructor({
@@ -73,7 +85,17 @@ export abstract class PolygonController<ActualPolygon>
 
     async add(data: PolygonState[]): Promise<void> {
         await this.semaphore.withLock(async () => {
-            const previous = new Set(this.polygonManager.allEntities().map((e) => e.state.id));
+            const wasTiled = this.tiledIds;
+            const tiled = this.tiler ? await this.tiler.route(data) : NO_IDS;
+            this.tiledIds = tiled;
+            if (tiled.size > 0) data = data.filter((state) => !tiled.has(state.id));
+            // Only natively drawn polygons are diffed against the renderer.
+            const previous = new Set(
+                this.polygonManager
+                    .allEntities()
+                    .map((e) => e.state.id)
+                    .filter((id) => !wasTiled.has(id)),
+            );
             const added: PolygonAddParams[] = [];
             const updated: PolygonChangeParams<ActualPolygon>[] = [];
             const removed: PolygonEntity<ActualPolygon>[] = [];
@@ -134,6 +156,23 @@ export abstract class PolygonController<ActualPolygon>
                 });
             }
 
+            // Tiled polygons: kept for taps, nothing native. Those that left
+            // the tiles and the list are forgotten; those that left the tiles
+            // for native drawing were added above.
+            const nativeIds = wasTiled.size > 0 ? new Set(data.map((state) => state.id)) : NO_IDS;
+            for (const id of wasTiled) {
+                if (!tiled.has(id) && !nativeIds.has(id) && this.polygonManager.hasEntity(id)) {
+                    this.polygonManager.removeEntity(id);
+                }
+            }
+            if (tiled.size > 0) {
+                for (const state of this.tiler!.tiledStates()) {
+                    this.polygonManager.registerEntity(
+                        createPolygonEntity({ polygon: null as unknown as ActualPolygon, state }),
+                    );
+                }
+            }
+
             await this.renderer.onPostProcess();
         });
     }
@@ -142,6 +181,29 @@ export abstract class PolygonController<ActualPolygon>
         await this.semaphore.withLock(async () => {
             const prevEntity = this.polygonManager.getEntity(state.id);
             if (!prevEntity) return;
+            if (this.tiledIds.has(state.id)) {
+                if (PolygonTileSet.canTile(state)) {
+                    this.polygonManager.registerEntity(createPolygonEntity({ polygon: prevEntity.polygon, state }));
+                    this.tiler?.update(state);
+                    return;
+                }
+                // No longer drawable in a tile (geodesic, half the world wide, or
+                // under 3 points): the map SDK draws it from now on. Still on the
+                // map, so this is not an add. Whether the rest stay in tiles is
+                // left to the next add(), which decides tiling for the whole list.
+                const tiled = new Set(this.tiledIds);
+                tiled.delete(state.id);
+                this.tiledIds = tiled;
+                this.tiler?.remove(state.id);
+                const polygons = await this.renderer.onAdd([{ state }]);
+                if (polygons[0] != null) {
+                    this.polygonManager.registerEntity(createPolygonEntity({ polygon: polygons[0], state }));
+                } else {
+                    this.polygonManager.removeEntity(state.id);
+                }
+                await this.renderer.onPostProcess();
+                return;
+            }
 
             const currentFinger = state.fingerPrint();
             const prevFinger = prevEntity.fingerPrint;
@@ -164,7 +226,10 @@ export abstract class PolygonController<ActualPolygon>
 
     async clear(): Promise<void> {
         await this.semaphore.withLock(async () => {
-            await this.renderer.onRemove(this.polygonManager.allEntities());
+            const tiled = this.tiledIds;
+            this.tiledIds = NO_IDS;
+            await this.tiler?.clear();
+            await this.renderer.onRemove(this.polygonManager.allEntities().filter((e) => !tiled.has(e.state.id)));
             // manager を空にしてから onPostProcess を呼ぶ。GL 系の描画担当は remove では何もせず、
             // onPostProcess で manager の全部を描き直すので、逆の順だと clear() 後も地図に残る。
             this.polygonManager.clear();

@@ -31,6 +31,12 @@ export function unionHoleRings(holes: GeoPoint[][]): GeoPoint[][] {
             .map(hole => toRing(hole, origin))
             .filter((ring): ring is Vec[] => ring != null);
         if (rings.length <= 1) return holes;
+        // Holes that neither cross, touch nor contain one another are already
+        // their own union. Checking that is linear; the union is quadratic in
+        // the hole edges, which a street-network parcel with 80 holes and
+        // 8,000 hole vertices turns into seconds. They still come back
+        // clockwise, as the union's rings do.
+        if (holesAreDisjoint(rings)) return clockwiseHoles(holes, origin);
 
         const merged = unionRings(rings);
         if (merged.length === 0) return holes;
@@ -381,6 +387,63 @@ function intersectionPoints(seg: Edge, other: Edge): Vec[] {
     const u = cross(qp, r) / rxs;
     if (t < -EPS || t > 1 + EPS || u < -EPS || u > 1 + EPS) return [];
     return [add2(seg.a, scale(r, clamp01(t)))];
+}
+
+/**
+/**
+ * The holes, each wound clockwise like the union's output; `holes` itself when
+ * every one already is.
+ */
+function clockwiseHoles(holes: GeoPoint[][], origin: Vec): GeoPoint[][] {
+    let changed = false;
+    const out = holes.map(hole => {
+        const ring = toRing(hole, origin);
+        if (ring == null || signedArea(ring) <= 0) return hole;
+        changed = true;
+        return [...hole].reverse();
+    });
+    return changed ? out : holes;
+}
+
+/**
+ * True when no two rings cross, touch or nest, so the rings are already their
+ * own union. The edges go into the same EdgeGrid the union uses, padded by
+ * MEET_PAD, and each edge is tested only against the edges of other rings filed
+ * near it, so the cost grows with the edge count rather than its square.
+ */
+function holesAreDisjoint(rings: Vec[][]): boolean {
+    const boxes = rings.map(ringBounds);
+    // A ring inside another: one of its vertices is inside it.
+    for (let i = 0; i < rings.length; i++) {
+        const p = rings[i][0];
+        for (let j = 0; j < rings.length; j++) {
+            if (i === j) continue;
+            const b = boxes[j];
+            if (p.x >= b.minX && p.x <= b.maxX && p.y >= b.minY && p.y <= b.maxY && pointInRing(p, rings[j])) {
+                return false;
+            }
+        }
+    }
+
+    const edges: Edge[] = [];
+    const ringOf: number[] = [];
+    for (let r = 0; r < rings.length; r++) {
+        const ring = rings[r];
+        for (let i = 0; i < ring.length; i++) {
+            edges.push({ a: ring[i], b: ring[(i + 1) % ring.length] });
+            ringOf.push(r);
+        }
+    }
+    const grid = new EdgeGrid(edges, MEET_PAD);
+    const near: number[] = [];
+    for (let i = 0; i < edges.length; i++) {
+        const box = edgeBounds(edges[i]);
+        for (const j of grid.near(box.minX - MEET_PAD, box.minY - MEET_PAD, box.maxX + MEET_PAD, box.maxY + MEET_PAD, near)) {
+            if (j <= i || ringOf[j] === ringOf[i]) continue;
+            if (intersectionPoints(edges[i], edges[j]).length > 0) return false;
+        }
+    }
+    return true;
 }
 
 /**
