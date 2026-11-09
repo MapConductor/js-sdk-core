@@ -124,28 +124,40 @@ function queryGrid(grid, items, south, north, west, east) {
     return out;
 }
 
-// ── Polygon tiles ────────────────────────────────────────────────────────────
+// ── Shape tiles: polygons and polylines ─────────────────────────────────────
 //
-// The main thread sends every tiled polygon once ('sw-register-polygons'), its
-// rings as polyline6 strings (Google's Encoded Polyline at 1e-6 degrees; see
-// js-sdk-core EncodedPolyline.ts). Here they become Web Mercator coordinates in
-// [0, 1], with the outline wound one way and the holes the other, so a
-// `nonzero` fill leaves out the union of the holes without computing it.
+// The main thread sends every tiled shape of a route once: polygons with
+// 'sw-register-polygons', their rings as polyline6 strings (Google's Encoded
+// Polyline at 1e-6 degrees; see js-sdk-core EncodedPolyline.ts), polylines with
+// 'sw-register-polylines', one open path each. Here they become Web Mercator
+// coordinates in [0, 1]. A polygon's outline is wound one way and its holes the
+// other, so a `nonzero` fill leaves out the union of the holes without
+// computing it. A route holds one kind; the index, the simplified copies, the
+// tile cache and its invalidation are the same code for both.
 //
-// Each zoom gets its own simplified copy of a polygon, built the first time a
+// Each zoom gets its own simplified copy of a shape, built the first time a
 // tile at that zoom needs it: vertices snapped to that zoom's pixel grid,
-// repeats dropped, Douglas-Peucker at half a pixel, and a polygon smaller than
-// a pixel drawn as one pixel. Taps never see any of this -- they are resolved
-// on the main thread against the original shapes.
+// repeats dropped, Douglas-Peucker at half a pixel (a path keeps both ends).
+// A polygon smaller than a pixel is drawn as one pixel; a polyline that comes
+// down to one point, as a dot as wide as the line.
+//
+// A polyline is stroked `strokeWidth` CSS pixels wide at every zoom, with round
+// caps and joins. Candidates for a tile are looked up with the tile grown by
+// half the widest stroke, and each is drawn whole -- the canvas cuts off what
+// overhangs -- so a line over a tile edge goes on in the next tile at the same
+// place and width.
+//
+// Taps never see any of this -- they are resolved on the main thread against
+// the original shapes.
 
-const swPolygonProviders = new Map();
+const swShapeProviders = new Map();
 
-/** Cells of the polygon index, in Web Mercator units: one z12 tile. */
-const POLYGON_CELL = 1 / 4096;
-/** A polygon covering more cells than this is kept in a list every query checks. */
-const POLYGON_MAX_CELLS = 256;
+/** Cells of the shape index, in Web Mercator units: one z12 tile. */
+const SHAPE_CELL = 1 / 4096;
+/** A shape covering more cells than this is kept in a list every query checks. */
+const SHAPE_MAX_CELLS = 256;
 /** Simplified copies kept per route, most recent zooms first. */
-const POLYGON_ZOOMS_KEPT = 4;
+const SHAPE_ZOOMS_KEPT = 4;
 const DP_TOLERANCE_PX = 0.5;
 /**
  * Below this size on screen a polygon's outline is left out: a 1 px line round
@@ -237,21 +249,47 @@ function decodeSwPolygon(p) {
     };
 }
 
+function decodeSwPolyline(p) {
+    // An empty path: a polyline taken out of the tiles, its slot kept so the others keep their indices.
+    if (!p.path) return null;
+    const path = toMercatorRing(decodePolyline6(p.path));
+    if (path.length < 4) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (let i = 0; i < path.length; i += 2) {
+        if (path[i] < minX) minX = path[i];
+        if (path[i] > maxX) maxX = path[i];
+        if (path[i + 1] < minY) minY = path[i + 1];
+        if (path[i + 1] > maxY) maxY = path[i + 1];
+    }
+    return {
+        line: true,
+        path,
+        bbox: [minX, minY, maxX, maxY],
+        fill: null,
+        stroke: p.stroke,
+        strokeWidth: p.strokeWidth,
+    };
+}
+
+/** False for a colour that draws nothing: none, `transparent`, or alpha 0 (rgba(), #rgba, #rrggbbaa). */
 function isVisibleColor(color) {
     if (!color || color === 'transparent') return false;
     const m = /^rgba\([^)]*,\s*([\d.]+)\s*\)$/.exec(color);
-    return !m || parseFloat(m[1]) > 0;
+    if (m) return parseFloat(m[1]) > 0;
+    if (/^#[0-9a-f]{4}$/i.test(color)) return color[4] !== '0';
+    if (/^#[0-9a-f]{8}$/i.test(color)) return color.slice(7) !== '00';
+    return true;
 }
 
-function buildPolygonIndex(polygons) {
+function buildShapeIndex(shapes) {
     const cells = new Map();
     const large = [];
-    for (let i = 0; i < polygons.length; i++) {
-        const p = polygons[i];
+    for (let i = 0; i < shapes.length; i++) {
+        const p = shapes[i];
         if (!p) continue;
-        const cx0 = Math.floor(p.bbox[0] / POLYGON_CELL), cx1 = Math.floor(p.bbox[2] / POLYGON_CELL);
-        const cy0 = Math.floor(p.bbox[1] / POLYGON_CELL), cy1 = Math.floor(p.bbox[3] / POLYGON_CELL);
-        if ((cx1 - cx0 + 1) * (cy1 - cy0 + 1) > POLYGON_MAX_CELLS) {
+        const cx0 = Math.floor(p.bbox[0] / SHAPE_CELL), cx1 = Math.floor(p.bbox[2] / SHAPE_CELL);
+        const cy0 = Math.floor(p.bbox[1] / SHAPE_CELL), cy1 = Math.floor(p.bbox[3] / SHAPE_CELL);
+        if ((cx1 - cx0 + 1) * (cy1 - cy0 + 1) > SHAPE_MAX_CELLS) {
             large.push(i);
             continue;
         }
@@ -267,52 +305,55 @@ function buildPolygonIndex(polygons) {
     return { cells, large };
 }
 
-function registerSwPolygons(msg) {
-    const polygons = msg.polygons.map(decodeSwPolygon);
+function registerSwShapes(routeId, shapes) {
     let maxStrokePx = 0;
-    for (const p of polygons) if (p && isVisibleColor(p.stroke)) maxStrokePx = Math.max(maxStrokePx, p.strokeWidth);
-    swPolygonProviders.set(msg.routeId, {
-        polygons,
-        index: buildPolygonIndex(polygons),
+    for (const p of shapes) if (p && isVisibleColor(p.stroke)) maxStrokePx = Math.max(maxStrokePx, p.strokeWidth);
+    swShapeProviders.set(routeId, {
+        shapes,
+        index: buildShapeIndex(shapes),
         maxStrokePx,
         simplified: new Map(),
-        stamp: new Uint32Array(polygons.length),
+        stamp: new Uint32Array(shapes.length),
         stampValue: 0,
         // Bumped by every update, so a tile drawn before it is not cached after it.
         generation: 0,
     });
+    dropAllShapeTiles(routeId);
 }
 
-function updateSwPolygons(msg) {
-    const provider = swPolygonProviders.get(msg.routeId);
+/** `updates`: [{ index, shape }], the shape decoded (null for an emptied slot). */
+function updateSwShapes(routeId, updates) {
+    const provider = swShapeProviders.get(routeId);
     if (!provider) return;
     provider.generation++;
     const touched = [];
-    for (const u of msg.updates) {
-        const before = provider.polygons[u.index];
-        const after = decodeSwPolygon(u.polygon);
-        provider.polygons[u.index] = after;
+    let moved = false;
+    for (const u of updates) {
+        const before = provider.shapes[u.index];
+        const after = u.shape;
+        provider.shapes[u.index] = after;
         for (const perZoom of provider.simplified.values()) perZoom[u.index] = undefined;
         if (before) touched.push(before.bbox);
         if (after) touched.push(after.bbox);
         if (after && isVisibleColor(after.stroke)) provider.maxStrokePx = Math.max(provider.maxStrokePx, after.strokeWidth);
         // A shape that moved needs the index rebuilt; a restyle does not.
-        if (before && after && before.bbox.some((v, k) => v !== after.bbox[k])) provider.index = buildPolygonIndex(provider.polygons);
+        if (after && (!before || before.bbox.some((v, k) => v !== after.bbox[k]))) moved = true;
     }
-    dropPolygonTilesIn(msg.routeId, touched, provider.maxStrokePx);
+    if (moved) provider.index = buildShapeIndex(provider.shapes);
+    dropShapeTilesIn(routeId, touched, provider.maxStrokePx);
 }
 
 /**
- * Tiles of a polygon route are cached without the version segment of their
+ * Tiles of a shape route are cached without the version segment of their
  * URL, so a version bump (which the map needs to ask again at all) finds every
  * tile a change did not touch still cached. The tiles that do overlap a
- * changed polygon are dropped here.
+ * changed shape, grown by the widest stroke, are dropped here.
  */
-function polygonTileCacheKey(routeId, tileSize, z, x, y, pixelRatio) {
+function shapeTileCacheKey(routeId, tileSize, z, x, y, pixelRatio) {
     return 'poly:' + routeId + '/' + tileSize + '/' + z + '/' + x + '/' + y + '@' + pixelRatio;
 }
 
-function dropPolygonTilesIn(routeId, boxes, strokePx) {
+function dropShapeTilesIn(routeId, boxes, strokePx) {
     const prefix = 'poly:' + routeId + '/';
     for (const key of Array.from(tileCache.keys())) {
         if (!key.startsWith(prefix)) continue;
@@ -329,7 +370,7 @@ function dropPolygonTilesIn(routeId, boxes, strokePx) {
     }
 }
 
-function dropAllPolygonTiles(routeId) {
+function dropAllShapeTiles(routeId) {
     const prefix = 'poly:' + routeId + '/';
     for (const key of Array.from(tileCache.keys())) {
         if (key.startsWith(prefix)) {
@@ -339,7 +380,7 @@ function dropAllPolygonTiles(routeId) {
     }
 }
 
-function queryPolygons(provider, minX, minY, maxX, maxY) {
+function queryShapes(provider, minX, minY, maxX, maxY) {
     provider.stampValue = (provider.stampValue + 1) >>> 0;
     if (provider.stampValue === 0) {
         provider.stamp.fill(0);
@@ -350,12 +391,12 @@ function queryPolygons(provider, minX, minY, maxX, maxY) {
     const take = (i) => {
         if (stamp[i] === v) return;
         stamp[i] = v;
-        const b = provider.polygons[i]?.bbox;
+        const b = provider.shapes[i]?.bbox;
         if (b && b[0] <= maxX && b[2] >= minX && b[1] <= maxY && b[3] >= minY) out.push(i);
     };
     for (const i of provider.index.large) take(i);
-    const cx0 = Math.floor(minX / POLYGON_CELL), cx1 = Math.floor(maxX / POLYGON_CELL);
-    const cy0 = Math.floor(minY / POLYGON_CELL), cy1 = Math.floor(maxY / POLYGON_CELL);
+    const cx0 = Math.floor(minX / SHAPE_CELL), cx1 = Math.floor(maxX / SHAPE_CELL);
+    const cy0 = Math.floor(minY / SHAPE_CELL), cy1 = Math.floor(maxY / SHAPE_CELL);
     for (let cx = cx0; cx <= cx1; cx++) {
         for (let cy = cy0; cy <= cy1; cy++) {
             const bucket = provider.index.cells.get(cx * 1048576 + cy);
@@ -393,30 +434,42 @@ function douglasPeucker(points, tolerance) {
     return out;
 }
 
-function simplifyRing(ring, scale) {
+/** Points snapped to the pixel grid at `scale`, repeats dropped, then Douglas-Peucker (ends kept). */
+function snapAndSimplify(points, scale) {
     const snapped = [];
     let px = NaN, py = NaN;
-    for (let i = 0; i < ring.length; i += 2) {
-        const x = Math.round(ring[i] * scale), y = Math.round(ring[i + 1] * scale);
+    for (let i = 0; i < points.length; i += 2) {
+        const x = Math.round(points[i] * scale), y = Math.round(points[i + 1] * scale);
         if (x === px && y === py) continue;
         snapped.push(x, y);
         px = x; py = y;
     }
-    const simplified = douglasPeucker(snapped, DP_TOLERANCE_PX);
+    return douglasPeucker(snapped, DP_TOLERANCE_PX);
+}
+
+function simplifyRing(ring, scale) {
+    const simplified = snapAndSimplify(ring, scale);
     return simplified.length >= 6 ? simplified : null;
 }
 
+/** An open path at `scale`, or null when it comes down to one point. */
+function simplifyPath(path, scale) {
+    const simplified = snapAndSimplify(path, scale);
+    return simplified.length >= 4 ? simplified : null;
+}
+
 /**
- * The polygon as drawn at zoom `z`: `{ rings }` of world-pixel points, `{ dot }`
- * for a polygon under a pixel, or null when nothing of it is visible.
+ * The shape as drawn at zoom `z`, in world pixels: a polygon's `{ rings }`, a
+ * polyline's `{ path }`, a `{ dot }` for either under a pixel, or null when
+ * nothing of it is visible.
  */
 function simplifiedAt(provider, index, z, tileSize) {
     const key = z + '/' + tileSize;
     let perZoom = provider.simplified.get(key);
     if (!perZoom) {
-        perZoom = new Array(provider.polygons.length);
+        perZoom = new Array(provider.shapes.length);
         provider.simplified.set(key, perZoom);
-        while (provider.simplified.size > POLYGON_ZOOMS_KEPT) {
+        while (provider.simplified.size > SHAPE_ZOOMS_KEPT) {
             provider.simplified.delete(provider.simplified.keys().next().value);
         }
     } else {
@@ -425,10 +478,15 @@ function simplifiedAt(provider, index, z, tileSize) {
     }
     const cached = perZoom[index];
     if (cached !== undefined) return cached;
-    const p = provider.polygons[index];
+    const p = provider.shapes[index];
     const scale = tileSize * 2 ** z;
     let result = null;
-    if (p) {
+    if (p && p.line) {
+        const w = (p.bbox[2] - p.bbox[0]) * scale, h = (p.bbox[3] - p.bbox[1]) * scale;
+        const path = w < 1 && h < 1 ? null : simplifyPath(p.path, scale);
+        // Down to one point: a dot at the middle of the line.
+        result = path ? { path } : { dot: [((p.bbox[0] + p.bbox[2]) / 2) * scale, ((p.bbox[1] + p.bbox[3]) / 2) * scale] };
+    } else if (p) {
         const w = (p.bbox[2] - p.bbox[0]) * scale, h = (p.bbox[3] - p.bbox[1]) * scale;
         if (w < 1 && h < 1) {
             result = { dot: [Math.floor(((p.bbox[0] + p.bbox[2]) / 2) * scale), Math.floor(((p.bbox[1] + p.bbox[3]) / 2) * scale)] };
@@ -450,11 +508,12 @@ function simplifiedAt(provider, index, z, tileSize) {
     return result;
 }
 
-async function renderPolygonTile(provider, x, y, z, tileSize, pixelRatio = 1) {
+/** A tile of a shape route: `{ kind: 'tile', blob }`, `{ kind: 'empty' }` or `{ kind: 'failed' }`. */
+async function renderShapeTile(provider, x, y, z, tileSize, pixelRatio = 1) {
     const scale = tileSize * 2 ** z;
     const originX = x * tileSize, originY = y * tileSize;
     const pad = provider.maxStrokePx / 2 + 1;
-    const candidates = queryPolygons(
+    const candidates = queryShapes(
         provider,
         (originX - pad) / scale, (originY - pad) / scale,
         (originX + tileSize + pad) / scale, (originY + tileSize + pad) / scale,
@@ -469,9 +528,31 @@ async function renderPolygonTile(provider, x, y, z, tileSize, pixelRatio = 1) {
     ctx.lineCap = 'round';
     let drew = false;
     for (const index of candidates) {
-        const p = provider.polygons[index];
+        const p = provider.shapes[index];
         const shape = simplifiedAt(provider, index, z, tileSize);
         if (!shape) continue;
+        if (p.line) {
+            if (!(p.strokeWidth > 0) || !isVisibleColor(p.stroke)) continue;
+            const width = p.strokeWidth * r;
+            if (shape.dot) {
+                // A line shorter than a pixel: a round dot as wide as the line, at least a pixel.
+                const dot = new Path2D();
+                dot.arc((shape.dot[0] - originX) * r, (shape.dot[1] - originY) * r, Math.max(width, 1) / 2, 0, 2 * Math.PI);
+                ctx.fillStyle = p.stroke;
+                ctx.fill(dot);
+            } else {
+                // The whole path, overhang included: the canvas cuts it at the tile edge,
+                // and the next tile draws the same path at the same place.
+                const line = new Path2D();
+                line.moveTo((shape.path[0] - originX) * r, (shape.path[1] - originY) * r);
+                for (let i = 2; i < shape.path.length; i += 2) line.lineTo((shape.path[i] - originX) * r, (shape.path[i + 1] - originY) * r);
+                ctx.strokeStyle = p.stroke;
+                ctx.lineWidth = width;
+                ctx.stroke(line);
+            }
+            drew = true;
+            continue;
+        }
         const fillVisible = isVisibleColor(p.fill);
         const strokeVisible = p.strokeWidth > 0 && isVisibleColor(p.stroke) && (shape.dot != null || shape.outlined);
         if (shape.dot) {
@@ -539,20 +620,29 @@ self.addEventListener('message', (event) => {
             event.ports[0].postMessage({ ok: true });
         }
     } else if (msg.type === 'sw-register-polygons') {
-        registerSwPolygons(msg);
-        dropAllPolygonTiles(msg.routeId);
+        registerSwShapes(msg.routeId, msg.polygons.map(decodeSwPolygon));
         if (event.ports && event.ports[0]) {
             event.ports[0].postMessage({ ok: true });
         }
     } else if (msg.type === 'sw-update-polygons') {
-        updateSwPolygons(msg);
+        updateSwShapes(msg.routeId, msg.updates.map((u) => ({ index: u.index, shape: decodeSwPolygon(u.polygon) })));
+        if (event.ports && event.ports[0]) {
+            event.ports[0].postMessage({ ok: true });
+        }
+    } else if (msg.type === 'sw-register-polylines') {
+        registerSwShapes(msg.routeId, msg.polylines.map(decodeSwPolyline));
+        if (event.ports && event.ports[0]) {
+            event.ports[0].postMessage({ ok: true });
+        }
+    } else if (msg.type === 'sw-update-polylines') {
+        updateSwShapes(msg.routeId, msg.updates.map((u) => ({ index: u.index, shape: decodeSwPolyline(u.polyline) })));
         if (event.ports && event.ports[0]) {
             event.ports[0].postMessage({ ok: true });
         }
     } else if (msg.type === 'sw-unregister') {
         swProviders.delete(msg.routeId);
         dropCachedTiles(msg.routeId);
-        if (swPolygonProviders.delete(msg.routeId)) dropAllPolygonTiles(msg.routeId);
+        if (swShapeProviders.delete(msg.routeId)) dropAllShapeTiles(msg.routeId);
         console.log('[tile-sw] sw-unregister:', msg.routeId);
     }
 });
@@ -901,29 +991,29 @@ self.addEventListener('fetch', (event) => {
     if (!parsed) return;
 
     const { routeId, tileSize, x, y, z, pixelRatio } = parsed;
-    const polygonProvider = swPolygonProviders.get(routeId);
-    if (polygonProvider && canRenderOffscreen()) {
-        const key = polygonTileCacheKey(routeId, tileSize, z, x, y, pixelRatio);
+    const shapeProvider = swShapeProviders.get(routeId);
+    if (shapeProvider && canRenderOffscreen()) {
+        const key = shapeTileCacheKey(routeId, tileSize, z, x, y, pixelRatio);
         const cached = cachedTile(key);
         if (cached) {
             event.respondWith(pngResponse(cached));
             return;
         }
-        const generation = polygonProvider.generation;
+        const generation = shapeProvider.generation;
         event.respondWith(
-            renderPolygonTile(polygonProvider, x, y, z, tileSize, pixelRatio)
+            renderShapeTile(shapeProvider, x, y, z, tileSize, pixelRatio)
                 .then(async (outcome) => {
                     if (outcome.kind === 'empty') return emptyTileResponse();
                     if (outcome.kind === 'failed') return failedTileResponse();
                     const bytes = await outcome.blob.arrayBuffer();
                     // The route may have been replaced or changed while this tile was drawn.
-                    if (swPolygonProviders.get(routeId) === polygonProvider && polygonProvider.generation === generation) {
+                    if (swShapeProviders.get(routeId) === shapeProvider && shapeProvider.generation === generation) {
                         cacheTile(key, bytes);
                     }
                     return pngResponse(bytes);
                 })
                 .catch((err) => {
-                    console.warn('[tile-sw] polygon tile failed:', err);
+                    console.warn('[tile-sw] shape tile failed:', err);
                     return failedTileResponse();
                 }),
         );

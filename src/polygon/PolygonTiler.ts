@@ -3,6 +3,8 @@ import { RasterLayerSource } from '../raster/RasterLayerSource';
 import type { PolygonState } from './PolygonState';
 import { PolygonTileSet } from './PolygonTileSet';
 import { PolygonTilingOptions } from './PolygonTilingOptions';
+import { POLYGON_TILE_CODEC, ShapeTiler, ShapeTileSet } from '../tileserver/ShapeTileSet';
+import type { SWPolygon } from '../tileserver/LocalTileServer';
 
 /** The id of the raster layer that shows tiled polygons. */
 export const POLYGON_TILE_LAYER_ID = 'mc-polygon-tiles';
@@ -33,48 +35,35 @@ export function polygonTileRasterLayerState(template: string, tileSize = 256): R
 export class PolygonTiler {
     onTemplate: ((template: string | null, tileSize: number) => void | Promise<void>) | null = null;
 
-    private readonly tileSet = new PolygonTileSet();
-    private tiled = new Set<string>();
-    private states: readonly PolygonState[] = [];
+    private readonly shapes: ShapeTiler<PolygonState, SWPolygon>;
 
     constructor(readonly options: PolygonTilingOptions = PolygonTilingOptions.Default) {
-        this.tileSet.onTemplateChanged = (template) => void this.onTemplate?.(template, this.tileSet.tileSize);
+        this.shapes = new ShapeTiler<PolygonState, SWPolygon>(
+            new ShapeTileSet(POLYGON_TILE_CODEC),
+            (state) => PolygonTileSet.canTile(state),
+            (tileable) =>
+                PolygonTilingOptions.shouldUseTiles(this.options, tileable.length, PolygonTileSet.vertexCount(tileable)),
+        );
+        this.shapes.onTemplate = (template, tileSize) => this.onTemplate?.(template, tileSize);
     }
 
     /** Re-decides tiling for `data` and resolves to the ids drawn as tiles. */
-    async route(data: readonly PolygonState[]): Promise<ReadonlySet<string>> {
-        const tileable = data.filter((state) => PolygonTileSet.canTile(state));
-        const useTiles = PolygonTilingOptions.shouldUseTiles(
-            this.options,
-            tileable.length,
-            PolygonTileSet.vertexCount(tileable),
-        );
-        // Null without a service worker that can draw them: draw natively then.
-        const template = useTiles ? await this.tileSet.setPolygons(tileable) : null;
-        if (template == null) {
-            this.tileSet.dispose();
-            this.tiled = new Set();
-            this.states = [];
-        } else {
-            this.tiled = new Set(tileable.map((state) => state.id));
-            this.states = tileable;
-        }
-        await this.onTemplate?.(template, this.tileSet.tileSize);
-        return this.tiled;
+    route(data: readonly PolygonState[]): Promise<ReadonlySet<string>> {
+        return this.shapes.route(data);
     }
 
     /** The states drawn as tiles, as of the last {@link route}. */
     tiledStates(): readonly PolygonState[] {
-        return this.states;
+        return this.shapes.tiledStates();
     }
 
     isTiled(id: string): boolean {
-        return this.tiled.has(id);
+        return this.shapes.isTiled(id);
     }
 
     /** An in-place change of a tiled polygon; only the tiles it touches are redrawn. */
     update(state: PolygonState): void {
-        this.tileSet.update(state);
+        this.shapes.update(state);
     }
 
     /**
@@ -83,18 +72,10 @@ export class PolygonTiler {
      * controller then hands it to the map SDK.
      */
     remove(id: string): void {
-        if (!this.tiled.has(id)) return;
-        const tiled = new Set(this.tiled);
-        tiled.delete(id);
-        this.tiled = tiled;
-        this.states = this.states.filter((state) => state.id !== id);
-        this.tileSet.remove(id);
+        this.shapes.remove(id);
     }
 
-    async clear(): Promise<void> {
-        this.tileSet.dispose();
-        this.tiled = new Set();
-        this.states = [];
-        await this.onTemplate?.(null, this.tileSet.tileSize);
+    clear(): Promise<void> {
+        return this.shapes.clear();
     }
 }

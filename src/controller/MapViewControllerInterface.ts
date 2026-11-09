@@ -5,6 +5,7 @@ import type { OverlayControllerLike } from './OverlayController';
 import type { OnCameraMoveHandler, OnMapEventHandler } from '../map/MapViewBase';
 import type { MapUISettings } from '../settings/MapUISettings';
 import type { MapCameraPosition } from '../types/MapCamera';
+import type { PolylineTilingOptions } from '../polyline/PolylineTilingOptions';
 
 // Matches Android: typealias OnMapInitializedHandler = () -> Unit
 export type OnMapInitializedHandler = () => void;
@@ -68,6 +69,17 @@ export interface MapViewControllerInterface {
 
   /** 登録を解除する。`BaseMapViewController` が実装を提供する。 */
   unregisterOverlayController?(controller: OverlayControllerLike): void;
+
+  /**
+   * Replaces when this map draws its polylines as tiles (the provider's
+   * `polylineTilingOptions` set it when the map was created). It takes effect
+   * the next time the polylines are handed to the map, which decides again for
+   * the whole list; polylines that then move between tiles and native drawing
+   * stay on the map, and their `onAdded` is not called again. Nothing happens
+   * on a map whose provider does not tile polylines.
+   * `BaseMapViewController` が実装を提供する。
+   */
+  setPolylineTilingOptions?(options: PolylineTilingOptions): void;
 
   /**
    * 範囲が収まるようにカメラを合わせる。

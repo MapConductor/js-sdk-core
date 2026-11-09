@@ -30,6 +30,17 @@ export interface SWPolygon {
     readonly strokeWidth: number;
 }
 
+/**
+ * One polyline as the tile service worker draws it: an open path as a
+ * polyline6 string (Encoded Polyline at 1e-6 degrees), stroked `strokeWidth`
+ * CSS pixels wide with round caps and joins. An empty path draws nothing.
+ */
+export interface SWPolyline {
+    readonly path: string;
+    readonly stroke: string;
+    readonly strokeWidth: number;
+}
+
 export class LocalTileServer {
     private readonly providers = new Map<string, TileProvider>();
     private static instance: LocalTileServer | null = null;
@@ -169,6 +180,20 @@ export class LocalTileServer {
     /** Replace some of a route's polygons in place; `index` is their position in the registered list. */
     sendSWPolygonUpdates(routeId: string, updates: readonly { index: number; polygon: SWPolygon }[]): Promise<boolean> {
         return this.postToSWAndWait({ type: 'sw-update-polygons', routeId, updates });
+    }
+
+    /**
+     * Hand the service worker the polylines it draws for `routeId`
+     * (see `PolylineTileSet`). Resolves once it has them; false when there is
+     * no controlling service worker.
+     */
+    sendSWPolylinesAndWait(routeId: string, polylines: readonly SWPolyline[]): Promise<boolean> {
+        return this.postToSWAndWait({ type: 'sw-register-polylines', routeId, polylines });
+    }
+
+    /** Replace some of a route's polylines in place; `index` is their position in the registered list. */
+    sendSWPolylineUpdates(routeId: string, updates: readonly { index: number; polyline: SWPolyline }[]): Promise<boolean> {
+        return this.postToSWAndWait({ type: 'sw-update-polylines', routeId, updates });
     }
 
     private postToSWAndWait(message: object): Promise<boolean> {

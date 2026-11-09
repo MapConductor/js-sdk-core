@@ -12,6 +12,10 @@ import { PolylineAddParams, PolylineChangeParams, PolylineOverlayRenderer } from
 import { OnPolylineEventHandler, PolylineEvent, PolylineState } from "./PolylineState";
 import { Mutex } from "../base/Mutex";
 import { notifyOverlaysAdded } from "../overlay/OverlayAdded";
+import type { PolylineTiler } from "./PolylineTiler";
+import { PolylineTileSet } from "./PolylineTileSet";
+
+const NO_IDS: ReadonlySet<string> = new Set();
 
 function fingerPrintsEqual(
     a: ReturnType<PolylineState["fingerPrint"]>,
@@ -36,6 +40,14 @@ export abstract class PolylineController<ActualPolyline>
     public readonly polylineManager: PolylineManagerInterface<ActualPolyline>;
     public readonly renderer: PolylineOverlayRenderer<ActualPolyline>;
     public clickListener: OnPolylineEventHandler | null;
+    /**
+     * Set by a provider that can show polyline tiles (see {@link PolylineTiler}).
+     * Polylines it tiles stay in {@link polylineManager}, for taps, with no
+     * native overlay: their entity's `polyline` is null and the renderer never
+     * sees them.
+     */
+    public tiler: PolylineTiler | null = null;
+    private tiledIds: ReadonlySet<string> = NO_IDS;
     private semaphore = new Mutex();
     private currentCameraPosition: MapCameraPosition | null = null;
 
@@ -76,7 +88,20 @@ export abstract class PolylineController<ActualPolyline>
         // Newly on the map; their onAdded runs once the add is done.
         const nowOnMap: PolylineState[] = [];
         await this.semaphore.withLock(async () => {
-            const previous = new Set(this.polylineManager.allEntities().map((e) => e.state.id));
+            const wasTiled = this.tiledIds;
+            const tiled = this.tiler ? await this.tiler.route(data) : NO_IDS;
+            this.tiledIds = tiled;
+            if (tiled.size > 0) data = data.filter((state) => !tiled.has(state.id));
+            // Only natively drawn polylines are diffed against the renderer.
+            const previous = new Set(
+                this.polylineManager
+                    .allEntities()
+                    .map((e) => e.state.id)
+                    .filter((id) => !wasTiled.has(id)),
+            );
+            // On the map before this add, natively or in tiles. Moving between
+            // the two is not an add.
+            const nativeBefore = tiled.size > 0 ? new Set(previous) : previous;
             const added: PolylineAddParams[] = [];
             const updated: PolylineChangeParams<ActualPolyline>[] = [];
             const removed: PolylineEntity<ActualPolyline>[] = [];
@@ -105,6 +130,7 @@ export abstract class PolylineController<ActualPolyline>
                 }
             }
 
+            // Natively drawn ones that left the list, or moved into the tiles.
             for (const remainId of previous) {
                 const e = this.polylineManager.removeEntity(remainId);
                 if (e) removed.push(e);
@@ -119,7 +145,7 @@ export abstract class PolylineController<ActualPolyline>
                         this.polylineManager.registerEntity(
                             createPolylineEntity({ polyline, state: added[i].state }),
                         );
-                        nowOnMap.push(added[i].state);
+                        if (!wasTiled.has(added[i].state.id)) nowOnMap.push(added[i].state);
                     }
                 });
             }
@@ -135,6 +161,25 @@ export abstract class PolylineController<ActualPolyline>
                 });
             }
 
+            // Tiled polylines: kept for taps, nothing native. Those that left
+            // the tiles and the list are forgotten; those that left the tiles
+            // for native drawing were added above.
+            const nativeIds = wasTiled.size > 0 ? new Set(data.map((state) => state.id)) : NO_IDS;
+            for (const id of wasTiled) {
+                if (!tiled.has(id) && !nativeIds.has(id) && this.polylineManager.hasEntity(id)) {
+                    this.polylineManager.removeEntity(id);
+                }
+            }
+            if (tiled.size > 0) {
+                for (const state of this.tiler!.tiledStates()) {
+                    // The tiles' template reached the map in route() (onTemplate).
+                    if (!wasTiled.has(state.id) && !nativeBefore.has(state.id)) nowOnMap.push(state);
+                    this.polylineManager.registerEntity(
+                        createPolylineEntity({ polyline: null as unknown as ActualPolyline, state }),
+                    );
+                }
+            }
+
             await this.renderer.onPostProcess();
         });
         notifyOverlaysAdded(nowOnMap);
@@ -144,6 +189,29 @@ export abstract class PolylineController<ActualPolyline>
         await this.semaphore.withLock(async () => {
             const prevEntity = this.polylineManager.getEntity(state.id);
             if (!prevEntity) return;
+            if (this.tiledIds.has(state.id)) {
+                if (PolylineTileSet.canTile(state)) {
+                    this.polylineManager.registerEntity(createPolylineEntity({ polyline: prevEntity.polyline, state }));
+                    this.tiler?.update(state);
+                    return;
+                }
+                // No longer drawable in a tile (geodesic, half the world wide, or
+                // under 2 points): the map SDK draws it from now on. Still on the
+                // map, so this is not an add. Whether the rest stay in tiles is
+                // left to the next add(), which decides tiling for the whole list.
+                const tiled = new Set(this.tiledIds);
+                tiled.delete(state.id);
+                this.tiledIds = tiled;
+                this.tiler?.remove(state.id);
+                const polylines = await this.renderer.onAdd([{ state }]);
+                if (polylines[0] != null) {
+                    this.polylineManager.registerEntity(createPolylineEntity({ polyline: polylines[0], state }));
+                } else {
+                    this.polylineManager.removeEntity(state.id);
+                }
+                await this.renderer.onPostProcess();
+                return;
+            }
 
             const currentFinger = state.fingerPrint();
             const prevFinger = prevEntity.fingerPrint;
@@ -165,7 +233,10 @@ export abstract class PolylineController<ActualPolyline>
 
     async clear(): Promise<void> {
         await this.semaphore.withLock(async () => {
-            await this.renderer.onRemove(this.polylineManager.allEntities());
+            const tiled = this.tiledIds;
+            this.tiledIds = NO_IDS;
+            await this.tiler?.clear();
+            await this.renderer.onRemove(this.polylineManager.allEntities().filter((e) => !tiled.has(e.state.id)));
             // manager を空にしてから onPostProcess を呼ぶ。GL 系の描画担当は remove では何もせず、
             // onPostProcess で manager の全部を描き直すので、逆の順だと clear() 後も地図に残る。
             this.polylineManager.clear();
