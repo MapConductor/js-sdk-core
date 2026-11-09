@@ -44,7 +44,8 @@ const COORD_TOLERANCE = 1e-5;
  * ```
  *
  * android-sdk の `MapDriverConformance.kt`、ios-sdk の
- * `MapDriverConformance.swift` と同じ 5 つのチェックを持つ。
+ * `MapDriverConformance.swift` と同じ 5 つのチェックに、`clearOverlays()` が拡張の
+ * マーカーまで届くかの非同期チェック（{@link MapDriverConformance.checkClearOverlaysReachesExtensions}）を足したもの。
  *
  * ## ここに入れられないもの
  *
@@ -213,5 +214,49 @@ export const MapDriverConformance = {
                     `(${screen.x}, ${screen.y}) -> (${back.latitude}, ${back.longitude})`,
             );
         }
+    },
+
+    /**
+     * `clearOverlays()` が、拡張が登録したマーカーのコントローラ（クラスタリングなどの
+     * `StrategyMarkerController`）まで clear するか。
+     *
+     * プロバイダの `clearOverlays()` が自分の 6 つだけを clear していると、
+     * クラスタリングのマーカーが `clearOverlays()` の後も残る。型でもビルドでも止まらない
+     * 「黙って何もしない」形なので、ここで確かめる。`clearOverlays()` は
+     * `BaseMapViewController.clearOverlayControllers` を通すこと。
+     */
+    async checkClearOverlaysReachesExtensions(controller: {
+        clearOverlays(): Promise<void>;
+        registerOverlayController?(controller: OverlayControllerLike): void;
+        unregisterOverlayController?(controller: OverlayControllerLike): void;
+    }): Promise<void> {
+        require_(
+            typeof controller.registerOverlayController === 'function',
+            () => 'the controller has no registerOverlayController; extensions cannot reach it',
+        );
+        let cleared = 0;
+        const extension: OverlayControllerLike = {
+            kind: 'marker',
+            hasId: () => false,
+            compositionAny: async () => {},
+            updateAny: async () => {},
+            setClickListenerAny: () => {},
+            resolveTap: () => null,
+            clear: async () => {
+                cleared++;
+            },
+        };
+        controller.registerOverlayController!(extension);
+        try {
+            await controller.clearOverlays();
+        } finally {
+            controller.unregisterOverlayController?.(extension);
+        }
+        require_(
+            cleared === 1,
+            () =>
+                `clearOverlays() cleared a registered extension marker controller ${cleared} times ` +
+                '(expected once); call clearOverlayControllers() from clearOverlays()',
+        );
     },
 } as const;

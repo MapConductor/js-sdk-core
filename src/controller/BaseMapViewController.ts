@@ -148,12 +148,61 @@ export abstract class BaseMapViewController {
   registerOverlayController(controller: OverlayControllerLike): void {
     if (this.overlayControllers.includes(controller)) return;
     this.overlayControllers.push(controller);
+    if (acceptsMapTap(controller)) controller.mapTapDispatcher = this.forwardMapTap;
+  }
+
+  /**
+   * マーカーコントローラへ渡すタップの入口。登録解除のときに自分が渡したものか
+   * 見分けるため、同じ関数を使い回す。
+   *
+   * マーカーのドラッグはドライバーではなくコアの `DefaultMarkerEventController` が
+   * ポインタを取って処理するので、`clickable: false` のマーカーのタップはそこから
+   * 地図のカスケードへ戻す必要がある。ここで配線しておけば、ドライバーは何も
+   * 書かなくてよい（書き忘れても「コンパイルは通るが何も起きない」にならない）。
+   *
+   * @internal
+   */
+  private readonly forwardMapTap = (position: GeoPoint): void => {
+    this.dispatchTap(position);
+  };
+
+  /**
+   * `clearOverlays()` の中身。プロバイダは自分のコントローラを渡して呼ぶだけでよい。
+   *
+   * 1. `own` を渡された順に 1 つずつ clear する（今までプロバイダが並べていたもの）。
+   * 2. 続けて、登録済みのうち `own` に無く、スロットに参加している（`kind` を持つ）
+   *    コントローラを登録順に clear する。拡張が足すストラテジ駆動のマーカー
+   *    （MarkerClusterGroup や MarkerRenderingSupport で作った `StrategyMarkerController`）がここに入る。
+   *
+   * 以前はプロバイダの `clearOverlays()` が自分の 6 つしか clear しておらず、
+   * クラスタリングなどのマーカーは `clearOverlays()` の後も地図に残った。
+   * カメラ購読だけのために登録するもの（heatmap など、スロットに参加しないもの）は
+   * オーバーレイを持たないので触らない。
+   *
+   * android-sdk / ios-sdk の `clearOverlays()` も同じ範囲を clear する。
+   *
+   * @internal ドライバー実装点。
+   */
+  protected async clearOverlayControllers(
+    own: readonly { clear(): Promise<void> | void }[],
+  ): Promise<void> {
+    for (const controller of own) await controller.clear();
+    const ownSet = new Set<unknown>(own);
+    for (const controller of [...this.overlayControllers]) {
+      if (ownSet.has(controller)) continue;
+      if (!isSlottedOverlayController(controller)) continue;
+      if (typeof controller.clear !== 'function') continue;
+      await controller.clear();
+    }
   }
 
   /** 登録を解除する。拡張コンポーネントのアンマウント時に呼ぶ。 */
   unregisterOverlayController(controller: OverlayControllerLike): void {
     const index = this.overlayControllers.indexOf(controller);
     if (index >= 0) this.overlayControllers.splice(index, 1);
+    if (acceptsMapTap(controller) && controller.mapTapDispatcher === this.forwardMapTap) {
+      controller.mapTapDispatcher = null;
+    }
   }
 
   /**
@@ -537,4 +586,11 @@ export abstract class BaseMapViewController {
     }
     this.overlayControllers.length = 0;
   }
+}
+
+/** マーカーのタップを地図のカスケードへ戻せるコントローラ（`AbstractMarkerController`）。 */
+function acceptsMapTap(
+  controller: OverlayControllerLike,
+): controller is OverlayControllerLike & { mapTapDispatcher: ((position: GeoPoint) => void) | null } {
+  return 'mapTapDispatcher' in controller;
 }

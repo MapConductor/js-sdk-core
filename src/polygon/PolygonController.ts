@@ -230,7 +230,10 @@ export abstract class PolygonController<ActualPolygon>
             this.tiledIds = NO_IDS;
             await this.tiler?.clear();
             await this.renderer.onRemove(this.polygonManager.allEntities().filter((e) => !tiled.has(e.state.id)));
+            // manager を空にしてから onPostProcess を呼ぶ。GL 系の描画担当は remove では何もせず、
+            // onPostProcess で manager の全部を描き直すので、逆の順だと clear() 後も地図に残る。
             this.polygonManager.clear();
+            await this.renderer.onPostProcess();
         });
     }
 

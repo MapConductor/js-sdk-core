@@ -8,6 +8,12 @@ import type { OnMarkerEventHandler } from './OnMarkerEventHandler';
 const MARKER_DRAG_THRESHOLD_PX = 3;
 
 /**
+ * マーカーのジェスチャの後に来る click を待つ上限（ms）。
+ * タッチの click はジェスチャ認識を経て遅れて来るので、0 では足りない。
+ */
+const SWALLOW_CLICK_WINDOW_MS = 400;
+
+/**
  * ドラッグ処理が地図エンジンに要求する最小の面。
  *
  * maplibre-gl / mapbox-gl の `Map` がそのまま満たす（TomTom Orbis と Longdo web も
@@ -61,6 +67,17 @@ export interface MarkerEventHost<ActualMarker> {
     updateSelectedPosition(position: GeoPoint | null): void;
 
     dispatchClick(state: MarkerState): void;
+
+    /**
+     * 地図のタップの入口（`BaseMapViewController.dispatchTap`）。marker → オーバーレイ →
+     * 地図クリックの順に 1 つだけ配送する。
+     *
+     * `clickable: false` のマーカーをタップしたとき、そのタップを下へ流すのに使う。
+     * `BaseMapViewController.registerOverlayController` が設定するので、ドライバーは
+     * 何も書かなくてよい。null（未登録）なら流さない。
+     */
+    mapTapDispatcher?: ((position: GeoPoint) => void) | null;
+
     dispatchDragStart(state: MarkerState): void;
     dispatchDrag(state: MarkerState): void;
     dispatchDragEnd(state: MarkerState): void;
@@ -205,6 +222,15 @@ export class DefaultMarkerEventController<ActualMarker> {
 
     private readonly handlePointerUp = (event: PointerEvent): void => {
         if (event.pointerId !== this.activePointerId) return;
+        // このジェスチャはマーカーのもの、という印。pointerup に既定の動作は無いので
+        // 他には影響しない。ポインタイベントから自前でタップを認識する地図エンジン
+        // （deck.gl の mjolnir.js は window で pointerup を聞く）は、これを見て
+        // 自分のタップを捨てる。ブラウザの click とは別の経路なので、下の
+        // swallowNextClick では止まらない。
+        event.preventDefault();
+        // pointerup と同じタスクで来る click を、地図に届く前に止める。ここ（同期部分）で
+        // 張らないと間に合わない。
+        this.swallowNextClick();
         void this.finishDrag(event, true);
     };
 
@@ -231,18 +257,63 @@ export class DefaultMarkerEventController<ActualMarker> {
         await this.host.setSelectedMarker(null);
         if (wasDragging) {
             this.host.dispatchDragEnd(selected.state);
-        } else if (updatePosition && selected.state.clickable) {
-            // A press and release that never passed the drag threshold is a
-            // click, and this is the only place that can report it: the
-            // pointerdown above called `preventDefault()` to take the gesture,
-            // which also suppresses the browser's click and with it the map's
-            // own tap cascade. Without this, a draggable marker was simply not
-            // clickable — `onClick` never fired, and the map did not get the
-            // tap either. Not dispatched for `pointercancel`, which is the
-            // gesture being taken away rather than completed.
-            this.host.dispatchClick(selected.state);
+        } else if (updatePosition) {
+            // A press and release that never passed the drag threshold is a tap,
+            // and this is the only place that reports it. `preventDefault()` on
+            // pointerdown stops the compatibility mousedown/mouseup but not the
+            // browser's click; that click is swallowed in handlePointerUp, because
+            // whether the map engine turns it into a tap is up to the engine
+            // (maplibre-gl drops a click far from the last mousedown it saw, and it
+            // never saw this one). So the tap is delivered from here, once:
+            //  - clickable: the marker's onClick;
+            //  - not clickable: through the map's own cascade, as on Android, where
+            //    the tap is the native map click and dispatchTap skips markers that
+            //    are not clickable — the polygon under a vertex handle gets it, or
+            //    the map click if nothing is there.
+            // Not dispatched for `pointercancel`, which is the gesture being taken
+            // away rather than completed.
+            if (selected.state.clickable) {
+                this.host.dispatchClick(selected.state);
+            } else {
+                const position = this.positionFromPointer(event);
+                if (position != null) this.host.mapTapDispatcher?.(position);
+            }
         }
         this.restoreMapInteraction(event.pointerId);
+    }
+
+    /**
+     * 次の 1 回の `click` を、地図に届く前に捨てる。
+     *
+     * マーカーを掴んだジェスチャはマーカーのもので、タップの配送は
+     * {@link finishDrag} が 1 回だけ行う。ブラウザの click まで地図へ流すと、
+     * ドラッグを離した点のポリゴンに onClick が飛び、clickable なマーカーの
+     * タップで onClick が 2 回になる。maplibre-gl 自身がドラッグ後にやっている
+     * こと（`DOM.suppressClick`）と同じ。
+     *
+     * 外すのは、捨てたとき・次のジェスチャの pointerdown・短い猶予のうち最初のもの。
+     * マウスの click は pointerup と同じタスクで来るが、タッチの click は
+     * ジェスチャ認識を経てから来るので、0 ms の猶予では間に合わないことがある。
+     * 次の pointerdown で外すので、続くタップの click を捨てることは無い。
+     */
+    private swallowNextClick(): void {
+        const view = this.canvas.ownerDocument?.defaultView;
+        if (!view) return;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const release = (): void => {
+            view.removeEventListener('click', swallow, true);
+            view.removeEventListener('pointerdown', release, true);
+            if (timer != null) clearTimeout(timer);
+            timer = null;
+        };
+        const swallow = (click: Event): void => {
+            click.preventDefault();
+            click.stopPropagation();
+            release();
+        };
+        view.addEventListener('click', swallow, true);
+        view.addEventListener('pointerdown', release, true);
+        timer = setTimeout(release, SWALLOW_CLICK_WINDOW_MS);
     }
 
     private restoreMapInteraction(pointerId: number): void {

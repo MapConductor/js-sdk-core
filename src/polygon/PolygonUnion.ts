@@ -103,6 +103,8 @@ interface Edge {
 const Q = 1e-9;
 // Tolerance for parallel/collinear/on-segment tests in feature-scale coords.
 const EPS = 1e-12;
+// A sub-edge this close to a mid-point passes through it (degrees, far below Q).
+const ON_EDGE = 1e-12;
 
 function unionRings(rings: Vec[][]): Vec[][] {
     // Directed edges of every ring (closed).
@@ -120,9 +122,83 @@ function unionRings(rings: Vec[][]): Vec[][] {
     return traceRings(boundary);
 }
 
+// Reach of intersectionPoints beyond a segment's box (degrees). Its collinear
+// test accepts an edge up to EPS / |seg| off the line, and a segment shorter
+// than sqrt(EPS) = 1e-6 is skipped there, so that is at most 2e-6.
+const MEET_PAD = 4e-6;
+
+/**
+ * Edges filed in a uniform grid over their bounding boxes, so a search asks
+ * only the edges near a box instead of all of them. A box covering every cell
+ * an edge's box touches finds every edge that box can meet.
+ */
+class EdgeGrid {
+    private readonly side: number;
+    private readonly minX: number;
+    private readonly minY: number;
+    private readonly cellW: number;
+    private readonly cellH: number;
+    private readonly cells = new Map<number, number[]>();
+    private readonly seen: Int32Array;
+    private stamp = 0;
+
+    constructor(edges: Edge[], pad: number) {
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const e of edges) {
+            minX = Math.min(minX, e.a.x, e.b.x); maxX = Math.max(maxX, e.a.x, e.b.x);
+            minY = Math.min(minY, e.a.y, e.b.y); maxY = Math.max(maxY, e.a.y, e.b.y);
+        }
+        this.side = Math.max(1, Math.min(1024, Math.ceil(Math.sqrt(edges.length))));
+        this.minX = minX;
+        this.minY = minY;
+        this.cellW = (maxX - minX) / this.side || 1;
+        this.cellH = (maxY - minY) / this.side || 1;
+        this.seen = new Int32Array(edges.length);
+        for (let i = 0; i < edges.length; i++) {
+            const { a, b } = edges[i];
+            this.forCells(Math.min(a.x, b.x) - pad, Math.min(a.y, b.y) - pad, Math.max(a.x, b.x) + pad, Math.max(a.y, b.y) + pad, key => {
+                const bucket = this.cells.get(key);
+                if (bucket) bucket.push(i);
+                else this.cells.set(key, [i]);
+            });
+        }
+    }
+
+    /** Indices of the edges filed in a cell the box touches, each once, in no order. */
+    near(minX: number, minY: number, maxX: number, maxY: number, out: number[]): number[] {
+        out.length = 0;
+        const stamp = ++this.stamp;
+        this.forCells(minX, minY, maxX, maxY, key => {
+            const bucket = this.cells.get(key);
+            if (!bucket) return;
+            for (const i of bucket) {
+                if (this.seen[i] === stamp) continue;
+                this.seen[i] = stamp;
+                out.push(i);
+            }
+        });
+        return out;
+    }
+
+    private forCells(minX: number, minY: number, maxX: number, maxY: number, visit: (key: number) => void): void {
+        const x0 = this.cell(minX, this.minX, this.cellW), x1 = this.cell(maxX, this.minX, this.cellW);
+        const y0 = this.cell(minY, this.minY, this.cellH), y1 = this.cell(maxY, this.minY, this.cellH);
+        for (let cx = x0; cx <= x1; cx++) {
+            for (let cy = y0; cy <= y1; cy++) visit(cx * this.side + cy);
+        }
+    }
+
+    private cell(v: number, min: number, size: number): number {
+        return Math.max(0, Math.min(this.side - 1, Math.floor((v - min) / size)));
+    }
+}
+
 /** Split every edge at all points where another edge crosses or touches it. */
 function splitEdges(edges: Edge[]): Edge[] {
     const result: Edge[] = [];
+    // Only an edge whose box comes within MEET_PAD of this one's can meet it.
+    const grid = new EdgeGrid(edges, MEET_PAD);
+    const near: number[] = [];
     for (let i = 0; i < edges.length; i++) {
         const seg = edges[i];
         const dir = sub(seg.b, seg.a);
@@ -137,7 +213,8 @@ function splitEdges(edges: Edge[]): Edge[] {
         };
         add(seg.a);
         add(seg.b);
-        for (let j = 0; j < edges.length; j++) {
+        const box = edgeBounds(seg);
+        for (const j of grid.near(box.minX - MEET_PAD, box.minY - MEET_PAD, box.maxX + MEET_PAD, box.maxY + MEET_PAD, near)) {
             if (i === j) continue;
             for (const p of intersectionPoints(seg, edges[j])) add(p);
         }
@@ -161,6 +238,9 @@ function splitEdges(edges: Edge[]): Edge[] {
 function classifyBoundary(subEdges: Edge[], rings: Vec[][]): Edge[] {
     const out: Edge[] = [];
     const seen = new Set<string>();
+    const grid = new EdgeGrid(subEdges, 0);
+    const near: number[] = [];
+    const ringsBounds = rings.map(ringBounds);
     for (const seg of subEdges) {
         const dir = sub(seg.b, seg.a);
         const len = Math.hypot(dir.x, dir.y);
@@ -168,13 +248,17 @@ function classifyBoundary(subEdges: Edge[], rings: Vec[][]): Edge[] {
 
         const mid = add2(seg.a, scale(dir, 0.5));
         // Unit left normal. Sample coverage just off each side of the mid-point;
-        // after splitting, no other edge crosses this sub-edge's interior, so a
-        // small offset stays within the two cells this edge separates.
+        // after splitting, no other edge crosses this sub-edge's interior, so an
+        // offset shorter than the distance to the nearest other edge stays within
+        // the two cells this edge separates. A fixed offset does not: where
+        // another hole runs closer than it (two holes 1e-5 degree apart), the
+        // sample lands inside that hole, the edge looks interior on both sides
+        // and is dropped, and the traced ring cuts across a hole.
         const nx = -dir.y / len;
         const ny = dir.x / len;
-        const off = Math.min(len * 0.25, 1e-5);
-        const leftInside = coverage({ x: mid.x + nx * off, y: mid.y + ny * off }, rings) > 0;
-        const rightInside = coverage({ x: mid.x - nx * off, y: mid.y - ny * off }, rings) > 0;
+        const off = Math.min(len * 0.25, 0.5 * clearance(mid, CLEARANCE_CAP, subEdges, grid, near));
+        const leftInside = coverage({ x: mid.x + nx * off, y: mid.y + ny * off }, rings, ringsBounds) > 0;
+        const rightInside = coverage({ x: mid.x - nx * off, y: mid.y - ny * off }, rings, ringsBounds) > 0;
         if (leftInside === rightInside) continue; // interior on both/neither side
 
         // Orient so the interior is on the left.
@@ -186,6 +270,38 @@ function classifyBoundary(subEdges: Edge[], rings: Vec[][]): Edge[] {
         out.push({ a, b });
     }
     return out;
+}
+
+// Farthest a side sample is taken from a sub-edge's mid-point, doubled (degrees).
+const CLEARANCE_CAP = 2e-5;
+
+/**
+ * Distance from `point` (the mid-point of a sub-edge) to the nearest sub-edge
+ * that does not pass through it, or `cap` when none is closer. The sub-edge
+ * itself and its duplicates from other rings pass through it and are skipped.
+ * Only the sub-edges filed near the box `cap` around the point are asked; any
+ * closer than `cap` is among them.
+ */
+function clearance(point: Vec, cap: number, subEdges: Edge[], grid: EdgeGrid, near: number[]): number {
+    let best = cap;
+    for (const index of grid.near(point.x - cap, point.y - cap, point.x + cap, point.y + cap, near)) {
+        const e = subEdges[index];
+        if (
+            Math.min(e.a.x, e.b.x) > point.x + best || Math.max(e.a.x, e.b.x) < point.x - best ||
+            Math.min(e.a.y, e.b.y) > point.y + best || Math.max(e.a.y, e.b.y) < point.y - best
+        ) continue;
+        const d = distanceToSegment(point, e);
+        if (d > ON_EDGE && d < best) best = d;
+    }
+    return best;
+}
+
+function distanceToSegment(p: Vec, e: Edge): number {
+    const d = sub(e.b, e.a);
+    const lenSq = dot(d, d);
+    const t = lenSq > 0 ? clamp01(dot(sub(p, e.a), d) / lenSq) : 0;
+    const q = add2(e.a, scale(d, t));
+    return Math.hypot(p.x - q.x, p.y - q.y);
 }
 
 /** Chain directed boundary edges into closed rings. */
@@ -273,12 +389,14 @@ function intersectionPoints(seg: Edge, other: Edge): Vec[] {
 }
 
 /**
- * True when no two rings cross, touch or nest. Edges are binned into a uniform
- * grid and only pairs sharing a cell are tested, so the cost grows with the
- * edge count rather than its square.
+/**
+ * True when no two rings cross, touch or nest, so the rings are already their
+ * own union. The edges go into the same EdgeGrid the union uses, padded by
+ * MEET_PAD, and each edge is tested only against the edges of other rings filed
+ * near it, so the cost grows with the edge count rather than its square.
  */
 function holesAreDisjoint(rings: Vec[][]): boolean {
-    const boxes = rings.map(ringBox);
+    const boxes = rings.map(ringBounds);
     // A ring inside another: one of its vertices is inside it.
     for (let i = 0; i < rings.length; i++) {
         const p = rings[i][0];
@@ -291,62 +409,37 @@ function holesAreDisjoint(rings: Vec[][]): boolean {
         }
     }
 
-    const edges: { edge: Edge; ring: number }[] = [];
+    const edges: Edge[] = [];
+    const ringOf: number[] = [];
     for (let r = 0; r < rings.length; r++) {
         const ring = rings[r];
-        for (let i = 0; i < ring.length; i++) edges.push({ edge: { a: ring[i], b: ring[(i + 1) % ring.length] }, ring: r });
-    }
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const b of boxes) {
-        minX = Math.min(minX, b.minX); minY = Math.min(minY, b.minY);
-        maxX = Math.max(maxX, b.maxX); maxY = Math.max(maxY, b.maxY);
-    }
-    const side = Math.max(1, Math.min(1024, Math.ceil(Math.sqrt(edges.length))));
-    // Padded by EPS so an edge lying on a cell border is in both cells.
-    const cellW = (maxX - minX) / side || 1;
-    const cellH = (maxY - minY) / side || 1;
-    const cellOf = (v: number, min: number, size: number) => Math.max(0, Math.min(side - 1, Math.floor((v - min) / size)));
-    const cells = new Map<number, number[]>();
-    for (let e = 0; e < edges.length; e++) {
-        const { a, b } = edges[e].edge;
-        const x0 = cellOf(Math.min(a.x, b.x) - EPS, minX, cellW), x1 = cellOf(Math.max(a.x, b.x) + EPS, minX, cellW);
-        const y0 = cellOf(Math.min(a.y, b.y) - EPS, minY, cellH), y1 = cellOf(Math.max(a.y, b.y) + EPS, minY, cellH);
-        for (let cx = x0; cx <= x1; cx++) {
-            for (let cy = y0; cy <= y1; cy++) {
-                const key = cx * side + cy;
-                const bucket = cells.get(key);
-                if (bucket) bucket.push(e);
-                else cells.set(key, [e]);
-            }
+        for (let i = 0; i < ring.length; i++) {
+            edges.push({ a: ring[i], b: ring[(i + 1) % ring.length] });
+            ringOf.push(r);
         }
     }
-    for (const bucket of cells.values()) {
-        for (let i = 0; i < bucket.length; i++) {
-            for (let j = i + 1; j < bucket.length; j++) {
-                const p = edges[bucket[i]], q = edges[bucket[j]];
-                if (p.ring !== q.ring && intersectionPoints(p.edge, q.edge).length > 0) return false;
-            }
+    const grid = new EdgeGrid(edges, MEET_PAD);
+    const near: number[] = [];
+    for (let i = 0; i < edges.length; i++) {
+        const box = edgeBounds(edges[i]);
+        for (const j of grid.near(box.minX - MEET_PAD, box.minY - MEET_PAD, box.maxX + MEET_PAD, box.maxY + MEET_PAD, near)) {
+            if (j <= i || ringOf[j] === ringOf[i]) continue;
+            if (intersectionPoints(edges[i], edges[j]).length > 0) return false;
         }
     }
     return true;
 }
 
-function ringBox(ring: Vec[]): { minX: number; minY: number; maxX: number; maxY: number } {
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const p of ring) {
-        if (p.x < minX) minX = p.x;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.y > maxY) maxY = p.y;
-    }
-    return { minX, minY, maxX, maxY };
-}
-
-/** How many rings' interiors contain the point. */
-function coverage(point: Vec, rings: Vec[][]): number {
+/**
+ * How many rings' interiors contain the point. A ring whose latitudes do not
+ * straddle the point's has no edge pointInRing would count, so it is skipped.
+ */
+function coverage(point: Vec, rings: Vec[][], boxes: Bounds[]): number {
     let count = 0;
-    for (const ring of rings) {
-        if (pointInRing(point, ring)) count++;
+    for (let i = 0; i < rings.length; i++) {
+        const box = boxes[i];
+        if (point.y < box.minY || point.y >= box.maxY) continue;
+        if (pointInRing(point, rings[i])) count++;
     }
     return count;
 }
@@ -392,6 +485,31 @@ function toRing(hole: GeoPoint[], origin: Vec): Vec[] | null {
         points.pop();
     }
     return points.length >= 3 ? points : null;
+}
+
+interface Bounds {
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+}
+
+function edgeBounds(e: Edge): Bounds {
+    return {
+        minX: Math.min(e.a.x, e.b.x), minY: Math.min(e.a.y, e.b.y),
+        maxX: Math.max(e.a.x, e.b.x), maxY: Math.max(e.a.y, e.b.y),
+    };
+}
+
+function ringBounds(ring: Vec[]): Bounds {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of ring) {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+    }
+    return { minX, minY, maxX, maxY };
 }
 
 function signedArea(ring: Vec[]): number {
