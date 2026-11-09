@@ -14,6 +14,11 @@ import type { OverlayKind } from "./OverlayKind";
 export interface OverlayControllerLike {
     onCameraChanged?(mapCameraPosition: MapCameraPosition): Promise<void> | void;
     destroy?(): void;
+    /**
+     * 載せているものを全部外す。`BaseMapViewController.clearOverlayControllers` が呼ぶ
+     * （プロバイダ自身のもの以外は、スロットに参加しているものだけ）。
+     */
+    clear?(): Promise<void> | void;
 
     // ── スロット参加分（{@link SlottedOverlayController} を参照） ──────────
     //

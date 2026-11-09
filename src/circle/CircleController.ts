@@ -31,7 +31,8 @@ function fingerPrintsEqual(a: ReturnType<CircleState["fingerPrint"]>, b: ReturnT
 export abstract class CircleController<ActualCircle>
     implements SlottedOverlayController, OverlayController<CircleState, CircleEntity<ActualCircle>, CircleEvent>
 {
-    readonly zIndex: number = 3;
+    // Above the polygons (3), under the polylines (5): OVERLAY_STACK_ORDER.
+    readonly zIndex: number = 4;
     public readonly circleManager: CircleManagerInterface<ActualCircle>;
     public readonly renderer: CircleOverlayRenderer<ActualCircle>;
     public clickListener: OnCircleEventHandler | null;
@@ -163,7 +164,10 @@ export abstract class CircleController<ActualCircle>
     async clear(): Promise<void> {
         await this.semaphore.withLock(async () => {
             await this.renderer.onRemove(this.circleManager.allEntities());
+            // manager を空にしてから onPostProcess を呼ぶ。GL 系の描画担当は remove では何もせず、
+            // onPostProcess で manager の全部を描き直すので、逆の順だと clear() 後も地図に残る。
             this.circleManager.clear();
+            await this.renderer.onPostProcess();
         });
     }
 

@@ -248,8 +248,10 @@ export abstract class RasterLayerController<ActualLayer extends object>
         await this.semaphore.withLock(async () => {
             this.upsertedIds.clear();
             await this.renderer.onRemove(this.rasterLayerManager.allEntities());
-            await this.renderer.onPostProcess();
+            // manager を空にしてから onPostProcess を呼ぶ。GL 系の描画担当は remove では何もせず、
+            // onPostProcess で manager の全部を描き直すので、逆の順だと clear() 後も地図に残る。
             this.rasterLayerManager.clear();
+            await this.renderer.onPostProcess();
         });
         this.syncHeaders();
     }

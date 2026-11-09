@@ -43,6 +43,17 @@ export abstract class AbstractMarkerController<ActualMarker>
     public renderer: MarkerOverlayRenderer<ActualMarker>;
     public clickListener: OnMarkerEventHandler | null;
 
+    /**
+     * 地図のタップの入口（`BaseMapViewController.dispatchTap`）。
+     *
+     * `registerOverlayController` で登録した地図が設定し、登録解除で null に戻す。
+     * `DefaultMarkerEventController` が、`clickable: false` のマーカーのタップを
+     * 下のオーバーレイや地図クリックへ流すのに使う（`MarkerEventHost.mapTapDispatcher`）。
+     *
+     * @internal ドライバー実装点。ドライバーが設定する必要は無い。
+     */
+    mapTapDispatcher: ((position: GeoPoint) => void) | null = null;
+
     constructor({
         markerManager,
         renderer,
@@ -333,6 +344,9 @@ export abstract class AbstractMarkerController<ActualMarker>
                 await this.renderer.onRemove(rendered);
             }
             this.markerManager.clear();
+            // 他の 5 種類と同じく、manager を空にしてから onPostProcess を呼ぶ。GL 系の描画担当は
+            // onRemove では地図に触らず、onPostProcess で manager の中身から描き直す。
+            await this.renderer.onPostProcess();
         });
     }
 

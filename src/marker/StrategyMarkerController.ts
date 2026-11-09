@@ -129,16 +129,21 @@ export class StrategyMarkerController<ActualMarker>
     }
 
     async clear(): Promise<void> {
-        // Release the renderer's per-marker resources (icon images / sprites)
-        // before dropping the entities. strategy.clear() only clears the manager's
-        // bookkeeping and never calls onRemove, so without this the GL providers'
-        // reference-counted icon images and Azure's sprite images would stay
-        // registered on the map after an explicit clear() while the map is alive.
-        const entities = this.strategy.markerManager.allEntities();
-        if (entities.length > 0) {
-            await this.renderer.onRemove(entities);
-        }
-        this.strategy.clear();
+        // Same order as the other controllers' clear(): onRemove(everything) → empty → onPostProcess.
+        // onRemove releases the renderer's per-marker resources (the GL providers' reference-counted
+        // icon images, Azure's sprites); strategy.clear() only drops the bookkeeping. The GL renderers
+        // draw from the manager in onPostProcess, so without it the cleared markers stayed on the map.
+        // Under the same lock as add/update so a clear cannot interleave with a strategy pass.
+        await this.semaphore.withLock(async () => {
+            const entities = this.strategy.markerManager.allEntities();
+            if (entities.length > 0) {
+                await this.renderer.onRemove(entities);
+            }
+            this.strategy.clear();
+            // Markers queued before the first camera fix were cleared too; don't add them later.
+            this.pendingStates = null;
+            await this.renderer.onPostProcess();
+        });
     }
 
     getEntity(id: string): MarkerEntity<ActualMarker> | null {
