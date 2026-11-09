@@ -222,6 +222,12 @@ export class DefaultMarkerEventController<ActualMarker> {
 
     private readonly handlePointerUp = (event: PointerEvent): void => {
         if (event.pointerId !== this.activePointerId) return;
+        // このジェスチャはマーカーのもの、という印。pointerup に既定の動作は無いので
+        // 他には影響しない。ポインタイベントから自前でタップを認識する地図エンジン
+        // （deck.gl の mjolnir.js は window で pointerup を聞く）は、これを見て
+        // 自分のタップを捨てる。ブラウザの click とは別の経路なので、下の
+        // swallowNextClick では止まらない。
+        event.preventDefault();
         // pointerup と同じタスクで来る click を、地図に届く前に止める。ここ（同期部分）で
         // 張らないと間に合わない。
         this.swallowNextClick();

@@ -237,6 +237,25 @@ test('the swallowed click is only the one that ends the marker gesture', async (
     assert.deepEqual(provider.log, ['dragEnd', 'polygon']);
 });
 
+test('the pointerup that ends a marker gesture is marked as handled', async () => {
+    // deck.gl recognizes taps from pointer events itself (mjolnir.js listens for
+    // pointerup on window, after the canvas), so it never sees the browser click;
+    // it skips a tap whose pointerup was defaultPrevented.
+    const provider = new Provider();
+    provider.putMarker({ clickable: true });
+    provider.canvas.fire('pointerdown', domEvent({ pointerId: 1, clientX: 50, clientY: 50 }));
+    const up = domEvent({ pointerId: 1, clientX: 50, clientY: 50 });
+    provider.canvas.fire('pointerup', up);
+    await flush();
+    assert.equal(up.defaultPrevented, true);
+
+    provider.markers.under = null;
+    provider.canvas.fire('pointerdown', domEvent({ pointerId: 2, clientX: 10, clientY: 10 }));
+    const mapUp = domEvent({ pointerId: 2, clientX: 10, clientY: 10 });
+    provider.canvas.fire('pointerup', mapUp);
+    assert.equal(mapUp.defaultPrevented, false);
+});
+
 test('a marker controller that is no longer registered does not forward taps', async () => {
     const provider = new Provider();
     provider.unregisterOverlayController(provider.markers);
