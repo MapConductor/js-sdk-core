@@ -654,6 +654,17 @@ declare class TileRenderFailedError extends Error {
  * `renderTile()` executes off the main thread. The worker should call
  * `createTileWorkerHandler()` from `@mapconductor/js-sdk-core`.
  */
+/**
+ * One polygon as the tile service worker draws it. Rings are polyline6
+ * strings (Encoded Polyline at 1e-6 degrees), outline first, then holes in any
+ * winding and unmerged: the worker fills with `nonzero` after orienting them.
+ */
+interface SWPolygon {
+    readonly rings: readonly string[];
+    readonly fill: string;
+    readonly stroke: string;
+    readonly strokeWidth: number;
+}
 declare class LocalTileServer {
     readonly baseUrl: string;
     private readonly providers;
@@ -716,6 +727,19 @@ declare class LocalTileServer {
         extraIconScale: number;
         declutterPx?: number;
     }): Promise<void>;
+    /**
+     * Hand the service worker the polygons it draws for `routeId`
+     * (see `PolygonTileSet`). Resolves once it has them, so the raster source
+     * can be added straight after; false when there is no controlling service
+     * worker, in which case nothing will draw these tiles.
+     */
+    sendSWPolygonsAndWait(routeId: string, polygons: readonly SWPolygon[]): Promise<boolean>;
+    /** Replace some of a route's polygons in place; `index` is their position in the registered list. */
+    sendSWPolygonUpdates(routeId: string, updates: readonly {
+        index: number;
+        polygon: SWPolygon;
+    }[]): Promise<boolean>;
+    private postToSWAndWait;
     private postToSW;
     /**
      * @param pixelRatio Device pixels per CSS pixel to draw tiles at — usually
@@ -4329,11 +4353,85 @@ declare class PolygonManager<ActualPolygon> implements PolygonManagerInterface<A
     private unwrapLongitudesAround;
 }
 
+/**
+ * Options for polygon tiling.
+ *
+ * When enabled and a map holds enough polygons, they are drawn into raster
+ * tiles by the tile service worker instead of being handed to the map SDK one
+ * by one. Taps are still resolved against the original shapes in
+ * `PolygonManager`, so tiling changes how polygons look, never what a tap hits.
+ *
+ * The counterpart of {@link MarkerTilingOptions}.
+ */
+interface PolygonTilingOptions {
+    readonly enabled: boolean;
+    /** Tile once a map holds at least this many polygons… */
+    readonly minPolygonCount: number;
+    /** …or at least this many vertices across them, whichever comes first. */
+    readonly minVertexCount: number;
+}
+declare namespace PolygonTilingOptions {
+    const Default: PolygonTilingOptions;
+    const Disabled: PolygonTilingOptions;
+    /** The one place the threshold is decided; callers must not restate it. */
+    function shouldUseTiles(options: PolygonTilingOptions, polygonCount: number, vertexCount: number): boolean;
+}
+
+/** The id of the raster layer that shows tiled polygons. */
+declare const POLYGON_TILE_LAYER_ID = "mc-polygon-tiles";
+/** The raster layer state for tiled polygons at `template`. */
+declare function polygonTileRasterLayerState(template: string, tileSize?: number): RasterLayerState;
+/**
+ * Decides which of a map's polygons are drawn as tiles, keeps them registered
+ * with the tile service worker, and tells the provider where the tiles are.
+ *
+ * Every provider's polygon controller uses it the same way:
+ * 1. {@link route} with the full list on every composition. It returns the ids
+ *    now in tiles; the controller keeps those in its `PolygonManager` (taps are
+ *    resolved there, against the original shapes) but gives the map SDK nothing
+ *    for them, and removes any native polygon it had drawn for one.
+ * 2. {@link update} for an in-place change of a tiled polygon, or {@link remove}
+ *    when the change means it can no longer be tiled.
+ * 3. {@link onTemplate} is how the tiles reach the map: a URL template to show
+ *    as a raster layer, or null to remove it. A provider with a RasterLayer
+ *    controller hands {@link polygonTileRasterLayerState} to its `upsert`.
+ */
+declare class PolygonTiler {
+    readonly options: PolygonTilingOptions;
+    onTemplate: ((template: string | null, tileSize: number) => void | Promise<void>) | null;
+    private readonly tileSet;
+    private tiled;
+    private states;
+    constructor(options?: PolygonTilingOptions);
+    /** Re-decides tiling for `data` and resolves to the ids drawn as tiles. */
+    route(data: readonly PolygonState[]): Promise<ReadonlySet<string>>;
+    /** The states drawn as tiles, as of the last {@link route}. */
+    tiledStates(): readonly PolygonState[];
+    isTiled(id: string): boolean;
+    /** An in-place change of a tiled polygon; only the tiles it touches are redrawn. */
+    update(state: PolygonState): void;
+    /**
+     * Takes one polygon out of the tiles, for a change that left it no longer
+     * {@link PolygonTileSet.canTile}; only the tiles it was in are redrawn. The
+     * controller then hands it to the map SDK.
+     */
+    remove(id: string): void;
+    clear(): Promise<void>;
+}
+
 declare abstract class PolygonController<ActualPolygon> implements SlottedOverlayController, OverlayController<PolygonState, PolygonEntity<ActualPolygon>, PolygonEvent> {
     readonly zIndex: number;
     readonly polygonManager: PolygonManagerInterface<ActualPolygon>;
     readonly renderer: PolygonOverlayRenderer<ActualPolygon>;
     clickListener: OnPolygonEventHandler | null;
+    /**
+     * Set by a provider that can show polygon tiles (see {@link PolygonTiler}).
+     * Polygons it tiles stay in {@link polygonManager}, for taps, with no
+     * native overlay: their entity's `polygon` is null and the renderer never
+     * sees them.
+     */
+    tiler: PolygonTiler | null;
+    private tiledIds;
     private semaphore;
     constructor({ polygonManager, renderer, clickListener, }: {
         polygonManager: PolygonManagerInterface<ActualPolygon>;
@@ -4409,6 +4507,80 @@ declare function unionHolesInPlace(state: PolygonState): PolygonState;
  * 未ユニオンのままにしておき、ヒットテストは元の穴リングで行う（android-sdk と同じ）。
  */
 declare function resolveHoles(state: PolygonState): PolygonState;
+
+/**
+ * Google's Encoded Polyline Algorithm Format, with the precision as a parameter.
+ *
+ * Each coordinate is rounded to `10^-precision` degrees, stored as the
+ * difference from the previous one, and written as base-64 variable-length
+ * groups. 5 is Google's own precision (about 1 m); 6 (about 0.1 m, "polyline6")
+ * is what the polygon tiles use, so a building's corners survive the trip.
+ *
+ * Coordinates go in and come out as a flat `[lat, lng, lat, lng, ...]`, the
+ * order the format itself uses.
+ */
+declare function encodePolyline(latLngs: ArrayLike<number>, precision?: number): string;
+declare function decodePolyline(encoded: string, precision?: number): number[];
+
+/**
+ * The polygons of one map that are drawn as raster tiles, and their route on
+ * the tile service worker.
+ *
+ * Provider-independent: a provider decides which polygons to tile
+ * ({@link PolygonTilingOptions.shouldUseTiles}, {@link PolygonTileSet.canTile}),
+ * hands them to {@link setPolygons}, and shows the returned URL template as a
+ * raster layer. In-place changes go through {@link update}; each one ends in a
+ * new template (the version in it is what makes the map ask again), reported
+ * to {@link onTemplateChanged}. Tiles the change did not touch are still cached
+ * by the worker and come back without being redrawn.
+ *
+ * Needs a service worker that can draw with OffscreenCanvas; {@link setPolygons}
+ * resolves to null without one, and the provider should draw the polygons
+ * itself instead.
+ */
+declare class PolygonTileSet {
+    readonly routeId: string;
+    onTemplateChanged: ((template: string) => void) | null;
+    private readonly server;
+    private readonly pixelRatio;
+    private indexById;
+    private version;
+    private registered;
+    private pending;
+    private pendingRemovals;
+    private flushTimer;
+    /**
+     * Whether a polygon can be drawn in a tile. Geodesic edges are curves the
+     * tile does not trace, and a ring spanning half the world or more crosses
+     * the antimeridian; the map SDK draws both.
+     */
+    static canTile(state: PolygonState): boolean;
+    static vertexCount(states: readonly PolygonState[]): number;
+    /**
+     * Registers `states` (replacing whatever was registered) and resolves to
+     * the URL template of their tiles, or null when no service worker can
+     * draw them.
+     */
+    setPolygons(states: readonly PolygonState[]): Promise<string | null>;
+    has(id: string): boolean;
+    /**
+     * One polygon changed in place. A change of zIndex reorders the list and
+     * needs {@link setPolygons} instead; everything else is applied here.
+     */
+    update(state: PolygonState): void;
+    /**
+     * Takes one polygon out of the tiles. Its slot in the worker's list is
+     * left empty, so the others keep their indices and only the tiles it was
+     * in are drawn again.
+     */
+    remove(id: string): void;
+    template(): string;
+    get tileSize(): number;
+    dispose(): void;
+    private fetchTile;
+    private flush;
+    private cancelPending;
+}
 
 interface PolylineEntity<ActualPolyline> {
     readonly polyline: ActualPolyline;
@@ -5625,5 +5797,5 @@ declare function segmentIntersectsRegion({ start, end, region, geodesic, }: {
 
 declare function splitByMeridian(points: GeoPoint[], geodesic: boolean): GeoPoint[][];
 
-export { AbstractCircleOverlayRenderer, AbstractGroundImageOverlayRenderer, AbstractMarkerController, AbstractMarkerIcon, AbstractMarkerOverlayRenderer, AbstractMarkerRenderingStrategy, AbstractPolygonOverlayRenderer, AbstractPolylineOverlayRenderer, AbstractViewportStrategy, AbstractZoomAltitudeConverter, BLANK_MAP_STYLE, BLANK_MAP_STYLE_URL, BaseMapViewController, CANONICAL_ORDER, CircleController, CircleManager, CircleOverlay, CollectorMarkerOverlayRenderer, ColorDefaultIcon, DEFAULT_CIRCLE_SEGMENTS, DEFAULT_RASTER_LAYER_USER_AGENT, DefaultMarkerEventController, DefaultMarkerIcon, Direction6, Direction6Delta, DriverConformanceViolation, Earth, EmptyMapServiceRegistry, GROUND_IMAGE_DEFAULT_TILE_SIZE, GeoGridIndex, GeoPoint, GroundImageController, GroundImageManager, GroundImageOverlay, GroundScaleZoomAltitudeConverter, HexGeocellImpl, IconImageCache, ImageDefaultIcon, ImageIcon, InitState, LocalTileServer, MAP_CAPABILITIES, MARKER_HIT_RADIUS_MOUSE_PX, MARKER_HIT_RADIUS_TOUCH_PX, MARKER_HIT_SEARCH_RADIUS_PX, MARKER_RENDER_BATCH_SIZE, MAX_TILE_PIXEL_RATIO, MapCameraPosition, MapCapabilityStatus, MapDiagnostics, MapDriverConformance, MapOverlayRegistry, MapPaddings, MapProjection, MapProvider, MapProviderType, MapServiceRegistrations, MapUISettings, MapUISettingsDiagnostics, MapViewBase, MapViewHolderBase, MapViewState, MapViewStyleHost, MarkerAnimation, MarkerGrid, MarkerIconSize, MarkerManager, MarkerOverlay, MarkerRenderingSupportKey, MarkerTileRenderer, MarkerTilingOptions, MutableMapServiceRegistry, Mutex, NoCameraRestriction, OVERLAY_KINDS, OVERLAY_STACK_ORDER, OverlayCollector, OverlayGeoJson, OverlayHitResolver, Planar, PolygonController, PolygonManager, PolygonOverlay, PolylineController, PolylineManager, PolylineOverlay, RasterHeaderRuleSet, RasterLayerController, RasterLayerManager, RasterLayerOverlay, RasterLayerSource, RasterTilePreferenceKey, ScreenProjectionRequirement, Settings, Spherical, StrategyMarkerController, StyleMutationStore, TRANSPARENT_TILE_PNG, TileRenderFailedError, TileScheme, TileServerRegistry, VectorStyleAsDesign, VectorStyleMutationSupportKey, VectorStyleSupportKey, WEB_MERCATOR_MAX_EXTENT_METERS, WEB_MERCATOR_MAX_LATITUDE, WGS84, WGS84Geodesic, WebMercator, WebMercatorZoomAltitudeConverter, applyGlMapUISettings, applyStyleMutations, bearingFromNativeHeading, bearingFromNativeRotation, bounceInterpolation, bridgeHolesIntoSingleRing, bridgeHolesIntoSingleRingWrapAware, buildPolygonRings, buildPolylineSegments, buildUnwrappedPolygonRings, buildUnwrappedPolylinePath, buildVisibleRegion, calculateMetersPerPixel, capabilityOfGesture, circleToRing, closeRing, closestPointOnSegment, combineHash, compareOverlayStackKeys, computeArea$1 as computeArea, computeDistanceBetween$1 as computeDistanceBetween, computeFitBoundsCameraPosition, computeHeading$1 as computeHeading, computeLength$1 as computeLength, computeOffset$1 as computeOffset, computeOffsetOrigin$1 as computeOffsetOrigin, computeSignedArea$1 as computeSignedArea, computeDistanceBetween as computeWGS84DistanceBetween, createCircleEntity, createCircleState, createCollectorMarkerRenderingSupport, createDefaultIcon, createFingerPrint, createGeoPoint, createGeoRectBounds, createGroundImageEntity, createGroundImageState, createHexCell, createHexCoord, createIdentifiedHexCell, createMapCameraPosition, createMapServiceKey, createMarkerEntity, createMarkerFingerPrint, createMarkerState, createOffset, createOppositeMeridianPoint, createOverlayHit, createPolygonEntity, createPolygonState, createPolylineEntity, createPolylineState, createRandomId, createRasterLayerEntity, createRasterLayerState, createSegmentBounds, createSubject, createTileWorkerHandler, densifyAndNormalize, densifyPolygonRing, describeStyleMutations, expandBounds, fingerPrintEquals, fromGeoPoint, fromLatLng, fromLatLong, fromLngLat, fromLongLat, generateIdFromHashes, getNeighbors, hashBool, hashDefaultMarkerIcon, hashGeoPoint, hashNullable, hashNum, hashObj, hashStr, hexCellToIdPrefix, hexCoordToString, ingestMarkers, interpolate$1 as interpolate, interpolateAtMeridianGeodesic, interpolateAtMeridianLinear, interpolate as interpolateWGS84, isEmptyCameraRestriction, isFullySupported, isKnownUnsupported, isNativeDescribableStyle, isNativeMapExtensionCapable, isSlottedOverlayController, isUsable, longHashCode, mapCapabilityFromId, mapViewStateInternal, markerHitShape, markerIconExtentPx, markerIconHashCode, markerSearchBounds, normalizeLngDegrees, overlayStackBand, overlayStackBeforeId, overlayStackZ, parseStyleMutations, parseTilePixelRatio, pickMarkerHit, pickMarkerIndex, preferMarkerHit, resolveAttributionRules, resolveCameraRestriction, resolveHoles, resolveMapUISettings, resolveRasterAttributions, reverseStyleMutation, segmentIntersectsRegion, splitByMeridian, splitRingByMeridian, styleMutationLayerId, styleMutationProperty, styleMutationTarget, tilePixelRatio, tilePixelRatioSuffix, toDegrees, toInt, toNativeHeading, toNativeRotation, toRadians, unionHoleRings, unionHoles, unionHolesInPlace, vectorStyleKey, viewportSizeOf, withRasterHeaderTransform, wrapClickedPoint };
-export type { AddParams, AnyMarkerRenderingSupport, AttributionRule, BitmapIcon, CameraOptions, CameraRestriction, ChangeParams, ChangeParamsInterface, CircleAddParams, CircleCapable, CircleChangeParams, CircleEntity, CircleEvent, CircleFingerPrint, CircleManagerInterface, CircleOptions, CircleOverlayRenderer, CircleState, CircleStateCopyParams, CreateMarkerStateParams, DefaultMarkerIconOptions, FitBoundsCameraResult, GeoPointInterface, GeoRectBounds, GlGestureHandler, GlGestureHandlers, GlMarkerDragMap, GlTouchZoomRotateHandler, GroundImageAddParams, GroundImageCapable, GroundImageChangeParams, GroundImageEntity, GroundImageEvent, GroundImageFingerPrint, GroundImageManagerInterface, GroundImageOverlayRenderer, GroundImageState, GroundImageStateCopyParams, GroundOverlayOptions, HexCell, HexCoord, HexGeocell, HexGeocell as HexGeocellInterface, IdentifiedHexCell, ImageDefaultIconOptions, ImageIconOptions, ImageSource, InfoBubbleEntry, MapCameraPositionCopyParams, MapCameraPositionInterface, MapCapability, MapConfig, MapDesignTypeInterface, MapDiagnosticLevel, MapDiagnosticsSink, MapGesture, MapOverlayInterface, MapPaddingsInterface, MapServiceKey, MapServiceRegistration, MapServiceRegistry, MapStyleHost, MapStyleInstallation, MapViewBaseProps, MapViewControllerInterface, MapViewHolder, MapViewStateInterface, MapViewStateInternal, MapViewStateOptions, MapViewStyle, MarkerAnimationOverlayEntry, MarkerAnimationOverlayHost, MarkerCapable, MarkerEntity, MarkerEventController, MarkerEventHost, MarkerFingerPrint, MarkerHit, MarkerHitRect, MarkerIcon, MarkerIngestionResult, MarkerLabelHorizontalPosition, MarkerLabelPosition, MarkerLabelVerticalPosition, MarkerManagerStats, MarkerOptions, MarkerOverlayRenderer, MarkerRenderingStrategy, MarkerRenderingSupport, MarkerState, MarkerStateCopyParams, NativeDescribableStyle, NativeMapExtensionCapable, NativeMapExtensionDescriptor, NativeMapExtensionEvent, NativeMapExtensionEventHandler, NativeStyleDescriptor, Offset, OnCameraMoveHandler, OnCircleEventHandler, OnGroundImageEventHandler, OnMapEventHandler, OnMapInitializedHandler, OnMapLoadedHandler, OnMarkerEventHandler, OnPolygonEventHandler, OnPolylineEventHandler, OnRasterLayerEventHandler, OverlayController, OverlayControllerLike, OverlayHit, OverlayKind, OverlayRendererInterface, OverlayStackKey, PolygonAddParams, PolygonCapable, PolygonChangeParams, PolygonEntity, PolygonEvent, PolygonFingerPrint, PolygonManagerInterface, PolygonOptions, PolygonOverlayRenderer, PolygonRings, PolygonState, PolygonStateCopyParams, PolylineAddParams, PolylineCapable, PolylineChangeParams, PolylineEntity, PolylineEvent, PolylineFingerPrint, PolylineHitResult, PolylineManagerInterface, PolylineOptions, PolylineOverlayRenderer, PolylineState, PolylineStateCopyParams, PreparedLabel, PreparedMarker, Projection, RasterAttributionRule, RasterHeaderRule, RasterHeaderSupport, RasterLayerAddParams, RasterLayerCapable, RasterLayerChangeParams, RasterLayerEntity, RasterLayerEvent, RasterLayerFingerPrint, RasterLayerManagerInterface, RasterLayerMounting, RasterLayerOverlayRenderer, RasterLayerState, RasterLayerStateCopyParams, RasterRequestParameters, RasterTilePreference, RasterTransformRequest, ScreenOffsetResult, Serializable, SlottedOverlayController, StyleMutation, StylePatchableMap, TileOutcome, TileProvider, TileRenderRequest, TileRenderResponse, TileRequest, VectorStyleMutationSupport, VectorStyleSupport, ViewportSize, VisibleRegion };
+export { AbstractCircleOverlayRenderer, AbstractGroundImageOverlayRenderer, AbstractMarkerController, AbstractMarkerIcon, AbstractMarkerOverlayRenderer, AbstractMarkerRenderingStrategy, AbstractPolygonOverlayRenderer, AbstractPolylineOverlayRenderer, AbstractViewportStrategy, AbstractZoomAltitudeConverter, BLANK_MAP_STYLE, BLANK_MAP_STYLE_URL, BaseMapViewController, CANONICAL_ORDER, CircleController, CircleManager, CircleOverlay, CollectorMarkerOverlayRenderer, ColorDefaultIcon, DEFAULT_CIRCLE_SEGMENTS, DEFAULT_RASTER_LAYER_USER_AGENT, DefaultMarkerEventController, DefaultMarkerIcon, Direction6, Direction6Delta, DriverConformanceViolation, Earth, EmptyMapServiceRegistry, GROUND_IMAGE_DEFAULT_TILE_SIZE, GeoGridIndex, GeoPoint, GroundImageController, GroundImageManager, GroundImageOverlay, GroundScaleZoomAltitudeConverter, HexGeocellImpl, IconImageCache, ImageDefaultIcon, ImageIcon, InitState, LocalTileServer, MAP_CAPABILITIES, MARKER_HIT_RADIUS_MOUSE_PX, MARKER_HIT_RADIUS_TOUCH_PX, MARKER_HIT_SEARCH_RADIUS_PX, MARKER_RENDER_BATCH_SIZE, MAX_TILE_PIXEL_RATIO, MapCameraPosition, MapCapabilityStatus, MapDiagnostics, MapDriverConformance, MapOverlayRegistry, MapPaddings, MapProjection, MapProvider, MapProviderType, MapServiceRegistrations, MapUISettings, MapUISettingsDiagnostics, MapViewBase, MapViewHolderBase, MapViewState, MapViewStyleHost, MarkerAnimation, MarkerGrid, MarkerIconSize, MarkerManager, MarkerOverlay, MarkerRenderingSupportKey, MarkerTileRenderer, MarkerTilingOptions, MutableMapServiceRegistry, Mutex, NoCameraRestriction, OVERLAY_KINDS, OVERLAY_STACK_ORDER, OverlayCollector, OverlayGeoJson, OverlayHitResolver, POLYGON_TILE_LAYER_ID, Planar, PolygonController, PolygonManager, PolygonOverlay, PolygonTileSet, PolygonTiler, PolygonTilingOptions, PolylineController, PolylineManager, PolylineOverlay, RasterHeaderRuleSet, RasterLayerController, RasterLayerManager, RasterLayerOverlay, RasterLayerSource, RasterTilePreferenceKey, ScreenProjectionRequirement, Settings, Spherical, StrategyMarkerController, StyleMutationStore, TRANSPARENT_TILE_PNG, TileRenderFailedError, TileScheme, TileServerRegistry, VectorStyleAsDesign, VectorStyleMutationSupportKey, VectorStyleSupportKey, WEB_MERCATOR_MAX_EXTENT_METERS, WEB_MERCATOR_MAX_LATITUDE, WGS84, WGS84Geodesic, WebMercator, WebMercatorZoomAltitudeConverter, applyGlMapUISettings, applyStyleMutations, bearingFromNativeHeading, bearingFromNativeRotation, bounceInterpolation, bridgeHolesIntoSingleRing, bridgeHolesIntoSingleRingWrapAware, buildPolygonRings, buildPolylineSegments, buildUnwrappedPolygonRings, buildUnwrappedPolylinePath, buildVisibleRegion, calculateMetersPerPixel, capabilityOfGesture, circleToRing, closeRing, closestPointOnSegment, combineHash, compareOverlayStackKeys, computeArea$1 as computeArea, computeDistanceBetween$1 as computeDistanceBetween, computeFitBoundsCameraPosition, computeHeading$1 as computeHeading, computeLength$1 as computeLength, computeOffset$1 as computeOffset, computeOffsetOrigin$1 as computeOffsetOrigin, computeSignedArea$1 as computeSignedArea, computeDistanceBetween as computeWGS84DistanceBetween, createCircleEntity, createCircleState, createCollectorMarkerRenderingSupport, createDefaultIcon, createFingerPrint, createGeoPoint, createGeoRectBounds, createGroundImageEntity, createGroundImageState, createHexCell, createHexCoord, createIdentifiedHexCell, createMapCameraPosition, createMapServiceKey, createMarkerEntity, createMarkerFingerPrint, createMarkerState, createOffset, createOppositeMeridianPoint, createOverlayHit, createPolygonEntity, createPolygonState, createPolylineEntity, createPolylineState, createRandomId, createRasterLayerEntity, createRasterLayerState, createSegmentBounds, createSubject, createTileWorkerHandler, decodePolyline, densifyAndNormalize, densifyPolygonRing, describeStyleMutations, encodePolyline, expandBounds, fingerPrintEquals, fromGeoPoint, fromLatLng, fromLatLong, fromLngLat, fromLongLat, generateIdFromHashes, getNeighbors, hashBool, hashDefaultMarkerIcon, hashGeoPoint, hashNullable, hashNum, hashObj, hashStr, hexCellToIdPrefix, hexCoordToString, ingestMarkers, interpolate$1 as interpolate, interpolateAtMeridianGeodesic, interpolateAtMeridianLinear, interpolate as interpolateWGS84, isEmptyCameraRestriction, isFullySupported, isKnownUnsupported, isNativeDescribableStyle, isNativeMapExtensionCapable, isSlottedOverlayController, isUsable, longHashCode, mapCapabilityFromId, mapViewStateInternal, markerHitShape, markerIconExtentPx, markerIconHashCode, markerSearchBounds, normalizeLngDegrees, overlayStackBand, overlayStackBeforeId, overlayStackZ, parseStyleMutations, parseTilePixelRatio, pickMarkerHit, pickMarkerIndex, polygonTileRasterLayerState, preferMarkerHit, resolveAttributionRules, resolveCameraRestriction, resolveHoles, resolveMapUISettings, resolveRasterAttributions, reverseStyleMutation, segmentIntersectsRegion, splitByMeridian, splitRingByMeridian, styleMutationLayerId, styleMutationProperty, styleMutationTarget, tilePixelRatio, tilePixelRatioSuffix, toDegrees, toInt, toNativeHeading, toNativeRotation, toRadians, unionHoleRings, unionHoles, unionHolesInPlace, vectorStyleKey, viewportSizeOf, withRasterHeaderTransform, wrapClickedPoint };
+export type { AddParams, AnyMarkerRenderingSupport, AttributionRule, BitmapIcon, CameraOptions, CameraRestriction, ChangeParams, ChangeParamsInterface, CircleAddParams, CircleCapable, CircleChangeParams, CircleEntity, CircleEvent, CircleFingerPrint, CircleManagerInterface, CircleOptions, CircleOverlayRenderer, CircleState, CircleStateCopyParams, CreateMarkerStateParams, DefaultMarkerIconOptions, FitBoundsCameraResult, GeoPointInterface, GeoRectBounds, GlGestureHandler, GlGestureHandlers, GlMarkerDragMap, GlTouchZoomRotateHandler, GroundImageAddParams, GroundImageCapable, GroundImageChangeParams, GroundImageEntity, GroundImageEvent, GroundImageFingerPrint, GroundImageManagerInterface, GroundImageOverlayRenderer, GroundImageState, GroundImageStateCopyParams, GroundOverlayOptions, HexCell, HexCoord, HexGeocell, HexGeocell as HexGeocellInterface, IdentifiedHexCell, ImageDefaultIconOptions, ImageIconOptions, ImageSource, InfoBubbleEntry, MapCameraPositionCopyParams, MapCameraPositionInterface, MapCapability, MapConfig, MapDesignTypeInterface, MapDiagnosticLevel, MapDiagnosticsSink, MapGesture, MapOverlayInterface, MapPaddingsInterface, MapServiceKey, MapServiceRegistration, MapServiceRegistry, MapStyleHost, MapStyleInstallation, MapViewBaseProps, MapViewControllerInterface, MapViewHolder, MapViewStateInterface, MapViewStateInternal, MapViewStateOptions, MapViewStyle, MarkerAnimationOverlayEntry, MarkerAnimationOverlayHost, MarkerCapable, MarkerEntity, MarkerEventController, MarkerEventHost, MarkerFingerPrint, MarkerHit, MarkerHitRect, MarkerIcon, MarkerIngestionResult, MarkerLabelHorizontalPosition, MarkerLabelPosition, MarkerLabelVerticalPosition, MarkerManagerStats, MarkerOptions, MarkerOverlayRenderer, MarkerRenderingStrategy, MarkerRenderingSupport, MarkerState, MarkerStateCopyParams, NativeDescribableStyle, NativeMapExtensionCapable, NativeMapExtensionDescriptor, NativeMapExtensionEvent, NativeMapExtensionEventHandler, NativeStyleDescriptor, Offset, OnCameraMoveHandler, OnCircleEventHandler, OnGroundImageEventHandler, OnMapEventHandler, OnMapInitializedHandler, OnMapLoadedHandler, OnMarkerEventHandler, OnPolygonEventHandler, OnPolylineEventHandler, OnRasterLayerEventHandler, OverlayController, OverlayControllerLike, OverlayHit, OverlayKind, OverlayRendererInterface, OverlayStackKey, PolygonAddParams, PolygonCapable, PolygonChangeParams, PolygonEntity, PolygonEvent, PolygonFingerPrint, PolygonManagerInterface, PolygonOptions, PolygonOverlayRenderer, PolygonRings, PolygonState, PolygonStateCopyParams, PolylineAddParams, PolylineCapable, PolylineChangeParams, PolylineEntity, PolylineEvent, PolylineFingerPrint, PolylineHitResult, PolylineManagerInterface, PolylineOptions, PolylineOverlayRenderer, PolylineState, PolylineStateCopyParams, PreparedLabel, PreparedMarker, Projection, RasterAttributionRule, RasterHeaderRule, RasterHeaderSupport, RasterLayerAddParams, RasterLayerCapable, RasterLayerChangeParams, RasterLayerEntity, RasterLayerEvent, RasterLayerFingerPrint, RasterLayerManagerInterface, RasterLayerMounting, RasterLayerOverlayRenderer, RasterLayerState, RasterLayerStateCopyParams, RasterRequestParameters, RasterTilePreference, RasterTransformRequest, SWPolygon, ScreenOffsetResult, Serializable, SlottedOverlayController, StyleMutation, StylePatchableMap, TileOutcome, TileProvider, TileRenderRequest, TileRenderResponse, TileRequest, VectorStyleMutationSupport, VectorStyleSupport, ViewportSize, VisibleRegion };
