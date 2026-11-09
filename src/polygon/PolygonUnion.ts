@@ -98,6 +98,8 @@ interface Edge {
 const Q = 1e-9;
 // Tolerance for parallel/collinear/on-segment tests in feature-scale coords.
 const EPS = 1e-12;
+// A sub-edge this close to a mid-point passes through it (degrees, far below Q).
+const ON_EDGE = 1e-12;
 
 function unionRings(rings: Vec[][]): Vec[][] {
     // Directed edges of every ring (closed).
@@ -163,11 +165,15 @@ function classifyBoundary(subEdges: Edge[], rings: Vec[][]): Edge[] {
 
         const mid = add2(seg.a, scale(dir, 0.5));
         // Unit left normal. Sample coverage just off each side of the mid-point;
-        // after splitting, no other edge crosses this sub-edge's interior, so a
-        // small offset stays within the two cells this edge separates.
+        // after splitting, no other edge crosses this sub-edge's interior, so an
+        // offset shorter than the distance to the nearest other edge stays within
+        // the two cells this edge separates. A fixed offset does not: where
+        // another hole runs closer than it (two holes 1e-5 degree apart), the
+        // sample lands inside that hole, the edge looks interior on both sides
+        // and is dropped, and the traced ring cuts across a hole.
         const nx = -dir.y / len;
         const ny = dir.x / len;
-        const off = Math.min(len * 0.25, 1e-5);
+        const off = Math.min(len * 0.25, 0.5 * clearance(mid, 2e-5, subEdges));
         const leftInside = coverage({ x: mid.x + nx * off, y: mid.y + ny * off }, rings) > 0;
         const rightInside = coverage({ x: mid.x - nx * off, y: mid.y - ny * off }, rings) > 0;
         if (leftInside === rightInside) continue; // interior on both/neither side
@@ -181,6 +187,32 @@ function classifyBoundary(subEdges: Edge[], rings: Vec[][]): Edge[] {
         out.push({ a, b });
     }
     return out;
+}
+
+/**
+ * Distance from `point` (the mid-point of a sub-edge) to the nearest sub-edge
+ * that does not pass through it, or `cap` when none is closer. The sub-edge
+ * itself and its duplicates from other rings pass through it and are skipped.
+ */
+function clearance(point: Vec, cap: number, subEdges: Edge[]): number {
+    let best = cap;
+    for (const e of subEdges) {
+        if (
+            Math.min(e.a.x, e.b.x) > point.x + best || Math.max(e.a.x, e.b.x) < point.x - best ||
+            Math.min(e.a.y, e.b.y) > point.y + best || Math.max(e.a.y, e.b.y) < point.y - best
+        ) continue;
+        const d = distanceToSegment(point, e);
+        if (d > ON_EDGE && d < best) best = d;
+    }
+    return best;
+}
+
+function distanceToSegment(p: Vec, e: Edge): number {
+    const d = sub(e.b, e.a);
+    const lenSq = dot(d, d);
+    const t = lenSq > 0 ? clamp01(dot(sub(p, e.a), d) / lenSq) : 0;
+    const q = add2(e.a, scale(d, t));
+    return Math.hypot(p.x - q.x, p.y - q.y);
 }
 
 /** Chain directed boundary edges into closed rings. */
