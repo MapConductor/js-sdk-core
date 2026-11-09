@@ -34,8 +34,9 @@ export function unionHoleRings(holes: GeoPoint[][]): GeoPoint[][] {
         // Holes that neither cross, touch nor contain one another are already
         // their own union. Checking that is linear; the union is quadratic in
         // the hole edges, which a street-network parcel with 80 holes and
-        // 8,000 hole vertices turns into seconds.
-        if (holesAreDisjoint(rings)) return holes;
+        // 8,000 hole vertices turns into seconds. They still come back
+        // clockwise, as the union's rings do.
+        if (holesAreDisjoint(rings)) return clockwiseHoles(holes, origin);
 
         const merged = unionRings(rings);
         if (merged.length === 0) return holes;
@@ -389,6 +390,21 @@ function intersectionPoints(seg: Edge, other: Edge): Vec[] {
 }
 
 /**
+/**
+ * The holes, each wound clockwise like the union's output; `holes` itself when
+ * every one already is.
+ */
+function clockwiseHoles(holes: GeoPoint[][], origin: Vec): GeoPoint[][] {
+    let changed = false;
+    const out = holes.map(hole => {
+        const ring = toRing(hole, origin);
+        if (ring == null || signedArea(ring) <= 0) return hole;
+        changed = true;
+        return [...hole].reverse();
+    });
+    return changed ? out : holes;
+}
+
 /**
  * True when no two rings cross, touch or nest, so the rings are already their
  * own union. The edges go into the same EdgeGrid the union uses, padded by

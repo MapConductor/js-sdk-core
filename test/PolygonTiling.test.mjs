@@ -46,9 +46,13 @@ function square(lat, lng, size) {
   return [p(lat, lng), p(lat, lng + size), p(lat + size, lng + size), p(lat + size, lng)];
 }
 
-test('交わらない穴は計算せずにそのまま返す', () => {
+test('交わらない穴は計算せずに返す（巻きだけ時計回りにそろえる）', () => {
+  // square() は反時計回り。結合の結果と同じく時計回りにして返す。
   const holes = [square(0, 0, 1), square(0, 2, 1), square(2, 0, 1)];
-  assert.equal(unionHoleRings(holes), holes);
+  assert.deepEqual(unionHoleRings(holes), holes.map((h) => [...h].reverse()));
+  // もとから時計回りなら、渡したものをそのまま返す。
+  const clockwise = holes.map((h) => [...h].reverse());
+  assert.equal(unionHoleRings(clockwise), clockwise);
 });
 
 test('重なる穴・中に入った穴・接する穴は従来どおり 1 つにまとめる', () => {
@@ -63,7 +67,7 @@ test('交わらない穴が多くても速い（穴 80 個 x 100 頂点）', () 
     const cx = (i % 10) * 3, cy = Math.floor(i / 10) * 3;
     holes.push(Array.from({ length: 100 }, (_, k) => {
       const a = (2 * Math.PI * k) / 100;
-      return p(cy + Math.sin(a), cx + Math.cos(a));
+      return p(cy - Math.sin(a), cx + Math.cos(a)); // 時計回り
     }));
   }
   const start = performance.now();
