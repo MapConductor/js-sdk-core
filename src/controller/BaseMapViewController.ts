@@ -148,7 +148,23 @@ export abstract class BaseMapViewController {
   registerOverlayController(controller: OverlayControllerLike): void {
     if (this.overlayControllers.includes(controller)) return;
     this.overlayControllers.push(controller);
+    if (acceptsMapTap(controller)) controller.mapTapDispatcher = this.forwardMapTap;
   }
+
+  /**
+   * マーカーコントローラへ渡すタップの入口。登録解除のときに自分が渡したものか
+   * 見分けるため、同じ関数を使い回す。
+   *
+   * マーカーのドラッグはドライバーではなくコアの `DefaultMarkerEventController` が
+   * ポインタを取って処理するので、`clickable: false` のマーカーのタップはそこから
+   * 地図のカスケードへ戻す必要がある。ここで配線しておけば、ドライバーは何も
+   * 書かなくてよい（書き忘れても「コンパイルは通るが何も起きない」にならない）。
+   *
+   * @internal
+   */
+  private readonly forwardMapTap = (position: GeoPoint): void => {
+    this.dispatchTap(position);
+  };
 
   /**
    * `clearOverlays()` の中身。プロバイダは自分のコントローラを渡して呼ぶだけでよい。
@@ -184,6 +200,9 @@ export abstract class BaseMapViewController {
   unregisterOverlayController(controller: OverlayControllerLike): void {
     const index = this.overlayControllers.indexOf(controller);
     if (index >= 0) this.overlayControllers.splice(index, 1);
+    if (acceptsMapTap(controller) && controller.mapTapDispatcher === this.forwardMapTap) {
+      controller.mapTapDispatcher = null;
+    }
   }
 
   /**
@@ -567,4 +586,11 @@ export abstract class BaseMapViewController {
     }
     this.overlayControllers.length = 0;
   }
+}
+
+/** マーカーのタップを地図のカスケードへ戻せるコントローラ（`AbstractMarkerController`）。 */
+function acceptsMapTap(
+  controller: OverlayControllerLike,
+): controller is OverlayControllerLike & { mapTapDispatcher: ((position: GeoPoint) => void) | null } {
+  return 'mapTapDispatcher' in controller;
 }
