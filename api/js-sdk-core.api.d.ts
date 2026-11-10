@@ -156,7 +156,6 @@ declare namespace MapPaddings {
 type MapPaddingsInterface = MapPaddings;
 interface MapCameraPositionCopyParams {
     position?: GeoPointInterface | null;
-    center?: GeoPointInterface | null;
     zoom?: number | null;
     bearing?: number | null;
     tilt?: number | null;
@@ -194,8 +193,6 @@ declare function createMapCameraPosition({ position, zoom: givenZoom, bearing: g
 interface MapCameraPosition {
     /** Kotlin-compatible camera target. */
     position: GeoPoint;
-    /** Backward-compatible alias for position. */
-    center: GeoPoint;
     /**
      * Zoom level (typically 0-22, where higher is more zoomed in).
      *
