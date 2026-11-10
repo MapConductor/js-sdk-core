@@ -31,7 +31,6 @@ export type MapPaddingsInterface = MapPaddings;
 
 export interface MapCameraPositionCopyParams {
   position?: GeoPointInterface | null;
-  center?: GeoPointInterface | null;
   zoom?: number | null;
   bearing?: number | null;
   tilt?: number | null;
@@ -45,8 +44,6 @@ export interface MapCameraPositionCopyParams {
 export interface MapCameraPosition {
   /** Kotlin-compatible camera target. */
   position: GeoPoint;
-  /** Backward-compatible alias for position. */
-  center: GeoPoint;
   /**
    * Zoom level (typically 0-22, where higher is more zoomed in).
    *
@@ -143,9 +140,6 @@ export function createMapCameraPosition({
     get position() {
       return normalizedPosition;
     },
-    get center() {
-      return normalizedPosition;
-    },
     get zoom() {
       return zoom
     },
@@ -165,7 +159,7 @@ export function createMapCameraPosition({
     equals(other: MapCameraPosition | null, tolerance: number = 1e-2): boolean {
       if (!other) return false;
       return (
-        pointEquals(normalizedPosition, other.position ?? other.center, tolerance) &&
+        pointEquals(normalizedPosition, other.position, tolerance) &&
         numberEquals(zoom, other.zoom, tolerance) &&
         numberEquals(bearing, other.bearing, tolerance) &&
         numberEquals(tilt, other.tilt, tolerance)
@@ -173,7 +167,7 @@ export function createMapCameraPosition({
     },
     copy(partial: MapCameraPositionCopyParams = {}): MapCameraPosition {
       return createMapCameraPosition({
-        position: partial.position ?? partial.center ?? normalizedPosition,
+        position: partial.position ?? normalizedPosition,
         zoom: partial.zoom ?? givenZoom,
         bearing: partial.bearing ?? givenBearing,
         tilt: partial.tilt ?? givenTilt,
