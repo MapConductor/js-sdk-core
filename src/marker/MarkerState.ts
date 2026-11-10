@@ -34,6 +34,19 @@ export interface MarkerState {
     onDragEnd: OnMarkerEventHandler | null;
     onAnimateStart: OnMarkerEventHandler | null;
     onAnimateEnd: OnMarkerEventHandler | null;
+    /**
+     * Called once each time this marker goes from not being on the map to being on it:
+     * after the map SDK's marker has been created, or, when it is drawn in tiles, after
+     * the URL template of those tiles has been handed to the map as a raster layer (the
+     * tile images may still be loading then). Not called for an in-place change, nor
+     * when the marker moves between native drawing and tiles while staying on the map;
+     * called again if it is removed and added again. Clearing or destroying the map calls
+     * nothing. Runs after the add has finished, never from inside the drawing code.
+     *
+     * Like `onClick`, it is not part of the id, fingerprint, equality or hash: replacing
+     * it redraws nothing.
+     */
+    onAdded: OnMarkerEventHandler | null;
     animate(animation: MarkerAnimation | null): void;
     getAnimation(): MarkerAnimation | null;
     setPosition(position: GeoPoint): void;
@@ -65,6 +78,7 @@ export interface MarkerStateCopyParams {
     onDragEnd?: OnMarkerEventHandler | null;
     onAnimateStart?: OnMarkerEventHandler | null;
     onAnimateEnd?: OnMarkerEventHandler | null;
+    onAdded?: OnMarkerEventHandler | null;
 }
 
 export interface CreateMarkerStateParams {
@@ -82,6 +96,7 @@ export interface CreateMarkerStateParams {
     onDragEnd?: OnMarkerEventHandler | null;
     onAnimateStart?: OnMarkerEventHandler | null;
     onAnimateEnd?: OnMarkerEventHandler | null;
+    onAdded?: OnMarkerEventHandler | null;
 }
 
 export function createMarkerState(params: CreateMarkerStateParams): MarkerState {
@@ -113,6 +128,7 @@ class MarkerStateImpl implements MarkerState {
     private _onDragEnd: OnMarkerEventHandler | null;
     private _onAnimateStart: OnMarkerEventHandler | null;
     private _onAnimateEnd: OnMarkerEventHandler | null;
+    private _onAdded: OnMarkerEventHandler | null;
     // 読み込みを待っているアイコン。同じアイコンを何度代入しても待ちを重ねない。
     private _watchedIcon: MarkerIcon | null = null;
 
@@ -136,6 +152,7 @@ class MarkerStateImpl implements MarkerState {
         this._onDragEnd = params.onDragEnd ?? null;
         this._onAnimateStart = params.onAnimateStart ?? null;
         this._onAnimateEnd = params.onAnimateEnd ?? null;
+        this._onAdded = params.onAdded ?? null;
         this._animation = params.animation ?? null;
         this.watchIconImage(this._icon);
 
@@ -199,6 +216,14 @@ class MarkerStateImpl implements MarkerState {
     }
     set zIndex(nextZIndex: number | null) {
         this.setZIndex(nextZIndex);
+    }
+
+    get onAdded(): OnMarkerEventHandler | null {
+        return this._onAdded;
+    }
+    // No emit: onAdded is not part of the fingerprint, so changing it redraws nothing.
+    set onAdded(listener: OnMarkerEventHandler | null) {
+        this._onAdded = listener;
     }
 
     get onClick(): OnMarkerEventHandler | null {
@@ -330,6 +355,7 @@ class MarkerStateImpl implements MarkerState {
             onDragEnd: has("onDragEnd") ? opts.onDragEnd ?? null : this._onDragEnd,
             onAnimateStart: has("onAnimateStart") ? opts.onAnimateStart ?? null : this._onAnimateStart,
             onAnimateEnd: has("onAnimateEnd") ? opts.onAnimateEnd ?? null : this._onAnimateEnd,
+            onAdded: has("onAdded") ? opts.onAdded ?? null : this._onAdded,
         });
     }
 

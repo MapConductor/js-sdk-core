@@ -23,6 +23,9 @@ export interface PolygonEvent {
 
 export type OnPolygonEventHandler = (event: PolygonEvent) => void;
 
+/** Receives the state whose overlay was just added to the map. See `PolygonState.onAdded`. */
+export type OnPolygonAddedHandler = (state: PolygonState) => void;
+
 export interface PolygonState {
     readonly id: string;
     points: GeoPoint[];
@@ -43,6 +46,19 @@ export interface PolygonState {
     zIndex: number;
     extra: Serializable | null;
     onClick: OnPolygonEventHandler | null;
+    /**
+     * Called once each time this overlay goes from not being on the map to being on it:
+     * after the map SDK's object for it has been created, or, when it is drawn in tiles,
+     * after the URL template of those tiles has been handed to the map as a raster layer
+     * (the tile images may still be loading then). Not called for an in-place change,
+     * nor when it moves between native drawing and tiles while staying on the map;
+     * called again if it is removed and added again. Clearing or destroying the map calls
+     * nothing. Runs after the add has finished, never from inside the drawing code.
+     *
+     * Like `onClick`, it is not part of the id, fingerprint, equality or hash: replacing
+     * it redraws nothing.
+     */
+    onAdded: OnPolygonAddedHandler | null;
     fingerPrint(): PolygonFingerPrint;
     copy(opts?: PolygonStateCopyParams): PolygonState;
     equals(other: unknown): boolean;
@@ -62,6 +78,7 @@ export interface PolygonStateCopyParams {
     zIndex?: number;
     extra?: Serializable | null;
     onClick?: OnPolygonEventHandler | null;
+    onAdded?: OnPolygonAddedHandler | null;
 }
 
 function listHashCode(list: GeoPoint[]): number {
@@ -109,6 +126,7 @@ export function createPolygonState(params: {
     zIndex?: number;
     extra?: Serializable | null;
     onClick?: OnPolygonEventHandler | null;
+    onAdded?: OnPolygonAddedHandler | null;
 }): PolygonState {
     let points = params.points;
     // 穴のユニオンはここでは行わない。android-sdk と同じく「コンポーネント層でのみ」適用する
@@ -124,6 +142,7 @@ export function createPolygonState(params: {
     let zIndex = params.zIndex ?? 0;
     let extra = params.extra ?? null;
     let onClick = params.onClick ?? null;
+    let onAdded = params.onAdded ?? null;
 
     const id =
         params.id ??
@@ -182,6 +201,7 @@ export function createPolygonState(params: {
             zIndex: opts.zIndex ?? zIndex,
             extra: "extra" in opts ? opts.extra ?? null : extra,
             onClick: "onClick" in opts ? opts.onClick ?? null : onClick,
+            onAdded: "onAdded" in opts ? opts.onAdded ?? null : onAdded,
         });
 
     const equals = (other: unknown): boolean => {
@@ -211,6 +231,9 @@ export function createPolygonState(params: {
         set extra(v: Serializable | null) { extra = v; emit(); },
         get onClick() { return onClick; },
         set onClick(v: OnPolygonEventHandler | null) { onClick = v; emit(); },
+        get onAdded() { return onAdded; },
+        // No emit: onAdded is not part of the fingerprint, so changing it redraws nothing.
+        set onAdded(v: OnPolygonAddedHandler | null) { onAdded = v; },
         fingerPrint,
         copy,
         equals,

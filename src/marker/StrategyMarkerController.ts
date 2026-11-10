@@ -7,6 +7,7 @@ import type { OverlayController } from "../controller/OverlayController";
 import { MapCameraPosition, Offset } from "../types";
 import { Settings } from "../settings";
 import { Mutex } from "../base/Mutex";
+import { notifyOverlaysAdded } from "../overlay/OverlayAdded";
 import { markerIconExtentPx } from "./MarkerIconExtent";
 import { markerSearchBounds, pickMarkerHit } from "./MarkerHitPick";
 import { createDefaultIcon } from "./ColorDefaultIcon";
@@ -108,9 +109,15 @@ export class StrategyMarkerController<ActualMarker>
             this.pendingStates = data;
             return;
         }
+        let nowOnMap: MarkerState[] = [];
         await this.semaphore.withLock(async () => {
+            const manager = this.strategy.markerManager;
+            const fresh = data.filter((state) => !manager.hasEntity(state.id));
             await this.strategy.onAdd({ data, viewport: bounds, renderer: this.renderer });
+            // The strategy keeps every marker it shows (or clusters) in its manager.
+            nowOnMap = fresh.filter((state) => manager.hasEntity(state.id));
         });
+        notifyOverlaysAdded(nowOnMap);
     }
 
     async update(state: MarkerState): Promise<void> {

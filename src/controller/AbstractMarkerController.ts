@@ -12,6 +12,7 @@ import { MapCameraPosition } from "../types";
 import { ingestMarkers, type MarkerIngestionResult } from "../marker/MarkerIngestionEngine";
 import { OverlayController } from "./OverlayController";
 import { Mutex } from "../base/Mutex";
+import { notifyOverlaysAdded } from "../overlay/OverlayAdded";
 
 /** 続けて来るマーカーの変更を、タイルの描き直し 1 回にまとめる窓。1 フレーム分。 */
 const TILE_REFRESH_COALESCE_MS = 16;
@@ -197,7 +198,12 @@ export abstract class AbstractMarkerController<ActualMarker>
         // these animations against each other; the screen-space overlay path
         // resolves only when each animation ends. Running them concurrently lets
         // multiple markers drop/bounce simultaneously. See update() for details.
-        const toAnimate = (result as MarkerIngestionResult<ActualMarker> | null)?.entitiesToAnimate ?? [];
+        const ingested = result as MarkerIngestionResult<ActualMarker> | null;
+        // Native markers are on the map now, and tiled ones too: onTiledMarkersChanged
+        // above has handed their tiles to the map.
+        if (ingested) notifyOverlaysAdded(ingested.addedStates);
+
+        const toAnimate = ingested?.entitiesToAnimate ?? [];
         if (toAnimate.length > 0) {
             await Promise.all(toAnimate.map((entity) => this.renderer.onAnimate(entity)));
         }

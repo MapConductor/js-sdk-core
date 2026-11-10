@@ -6,3 +6,6 @@ export * from "./PolylineManager";
 export * from "./PolylineOverlay";
 export * from "./PolylineOverlayRenderer";
 export * from "./PolylineState";
+export * from "./PolylineTilingOptions";
+export * from "./PolylineTileSet";
+export * from "./PolylineTiler";
