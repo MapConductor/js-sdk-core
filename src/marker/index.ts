@@ -32,3 +32,4 @@ export * from './DefaultMarkerEventController';
 // だけで名前は公開サーフェスに残る。android-sdk / ios-sdk では同じものが
 // `MarkerGrid` という内部の型なので、名前もそちらに揃える。
 export * as MarkerGrid from './MarkerGrid';
+export * from "./MarkerDrawOrder"
