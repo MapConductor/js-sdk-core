@@ -66,6 +66,11 @@ export class PolygonTiler {
         this.shapes.update(state);
     }
 
+    /** @internal Rebuild draw order while preserving the existing tile population. */
+    reorder(state: PolygonState): Promise<void> {
+        return this.shapes.reorder(state);
+    }
+
     /**
      * Takes one polygon out of the tiles, for a change that left it no longer
      * {@link PolygonTileSet.canTile}; only the tiles it was in are redrawn. The

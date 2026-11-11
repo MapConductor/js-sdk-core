@@ -272,3 +272,23 @@ test('タイルから地図 SDK の描画へ移っても onAdded は呼ばれな
   assert.deepEqual(added, []);
   await controller.clear();
 });
+
+test('tiled zIndex changes reorder tiles even below the routing threshold', async () => {
+  const {controller, template} = setup();
+  const red = square('red', LAT, LNG, 'rgba(255,0,0,1)', {zIndex: 0});
+  const blue = square('blue', LAT, LNG, 'rgba(0,0,255,1)', {zIndex: 1});
+  const far = square('far', 34.69, 135.5, 'rgba(0,255,0,1)');
+  try {
+    await controller.add([red, blue, far]);
+    assert.equal((await tileFills(template(), T.z, T.x, T.y)).at(-1), 'rgba(0,0,255,1)');
+    far.geodesic = true;
+    await controller.update(far);
+    red.zIndex = 2;
+    await controller.update(red);
+    await settle();
+    assert.equal((await tileFills(template(), T.z, T.x, T.y)).at(-1), 'rgba(255,0,0,1)');
+    red.zIndex = 1;
+    await controller.update(red);
+    assert.equal((await tileFills(template(), T.z, T.x, T.y)).at(-1), 'rgba(0,0,255,1)');
+  } finally { await controller.clear(); }
+});

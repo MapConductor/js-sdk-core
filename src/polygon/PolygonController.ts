@@ -193,8 +193,12 @@ export abstract class PolygonController<ActualPolygon>
             if (!prevEntity) return;
             if (this.tiledIds.has(state.id)) {
                 if (PolygonTileSet.canTile(state)) {
+                    if (state.zIndex !== prevEntity.fingerPrint.zIndex) {
+                        await this.tiler?.reorder(state);
+                    } else {
+                        this.tiler?.update(state);
+                    }
                     this.polygonManager.registerEntity(createPolygonEntity({ polygon: prevEntity.polygon, state }));
-                    this.tiler?.update(state);
                     return;
                 }
                 // No longer drawable in a tile (geodesic, half the world wide, or

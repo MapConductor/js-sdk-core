@@ -309,6 +309,19 @@ export class ShapeTiler<S extends ShapeTileState, W> {
         this.tileSet.update(state);
     }
 
+    async reorder(state: S): Promise<void> {
+        const states: S[] = [];
+        // Preserve the collection's tie order, while reading the latest replacements.
+        for (const original of this.states) {
+            const current = original.id === state.id ? state : this.tileSet.source(original.id);
+            if (current) states.push(current);
+        }
+        const template = await this.tileSet.setShapes(states);
+        if (template == null) return;
+        this.states = states;
+        await this.onTemplate?.(template, this.tileSet.tileSize);
+    }
+
     remove(id: string): void {
         if (!this.tiled.has(id)) return;
         const tiled = new Set(this.tiled);
