@@ -1,11 +1,9 @@
 import { CIRCLE_TILE_CODEC, ShapeTileSet } from '../tileserver/ShapeTileSet';
-import { Earth } from '../projection/Earth';
-import { normalizeLngDegrees } from '../geometry/CircleGeometry';
+import { circleTileExtentOf } from './CircleTileExtent';
 import type { CircleState } from './CircleState';
 
 /** The latitude Web Mercator stops at; a circle reaching it is drawn by the map SDK. */
 const MERCATOR_MAX_LATITUDE = 85.05112878;
-const DEG = Math.PI / 180;
 
 /**
  * The latitudes and longitudes a circle spans, in degrees, as the ring the map
@@ -15,25 +13,7 @@ const DEG = Math.PI / 180;
  * @internal
  */
 export function circleTileExtent(state: CircleState): { north: number; south: number; west: number; east: number } | null {
-    const { latitude } = state.center;
-    const longitude = normalizeLngDegrees(state.center.longitude);
-    const r = state.radiusMeters;
-    let dLat: number;
-    let dLng: number;
-    if (state.geodesic) {
-        // The circle on the sphere of Spherical.computeOffset.
-        const delta = r / Earth.RADIUS_METERS;
-        const cosLat = Math.cos(latitude * DEG);
-        if (!(Math.sin(delta) < cosLat) || delta >= Math.PI / 2) return null;
-        dLat = delta / DEG;
-        dLng = Math.asin(Math.min(1, Math.sin(delta) / cosLat)) / DEG;
-    } else {
-        // circleToRing's local plane round the centre latitude.
-        const metersPerDegree = Earth.CIRCUMFERENCE_METERS / 360;
-        dLat = r / metersPerDegree;
-        dLng = r / (metersPerDegree * Math.max(Math.cos(latitude * DEG), 1e-6));
-    }
-    return { north: latitude + dLat, south: latitude - dLat, west: longitude - dLng, east: longitude + dLng };
+    return circleTileExtentOf(state.center.latitude, state.center.longitude, state.radiusMeters, state.geodesic);
 }
 
 /**

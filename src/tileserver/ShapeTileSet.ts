@@ -8,6 +8,7 @@ import type { PolylineState } from '../polyline/PolylineState';
 import type { CircleState } from '../circle/CircleState';
 import { effectiveCircleZIndex } from '../circle/CircleZIndex';
 import { normalizeLngDegrees } from '../geometry/CircleGeometry';
+import { circleTileExtentOf } from '../circle/CircleTileExtent';
 
 const TILE_SIZE = 256;
 /** In-place changes arriving within this window go to the worker as one message. */
@@ -39,6 +40,12 @@ export interface ShapeTileCodec<S extends ShapeTileState, W> {
     registerLarge?(server: LocalTileServer, routeId: string, count: number, encodeAt: (index: number) => W): Promise<boolean>;
     activate?(server: LocalTileServer, routeId: string, mask: Uint8Array): Promise<boolean>;
     revision?(state: S): number | undefined;
+    /**
+     * The shape's extent in degrees, `[south, west, north, east]`, and its
+     * stroke width (CSS px), for the main thread's tap index; null when it has
+     * no extent. Only codecs whose taps are resolved here give it (circles).
+     */
+    tapExtentOf?(shape: W): { extent: readonly [number, number, number, number]; strokeWidth: number } | null;
     update(server: LocalTileServer, routeId: string, updates: readonly { index: number; shape: W }[]): Promise<boolean>;
 }
 
@@ -54,6 +61,80 @@ export interface ShapeTileCodec<S extends ShapeTileState, W> {
  * not touch cached under a key without the version, so they come back undrawn.
  * @internal
  */
+/**
+ * The registered shapes' extents on a grid of latitude and longitude, so a tap
+ * reads the few shapes near it instead of every state (at 700k circles that was
+ * the difference between a tap reading every state and reading a handful).
+ * Built while the shapes are encoded for the worker, from what was encoded, so
+ * building it reads no state again. Slots, not ids: a slot whose shape was taken
+ * out is skipped by its caller.
+ */
+class ShapeTapIndex {
+    /** Cells per degree: about 1.7 km of latitude. */
+    static readonly CELLS_PER_DEGREE = 64;
+    /** A shape over more cells than this is kept in a list every query checks. */
+    static readonly MAX_CELLS = 64;
+    private readonly cells = new Map<number, number[]>();
+    private readonly large: number[] = [];
+    private readonly extents: Float64Array;
+    maxStrokeWidth = 0;
+
+    constructor(private readonly count: number) {
+        this.extents = new Float64Array(count * 4).fill(NaN);
+    }
+
+    private static cell(degrees: number, offset: number): number {
+        return Math.floor((degrees + offset) * ShapeTapIndex.CELLS_PER_DEGREE);
+    }
+
+    add(slot: number, entry: { extent: readonly [number, number, number, number]; strokeWidth: number } | null): void {
+        if (!entry) return;
+        const [south, west, north, east] = entry.extent;
+        this.extents.set(entry.extent, slot * 4);
+        if (entry.strokeWidth > this.maxStrokeWidth) this.maxStrokeWidth = entry.strokeWidth;
+        const y0 = ShapeTapIndex.cell(south, 90), y1 = ShapeTapIndex.cell(north, 90);
+        const x0 = ShapeTapIndex.cell(west, 180), x1 = ShapeTapIndex.cell(east, 180);
+        if ((y1 - y0 + 1) * (x1 - x0 + 1) > ShapeTapIndex.MAX_CELLS) {
+            this.large.push(slot);
+            return;
+        }
+        for (let y = y0; y <= y1; y++) {
+            for (let x = x0; x <= x1; x++) {
+                const key = y * 65_536 + x;
+                const bucket = this.cells.get(key);
+                if (bucket) bucket.push(slot);
+                else this.cells.set(key, [slot]);
+            }
+        }
+    }
+
+    /** Slots whose extent meets the box (degrees), each once. */
+    query(south: number, west: number, north: number, east: number): number[] {
+        const y0 = ShapeTapIndex.cell(south, 90), y1 = ShapeTapIndex.cell(north, 90);
+        const x0 = ShapeTapIndex.cell(west, 180), x1 = ShapeTapIndex.cell(east, 180);
+        const seen = new Set<number>();
+        const take = (slot: number) => {
+            if (seen.has(slot)) return;
+            const i = slot * 4;
+            if (this.extents[i] <= north && this.extents[i + 2] >= south
+                && this.extents[i + 1] <= east && this.extents[i + 3] >= west) seen.add(slot);
+        };
+        for (const slot of this.large) take(slot);
+        if ((y1 - y0 + 1) * (x1 - x0 + 1) > this.cells.size) {
+            // A box over more cells than are filled (a tap zoomed far out): walk the filled ones.
+            for (const bucket of this.cells.values()) for (const slot of bucket) take(slot);
+        } else {
+            for (let y = y0; y <= y1; y++) {
+                for (let x = x0; x <= x1; x++) {
+                    const bucket = this.cells.get(y * 65_536 + x);
+                    if (bucket) for (const slot of bucket) take(slot);
+                }
+            }
+        }
+        return [...seen].filter((slot) => slot < this.count);
+    }
+}
+
 export class ShapeTileSet<S extends ShapeTileState, W> {
     readonly routeId: string;
     onTemplateChanged: ((template: string) => void) | null = null;
@@ -77,6 +158,10 @@ export class ShapeTileSet<S extends ShapeTileState, W> {
     private registered = false;
     private registration = 0;
     private pending = new Map<string, S>();
+    /** Tap index of the registered shapes, for codecs with `tapExtentOf`. */
+    private tapIndex: ShapeTapIndex | null = null;
+    /** Slots changed in place since the tap index was built: always tap candidates. */
+    private touchedSlots = new Set<number>();
     private pendingRemovals: number[] = [];
     private flushTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -119,10 +204,14 @@ export class ShapeTileSet<S extends ShapeTileState, W> {
         if (registration !== this.registration) return null;
         const revision = this.codec.revision;
         const revisions = revision && ordered.length > 2_000 ? new Float64Array(ordered.length) : null;
+        const { tapExtentOf } = this.codec;
+        const tapIndex = tapExtentOf ? new ShapeTapIndex(ordered.length) : null;
         const encodeAt = (index: number) => {
             const state = ordered[index];
             if (revisions && revision) revisions[index] = revision(state) ?? NaN;
-            return this.codec.encode(state);
+            const shape = this.codec.encode(state);
+            if (tapIndex && tapExtentOf) tapIndex.add(index, tapExtentOf(shape));
+            return shape;
         };
         const ok = this.codec.registerLarge && ordered.length > 2_000
             ? await this.codec.registerLarge(this.server, this.routeId, ordered.length, encodeAt)
@@ -135,6 +224,8 @@ export class ShapeTileSet<S extends ShapeTileState, W> {
         this.server.register(this.routeId, { renderTile: (request) => this.fetchTile(request) });
         this.indexById = indexById;
         this.sourceStates = ordered.slice();
+        this.tapIndex = tapIndex;
+        this.touchedSlots = new Set();
         if (revisions) {
             const slots = new WeakMap<S, number>();
             ordered.forEach((state, index) => slots.set(state, index));
@@ -151,6 +242,31 @@ export class ShapeTileSet<S extends ShapeTileState, W> {
 
     has(id: string): boolean {
         return this.source(id) !== null;
+    }
+
+    /**
+     * The registered states whose extent meets the box (degrees), plus those
+     * changed in place since (their extent may have moved). Without a tap index
+     * (a codec without `tapExtentOf`), every registered state.
+     */
+    sources(south: number, west: number, north: number, east: number): S[] {
+        const states: S[] = [];
+        if (!this.tapIndex) {
+            this.visitSources((state) => states.push(state));
+            return states;
+        }
+        const slots = new Set(this.tapIndex.query(south, west, north, east));
+        for (const slot of this.touchedSlots) slots.add(slot);
+        for (const slot of slots) {
+            const state = this.sourceStates[slot];
+            if (state) states.push(state);
+        }
+        return states;
+    }
+
+    /** The widest stroke (CSS px) of the shapes in the tap index; 0 without one. */
+    get tapMaxStrokeWidth(): number {
+        return this.tapIndex?.maxStrokeWidth ?? 0;
     }
 
     private async reuseCircles(states: readonly S[], registration: number): Promise<boolean> {
@@ -178,6 +294,7 @@ export class ShapeTileSet<S extends ShapeTileState, W> {
         if (!this.has(state.id)) return;
         if (this.circleRevisions) this.circleRevisions[this.indexById.get(state.id)!] = NaN;
         this.sourceStates[this.indexById.get(state.id)!] = state;
+        this.touchedSlots.add(this.indexById.get(state.id)!);
         this.pending.set(state.id, state);
         this.scheduleFlush();
     }
@@ -217,6 +334,8 @@ export class ShapeTileSet<S extends ShapeTileState, W> {
         this.registered = false;
         this.indexById.clear();
         this.sourceStates = [];
+        this.tapIndex = null;
+        this.touchedSlots = new Set();
         this.circleSlots = null;
         this.circleRevisions = null;
     }
@@ -300,6 +419,9 @@ export class ShapeTiler<S extends ShapeTileState, W> {
 
     state(id: string): S | null { return this.tileSet.source(id); }
     visitStates(action: (state: S) => void): void { this.tileSet.visitSources(action); }
+    /** {@link ShapeTileSet.sources}. */
+    sources(south: number, west: number, north: number, east: number): S[] { return this.tileSet.sources(south, west, north, east); }
+    get tapMaxStrokeWidth(): number { return this.tileSet.tapMaxStrokeWidth; }
 
     isTiled(id: string): boolean {
         return this.tiled.has(id);
@@ -408,4 +530,8 @@ export const CIRCLE_TILE_CODEC: ShapeTileCodec<CircleState, SWCircle> = {
     revision: (state) => state.revision,
     update: (server, routeId, updates) =>
         server.sendSWCircleUpdates(routeId, updates.map(({ index, shape }) => ({ index, circle: shape }))),
+    tapExtentOf: (shape) => {
+        const extent = circleTileExtentOf(shape.latitude, shape.longitude, shape.radiusMeters, shape.geodesic);
+        return extent ? { extent: [extent.south, extent.west, extent.north, extent.east], strokeWidth: shape.strokeWidth } : null;
+    },
 };
