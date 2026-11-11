@@ -217,6 +217,8 @@ const {
   CIRCLE_TILE_LAYER_ID,
   circleTileRasterLayerState,
   Earth,
+  calculateMetersPerPixel,
+  computeOffset,
 } = await import('../dist/index.mjs');
 
 const p = (latitude, longitude) => createGeoPoint({ latitude, longitude });
@@ -715,5 +717,59 @@ test('options は差し替えられ、次の route で決め直す', async () =>
   assert.equal(tiler.isTiled('a'), false);
   assert.deepEqual(native.added, ['a', 'b', 'c', 'far']);
   assert.deepEqual(added.sort(), ['a', 'a', 'b', 'b', 'c', 'c', 'far', 'far'], 'removed and added again: onAdded again');
+  await controller.clear();
+});
+
+// ── タップは近くのタイルの円だけを読む（ios-sdk の CircleTilingInPlaceTests、android-sdk の CircleTilerDeviceTest と対） ──
+
+test('タップは今の state で決める。位置を変えた直後、タイルの描き直しより前でも', async () => {
+  const { controller } = setup();
+  const list = circles();
+  await controller.add(list);
+  const before = list[3].center;
+  const moved = p(list[0].center.latitude - 0.01, list[0].center.longitude);
+  list[3].center = moved;
+  await controller.update(list[3]);
+  assert.equal(controller.find(moved)?.state.id, 'far');
+  assert.equal(controller.find(before), null);
+  await settle();
+  assert.equal(controller.find(moved)?.state.id, 'far');
+  assert.equal(controller.find(before), null);
+  await controller.clear();
+});
+
+test('縁の半分は半径の外まで当たる。半径より太い縁、描かない（透明な）縁でも', async () => {
+  const { controller } = setup();
+  const list = circles();
+  for (const state of list) {
+    state.radiusMeters = 5;
+    state.strokeWidth = 40;
+    state.strokeColor = 'rgba(255,0,0,1)';
+  }
+  list[0].strokeColor = 'transparent';
+  await controller.add(list);
+  const center = list[0].center;
+  await controller.onCameraChanged({ position: center, zoom: 18, bearing: 0, tilt: 0 });
+  const half = (calculateMetersPerPixel({ latitude: center.latitude, zoom: 18 }) * 40) / 2;
+  const onStroke = computeOffset({ origin: center, distance: 5 + half - 0.5, heading: 270 });
+  const beyond = computeOffset({ origin: center, distance: 5 + half + 0.5, heading: 270 });
+  assert.equal(controller.find(onStroke)?.state.id, 'a');
+  assert.equal(controller.find(beyond), null);
+  await controller.clear();
+});
+
+test('タップは近くの円だけを読む。全国の例の規模で全部を読むと 1 回数十 ms かかっていた', async () => {
+  const { controller } = setup();
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const list = Array.from({ length: 100_000 }, (_, i) => createCircleState({
+    id: `c${i}`, center: p(30 + rnd() * 15, 130 + rnd() * 15), radiusMeters: 500, strokeWidth: 1, onClick: () => {},
+  }));
+  await controller.add(list);
+  await controller.onCameraChanged({ position: list[0].center, zoom: 12, bearing: 0, tilt: 0 });
+  const start = performance.now();
+  for (const state of list.slice(0, 10)) assert.ok(controller.find(state.center));
+  const perTap = (performance.now() - start) / 10;
+  assert.ok(perTap < 2, `a tap took ${perTap.toFixed(2)} ms`);
   await controller.clear();
 });

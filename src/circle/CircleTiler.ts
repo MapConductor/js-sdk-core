@@ -6,6 +6,9 @@ import type { CircleState } from './CircleState';
 import { CircleTileSet } from './CircleTileSet';
 import { CircleTilingOptions } from './CircleTilingOptions';
 
+const TAP_STROKE_SLACK_PX = 64;
+const TAP_SLACK_METERS = 100;
+
 /** The id of the raster layer that shows tiled circles. */
 export const CIRCLE_TILE_LAYER_ID = 'mc-circle-tiles';
 
@@ -73,6 +76,28 @@ export class CircleTiler {
 
     state(id: string): CircleState | null { return this.shapes.state(id); }
     visitStates(action: (state: CircleState) => void): void { this.shapes.visitStates(action); }
+
+    /**
+     * The tiled circles a tap at `latitude`/`longitude` can hit: those whose
+     * extent comes within reach of the point, found through the tile set's tap
+     * index, so a tap reads a handful of states instead of every one;
+     * `CircleManager.find` then decides on those states as before.
+     *
+     * The reach allows for half the widest stroke (CSS px, at `metersPerPixel`;
+     * at least {@link TAP_STROKE_SLACK_PX}, since a stroke that is not drawn,
+     * such as a transparent one, still counts for a tap) plus
+     * {@link TAP_SLACK_METERS}, for a planar circle's extent (along the
+     * parallel) against the great-circle distance the tap is decided with.
+     * @internal
+     */
+    states(latitude: number, longitude: number, metersPerPixel: number): CircleState[] {
+        const stroke = Math.max(TAP_STROKE_SLACK_PX, this.shapes.tapMaxStrokeWidth);
+        const reach = (metersPerPixel * stroke) / 2 + TAP_SLACK_METERS;
+        // Fewer metres per degree than anywhere on the sphere: the box only grows.
+        const dLat = reach / 110_000;
+        const dLng = reach / (110_000 * Math.max(Math.cos((latitude * Math.PI) / 180), 1e-6));
+        return this.shapes.sources(latitude - dLat, longitude - dLng, latitude + dLat, longitude + dLng);
+    }
 
     /** An in-place change of a tiled circle; only the tiles it touches are redrawn. */
     update(state: CircleState): void {

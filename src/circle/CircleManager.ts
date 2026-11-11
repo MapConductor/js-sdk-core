@@ -123,7 +123,10 @@ export class CircleManager<ActualCircle> implements CircleManagerInterface<Actua
             }
         };
         for (const entity of this.entities.values()) consider(entity.state, entity);
-        this.tiledSource?.visitStates(state => { if (!this.entities.has(state.id)) consider(state, null); });
+        // Tiled circles: only those near the tap, found through the tile set's tap index.
+        for (const state of this.tiledSource?.states(position.latitude, position.longitude, metersPerPixel) ?? []) {
+            if (!this.entities.has(state.id)) consider(state, null);
+        }
         return best ?? (bestState ? this.tiledEntity(bestState) : null);
     }
 }
