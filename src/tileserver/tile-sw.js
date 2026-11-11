@@ -124,12 +124,13 @@ function queryGrid(grid, items, south, north, west, east) {
     return out;
 }
 
-// ── Shape tiles: polygons and polylines ─────────────────────────────────────
+// ── Shape tiles: polygons, polylines and circles ────────────────────────────
 //
 // The main thread sends every tiled shape of a route once: polygons with
 // 'sw-register-polygons', their rings as polyline6 strings (Google's Encoded
 // Polyline at 1e-6 degrees; see js-sdk-core EncodedPolyline.ts), polylines with
-// 'sw-register-polylines', one open path each. Here they become Web Mercator
+// 'sw-register-polylines', one open path each, circles with
+// 'sw-register-circles', a centre and a radius in metres. Here they become Web Mercator
 // coordinates in [0, 1]. A polygon's outline is wound one way and its holes the
 // other, so a `nonzero` fill leaves out the union of the holes without
 // computing it. A route holds one kind; the index, the simplified copies, the
@@ -146,6 +147,14 @@ function queryGrid(grid, items, south, north, west, east) {
 // half the widest stroke, and each is drawn whole -- the canvas cuts off what
 // overhangs -- so a line over a tile edge goes on in the next tile at the same
 // place and width.
+//
+// A circle is the ring the map SDKs draw (js-sdk-core circleToRing, copied
+// below): its size in pixels doubles with each zoom, its outline is
+// `strokeWidth` CSS pixels at every zoom, centred on the ring. Where the ring
+// is round on screen to a quarter of a pixel (anything small, or not far from
+// the equator) it is drawn as an arc; else as the ring's 128 points, simplified
+// like a polygon's. Under a pixel across it is one pixel, under 4 px across it
+// has no outline, as a polygon.
 //
 // Taps never see any of this -- they are resolved on the main thread against
 // the original shapes.
@@ -271,6 +280,122 @@ function decodeSwPolyline(p) {
     };
 }
 
+// js-sdk-core Earth.RADIUS_METERS / CIRCUMFERENCE_METERS and circleToRing's segments.
+const EARTH_RADIUS_METERS = 6378137.0;
+const EARTH_CIRCUMFERENCE_METERS = 2 * Math.PI * EARTH_RADIUS_METERS;
+const CIRCLE_SEGMENTS = 128;
+const MERCATOR_MAX_LAT = 85.05112878;
+/** Past this difference (px) between the ring's radii on screen, a circle is drawn as its ring, not an arc. */
+const CIRCLE_ARC_TOLERANCE_PX = 0.25;
+const DEG = Math.PI / 180;
+
+function mercatorY(lat) {
+    const clamped = Math.max(-MERCATOR_MAX_LAT, Math.min(MERCATOR_MAX_LAT, lat));
+    const s = Math.sin(clamped * DEG);
+    return 0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI);
+}
+
+/** js-sdk-core Spherical.computeOffset: [lat, lng] `distance` metres from the origin towards `heading`. */
+function computeOffset(lat, lng, distance, heading) {
+    const d = distance / EARTH_RADIUS_METERS;
+    const h = heading * DEG;
+    const lat1 = lat * DEG, lng1 = lng * DEG;
+    const lat2 = Math.asin(Math.sin(lat1) * Math.cos(d) + Math.cos(lat1) * Math.sin(d) * Math.cos(h));
+    const lng2 = lng1 + Math.atan2(Math.sin(h) * Math.sin(d) * Math.cos(lat1), Math.cos(d) - Math.sin(lat1) * Math.sin(lat2));
+    return [lat2 / DEG, lng2 / DEG];
+}
+
+function normalizeLng(lng) {
+    return ((((lng + 180) % 360) + 360) % 360) - 180;
+}
+
+/** js-sdk-core circleToRing: the open ring as flat [lat, lng, ...], longitudes round the centre's. */
+function circleToRing(lat, lng, radius, geodesic, segments = CIRCLE_SEGMENTS) {
+    if (!(radius > 0) || segments < 3) return [];
+    const out = new Array(segments * 2);
+    if (geodesic) {
+        for (let i = 0; i < segments; i++) {
+            const p = computeOffset(lat, lng, radius, (360.0 * i) / segments);
+            out[i * 2] = p[0];
+            out[i * 2 + 1] = lng + normalizeLng(p[1] - lng);
+        }
+        return out;
+    }
+    const metersPerDegree = EARTH_CIRCUMFERENCE_METERS / 360.0;
+    const latCorrection = Math.max(Math.cos(lat * DEG), 1e-6);
+    for (let i = 0; i < segments; i++) {
+        const angle = (2.0 * Math.PI * i) / segments;
+        out[i * 2] = Math.max(-90, Math.min(90, lat + (radius / metersPerDegree) * Math.cos(angle)));
+        out[i * 2 + 1] = lng + (radius / (metersPerDegree * latCorrection)) * Math.sin(angle);
+    }
+    return out;
+}
+
+/**
+ * A circle as the worker draws it: its centre and bounding box in Web Mercator,
+ * from the same bounds as the ring (js-sdk-core circleTileExtent).
+ */
+function decodeSwCircle(c) {
+    // No radius: a circle taken out of the tiles, its slot kept so the others keep their indices.
+    if (!(c.radiusMeters > 0)) return null;
+    const lat = c.latitude, lng = c.longitude, r = c.radiusMeters;
+    let dLat, dLng;
+    if (c.geodesic) {
+        const delta = r / EARTH_RADIUS_METERS;
+        const cosLat = Math.cos(lat * DEG);
+        if (!(Math.sin(delta) < cosLat)) return null;
+        dLat = delta / DEG;
+        dLng = Math.asin(Math.min(1, Math.sin(delta) / cosLat)) / DEG;
+    } else {
+        const metersPerDegree = EARTH_CIRCUMFERENCE_METERS / 360;
+        dLat = r / metersPerDegree;
+        dLng = r / (metersPerDegree * Math.max(Math.cos(lat * DEG), 1e-6));
+    }
+    return {
+        circle: true,
+        latitude: lat,
+        longitude: lng,
+        radiusMeters: r,
+        geodesic: !!c.geodesic,
+        cx: (lng + 180) / 360,
+        cy: mercatorY(lat),
+        // [west, y(north), east, y(south)]
+        bbox: [(lng - dLng + 180) / 360, mercatorY(lat + dLat), (lng + dLng + 180) / 360, mercatorY(lat - dLat)],
+        fill: c.fill,
+        stroke: c.stroke,
+        strokeWidth: c.strokeWidth,
+    };
+}
+
+/**
+ * A circle at `scale` (world pixels): `{ dot }` under a pixel across, `{ arc: [cx, cy, r] }`
+ * where the ring is round to CIRCLE_ARC_TOLERANCE_PX, else `{ rings: [ring] }`.
+ */
+function simplifyCircle(p, scale) {
+    const cx = p.cx * scale, cy = p.cy * scale;
+    const rx = (p.bbox[2] - p.cx) * scale;
+    const ryN = cy - p.bbox[1] * scale;
+    const ryS = p.bbox[3] * scale - cy;
+    const radius = Math.max(rx, ryN, ryS);
+    if (radius < 0.5) return { dot: [Math.floor(cx), Math.floor(cy)] };
+    const outlined = 2 * radius >= MIN_OUTLINED_PX;
+    if (Math.max(Math.abs(ryN - rx), Math.abs(ryS - rx)) <= CIRCLE_ARC_TOLERANCE_PX) {
+        return { arc: [cx, cy, rx], outlined };
+    }
+    const ring = simplifyRing(toMercatorRing(circleToRing(p.latitude, p.longitude, p.radiusMeters, p.geodesic)), scale);
+    if (!ring) return { dot: [Math.floor(cx), Math.floor(cy)] };
+    return { rings: [ring], outlined };
+}
+
+// Classify without allocating a projected shape for every hidden circle.
+function circleDotSlot(p, scale, originX, originY, tileSize) {
+    const radius = Math.max(p.bbox[2] - p.cx, p.cy - p.bbox[1], p.bbox[3] - p.cy) * scale;
+    if (radius >= 0.5) return -2;
+    const x = Math.floor(p.cx * scale) - originX;
+    const y = Math.floor(p.cy * scale) - originY;
+    return x >= 0 && x < tileSize && y >= 0 && y < tileSize ? y * tileSize + x : -1;
+}
+
 /** False for a colour that draws nothing: none, `transparent`, or alpha 0 (rgba(), #rgba, #rrggbbaa). */
 function isVisibleColor(color) {
     if (!color || color === 'transparent') return false;
@@ -281,37 +406,226 @@ function isVisibleColor(color) {
     return true;
 }
 
-function buildShapeIndex(shapes) {
-    const cells = new Map();
-    const large = [];
+function buildShapeIndex(shapes, index = { cells: new Map(), groups: new Map(), large: [] }, start = 0) {
+    const { cells, groups, large } = index;
     for (let i = 0; i < shapes.length; i++) {
         const p = shapes[i];
         if (!p) continue;
         const cx0 = Math.floor(p.bbox[0] / SHAPE_CELL), cx1 = Math.floor(p.bbox[2] / SHAPE_CELL);
         const cy0 = Math.floor(p.bbox[1] / SHAPE_CELL), cy1 = Math.floor(p.bbox[3] / SHAPE_CELL);
         if ((cx1 - cx0 + 1) * (cy1 - cy0 + 1) > SHAPE_MAX_CELLS) {
-            large.push(i);
+            large.push(start + i);
             continue;
         }
         for (let cx = cx0; cx <= cx1; cx++) {
             for (let cy = cy0; cy <= cy1; cy++) {
                 const key = cx * 1048576 + cy;
                 const bucket = cells.get(key);
-                if (bucket) bucket.push(i);
-                else cells.set(key, [i]);
+                if (bucket) bucket.push(start + i);
+                else {
+                    const created = [start + i];
+                    cells.set(key, created);
+                    const groupKey = Math.floor(cx / 16) * 1048576 + Math.floor(cy / 16);
+                    const group = groups.get(groupKey);
+                    if (group) group.push(created);
+                    else groups.set(groupKey, [created]);
+                }
             }
         }
     }
-    return { cells, large };
+    return index;
+}
+
+// Cache Storage is available from the service worker. Each staged generation
+// gets its own cache so replacement never exposes a partially written model.
+const circleCachePrefix = 'mc-circle-geometry:' + self.registration?.scope + ':';
+const pendingCircleFiles = new Map();
+const circleOperations = new Map();
+const circleRenders = new Map();
+const CIRCLE_RECORD_WIDTH = 13;
+
+function enqueueCircleOperation(routeId, operation, queue = circleOperations) {
+    const next = (queue.get(routeId) ?? Promise.resolve()).then(operation);
+    const settled = next.catch(() => {});
+    queue.set(routeId, settled);
+    void settled.then(() => {
+        if (queue.get(routeId) === settled) queue.delete(routeId);
+    });
+    return next;
+}
+
+function circleBlockKey(block) {
+    return new URL('__mc_circle_geometry__/' + block, self.registration.scope).href;
+}
+
+async function writeCircleBlock(file, block, shapes) {
+    // Fixed-width records preserve projected bounds and geographic geometry.
+    // Keep color strings once per route to retain the original CSS semantics.
+    const records = new Float64Array(shapes.length * CIRCLE_RECORD_WIDTH);
+    for (let i = 0; i < shapes.length; i++) {
+        const p = shapes[i];
+        if (!p) continue;
+        records.set([
+            p.radiusMeters, p.latitude, p.longitude, Number(p.geodesic),
+            p.cx, p.cy, ...p.bbox, p.strokeWidth, circleColorIndex(file, p.fill), circleColorIndex(file, p.stroke),
+        ], i * CIRCLE_RECORD_WIDTH);
+    }
+    await file.cache.put(circleBlockKey(block), new Response(records));
+    file.blocks.delete(block);
+}
+
+function circleColorIndex(file, color) {
+    let index = file.colorIndices.get(color);
+    if (index === undefined) {
+        index = file.colors.length;
+        file.colors.push(color);
+        file.colorIndices.set(color, index);
+    }
+    return index;
+}
+
+function readCircleBlock(file, block) {
+    let entry = file.blocks.get(block);
+    if (!entry) {
+        entry = file.cache.match(circleBlockKey(block)).then(async response => {
+            if (!response) throw new Error('Circle geometry block unavailable');
+            return new Float64Array(await response.arrayBuffer());
+        });
+        void entry.catch(() => {
+            if (file.blocks.get(block) === entry) file.blocks.delete(block);
+        });
+    }
+    file.blocks.delete(block);
+    file.blocks.set(block, entry);
+    if (file.blocks.size > 8) file.blocks.delete(file.blocks.keys().next().value);
+    return entry;
+}
+
+function unpackCircle(file, records, index, bounds) {
+    const i = index * CIRCLE_RECORD_WIDTH;
+    if (!(records[i] > 0)) return null;
+    if (bounds && (records[i + 6] > bounds[2] || records[i + 8] < bounds[0]
+        || records[i + 7] > bounds[3] || records[i + 9] < bounds[1])) return null;
+    return {
+        circle: true, radiusMeters: records[i], latitude: records[i + 1], longitude: records[i + 2],
+        geodesic: records[i + 3] !== 0, cx: records[i + 4], cy: records[i + 5],
+        bbox: [records[i + 6], records[i + 7], records[i + 8], records[i + 9]],
+        strokeWidth: records[i + 10], fill: file.colors[records[i + 11]], stroke: file.colors[records[i + 12]],
+    };
+}
+
+async function readCircleShapes(file, block) {
+    const records = await readCircleBlock(file, block);
+    return Array.from({ length: records.length / CIRCLE_RECORD_WIDTH }, (_, i) => unpackCircle(file, records, i));
+}
+
+async function discardCircleFile(file) {
+    if (file) await caches.delete(file.name);
+}
+
+async function handleCircleFileMessage(msg, clientId) {
+    const { routeId, token } = msg;
+    const pending = pendingCircleFiles.get(routeId);
+    if (msg.type === 'sw-circle-file-activate') {
+        const provider = swShapeProviders.get(routeId);
+        if (!provider?.file || msg.mask.length !== provider.file.count) return false;
+        provider.active = msg.mask;
+        provider.generation++;
+        dropAllShapeTiles(routeId);
+        return true;
+    }
+    if (msg.type === 'sw-circle-file-begin') {
+        await discardCircleFile(pending);
+        const clients = new Set((await self.clients.matchAll({ includeUncontrolled: true })).map(client => client.id));
+        clients.add(clientId);
+        for (const key of await caches.keys()) {
+            if (key.startsWith(circleCachePrefix) && !clients.has(key.slice(circleCachePrefix.length).split(':')[0])) {
+                await caches.delete(key);
+            }
+        }
+        const name = circleCachePrefix + clientId + ':' + routeId + ':' + token;
+        pendingCircleFiles.set(routeId, {
+            token, name, cache: await caches.open(name), blockSize: msg.blockSize, count: msg.count,
+            written: 0, blocks: new Map(), colors: [], colorIndices: new Map(),
+            index: buildShapeIndex([]), maxStrokePx: 0,
+        });
+        return true;
+    }
+    if (!pending || pending.token !== token) return false;
+    if (msg.type === 'sw-circle-file-abort') {
+        pendingCircleFiles.delete(routeId);
+        await discardCircleFile(pending);
+        return true;
+    }
+    if (msg.type === 'sw-circle-file-block') {
+        if (msg.start !== pending.written || msg.circles.length !== Math.min(pending.blockSize, pending.count - msg.start)) return false;
+        const shapes = msg.circles.map(decodeSwCircle);
+        await writeCircleBlock(pending, msg.start / pending.blockSize, shapes);
+        buildShapeIndex(shapes, pending.index, msg.start);
+        pending.maxStrokePx = maxShapeStroke(shapes, pending.maxStrokePx);
+        pending.written += shapes.length;
+        return true;
+    }
+    if (pending.written !== pending.count) return false;
+    const previous = swShapeProviders.get(routeId);
+    swShapeProviders.set(routeId, {
+        file: pending, index: pending.index, maxStrokePx: pending.maxStrokePx,
+        stamp: new Uint32Array(pending.count), stampValue: 0, generation: 0,
+    });
+    pendingCircleFiles.delete(routeId);
+    dropAllShapeTiles(routeId);
+    await discardCircleFile(previous?.file);
+    return true;
+}
+
+function maxShapeStroke(shapes, initial = 0) {
+    let maxStrokePx = initial;
+    for (const p of shapes) if (p && isVisibleColor(p.stroke)) maxStrokePx = Math.max(maxStrokePx, p.strokeWidth);
+    return maxStrokePx;
+}
+
+async function updateCircleFile(routeId, provider, updates) {
+    const file = provider.file;
+    const byBlock = new Map();
+    for (const update of updates) {
+        if (update.index < 0 || update.index >= file.count) continue;
+        const block = Math.floor(update.index / file.blockSize);
+        if (!byBlock.has(block)) byBlock.set(block, []);
+        byBlock.get(block).push(update);
+    }
+    provider.generation++;
+    let moved = false;
+    const touched = [];
+    for (const [block, changes] of byBlock) {
+        const shapes = await readCircleShapes(file, block);
+        for (const { index, shape } of changes) {
+            const offset = index % file.blockSize;
+            const before = shapes[offset];
+            shapes[offset] = shape;
+            if (before) touched.push(before.bbox);
+            if (shape) {
+                touched.push(shape.bbox);
+                if (!before || before.bbox.some((v, k) => v !== shape.bbox[k])) moved = true;
+            }
+        }
+        await writeCircleBlock(file, block, shapes);
+        provider.maxStrokePx = maxShapeStroke(shapes, provider.maxStrokePx);
+    }
+    if (moved) {
+        const index = buildShapeIndex([]);
+        for (let start = 0; start < file.count; start += file.blockSize) {
+            buildShapeIndex(await readCircleShapes(file, start / file.blockSize), index, start);
+        }
+        provider.index = index;
+    }
+    dropShapeTilesIn(routeId, touched, provider.maxStrokePx);
 }
 
 function registerSwShapes(routeId, shapes) {
-    let maxStrokePx = 0;
-    for (const p of shapes) if (p && isVisibleColor(p.stroke)) maxStrokePx = Math.max(maxStrokePx, p.strokeWidth);
     swShapeProviders.set(routeId, {
         shapes,
         index: buildShapeIndex(shapes),
-        maxStrokePx,
+        maxStrokePx: maxShapeStroke(shapes),
         simplified: new Map(),
         stamp: new Uint32Array(shapes.length),
         stampValue: 0,
@@ -389,15 +703,28 @@ function queryShapes(provider, minX, minY, maxX, maxY) {
     const stamp = provider.stamp, v = provider.stampValue;
     const out = [];
     const take = (i) => {
+        if (provider.active && !provider.active[i]) return;
         if (stamp[i] === v) return;
         stamp[i] = v;
-        const b = provider.shapes[i]?.bbox;
-        if (b && b[0] <= maxX && b[2] >= minX && b[1] <= maxY && b[3] >= minY) out.push(i);
+        if (provider.file || overlapsShapeBox(provider.shapes[i], minX, minY, maxX, maxY)) out.push(i);
     };
     for (const i of provider.index.large) take(i);
     const cx0 = Math.floor(minX / SHAPE_CELL), cx1 = Math.floor(maxX / SHAPE_CELL);
     const cy0 = Math.floor(minY / SHAPE_CELL), cy1 = Math.floor(maxY / SHAPE_CELL);
-    for (let cx = cx0; cx <= cx1; cx++) {
+    const area = (cx1 - cx0 + 1) * (cy1 - cy0 + 1);
+    const groups = provider.index.groups;
+    if (area > 16_384 && groups) {
+        const gx0 = Math.floor(cx0 / 16), gx1 = Math.floor(cx1 / 16);
+        const gy0 = Math.floor(cy0 / 16), gy1 = Math.floor(cy1 / 16);
+        if ((gx1 - gx0 + 1) * (gy1 - gy0 + 1) > groups.size) {
+            for (const bucket of provider.index.cells.values()) for (const i of bucket) take(i);
+        } else {
+            for (let gx = gx0; gx <= gx1; gx++) for (let gy = gy0; gy <= gy1; gy++) {
+                const buckets = groups.get(gx * 1048576 + gy);
+                if (buckets) for (const bucket of buckets) for (const i of bucket) take(i);
+            }
+        }
+    } else for (let cx = cx0; cx <= cx1; cx++) {
         for (let cy = cy0; cy <= cy1; cy++) {
             const bucket = provider.index.cells.get(cx * 1048576 + cy);
             if (bucket) for (const i of bucket) take(i);
@@ -405,6 +732,30 @@ function queryShapes(provider, minX, minY, maxX, maxY) {
     }
     // Draw order is registration order, which the main thread sorted by zIndex.
     return out.sort((a, b) => a - b);
+}
+
+function overlapsShapeBox(shape, minX, minY, maxX, maxY) {
+    const b = shape?.bbox;
+    return b && b[0] <= maxX && b[2] >= minX && b[1] <= maxY && b[3] >= minY;
+}
+
+// Yield only once per block. The inner drawing loop stays synchronous.
+async function* shapeBlocks(provider, candidates, bounds, isStale) {
+    if (!provider.file) {
+        yield { start: 0, end: candidates.length, at: (index) => provider.shapes[index] };
+        return;
+    }
+    const { blockSize } = provider.file;
+    for (let start = 0; start < candidates.length;) {
+        if (isStale()) return;
+        const block = Math.floor(candidates[start] / blockSize);
+        const offset = block * blockSize;
+        let end = start + 1;
+        while (end < candidates.length && candidates[end] < offset + blockSize) end++;
+        const records = await readCircleBlock(provider.file, block);
+        yield { start, end, at: (index) => unpackCircle(provider.file, records, index - offset, bounds) };
+        start = end;
+    }
 }
 
 /** Douglas-Peucker on snapped integer points [x0, y0, x1, y1, ...]; returns the kept points. */
@@ -464,6 +815,8 @@ function simplifyPath(path, scale) {
  * nothing of it is visible.
  */
 function simplifiedAt(provider, index, z, tileSize) {
+    const circle = provider.shapes[index];
+    if (circle?.circle) return simplifyCircle(circle, tileSize * 2 ** z);
     const key = z + '/' + tileSize;
     let perZoom = provider.simplified.get(key);
     if (!perZoom) {
@@ -481,7 +834,9 @@ function simplifiedAt(provider, index, z, tileSize) {
     const p = provider.shapes[index];
     const scale = tileSize * 2 ** z;
     let result = null;
-    if (p && p.line) {
+    if (p && p.circle) {
+        result = simplifyCircle(p, scale);
+    } else if (p && p.line) {
         const w = (p.bbox[2] - p.bbox[0]) * scale, h = (p.bbox[3] - p.bbox[1]) * scale;
         const path = w < 1 && h < 1 ? null : simplifyPath(p.path, scale);
         // Down to one point: a dot at the middle of the line.
@@ -509,15 +864,15 @@ function simplifiedAt(provider, index, z, tileSize) {
 }
 
 /** A tile of a shape route: `{ kind: 'tile', blob }`, `{ kind: 'empty' }` or `{ kind: 'failed' }`. */
-async function renderShapeTile(provider, x, y, z, tileSize, pixelRatio = 1) {
+async function renderShapeTile(provider, x, y, z, tileSize, pixelRatio = 1, isStale = () => false) {
     const scale = tileSize * 2 ** z;
     const originX = x * tileSize, originY = y * tileSize;
     const pad = provider.maxStrokePx / 2 + 1;
-    const candidates = queryShapes(
-        provider,
+    const bounds = [
         (originX - pad) / scale, (originY - pad) / scale,
         (originX + tileSize + pad) / scale, (originY + tileSize + pad) / scale,
-    );
+    ];
+    const candidates = queryShapes(provider, ...bounds);
     if (candidates.length === 0) return { kind: 'empty' };
 
     const r = pixelRatio;
@@ -526,13 +881,28 @@ async function renderShapeTile(provider, x, y, z, tileSize, pixelRatio = 1) {
     if (!ctx) return { kind: 'failed' };
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
+    // One display representative per world pixel, only for subpixel circles.
+    const lastCircleDot = provider.file || provider.shapes[candidates[0]]?.circle ? new Int32Array(tileSize * tileSize) : null;
+    const worldScale = tileSize * 2 ** z;
+    if (lastCircleDot) for await (const { start, end, at } of shapeBlocks(provider, candidates, bounds, isStale)) {
+        for (let i = start; i < end; i++) {
+            const index = candidates[i], p = at(index);
+            if (!p?.circle) continue;
+            if (!(isVisibleColor(p.fill) || (p.strokeWidth > 0 && isVisibleColor(p.stroke)))) continue;
+            const slot = circleDotSlot(p, worldScale, originX, originY, tileSize);
+            if (slot >= 0) lastCircleDot[slot] = index + 1;
+        }
+    }
     let drew = false;
-    for (const index of candidates) {
-        const p = provider.shapes[index];
-        const shape = simplifiedAt(provider, index, z, tileSize);
-        if (!shape) continue;
+    const drawCandidate = (p, index) => {
+        if (p.circle && lastCircleDot) {
+            const slot = circleDotSlot(p, worldScale, originX, originY, tileSize);
+            if (slot === -1 || (slot >= 0 && lastCircleDot[slot] !== index + 1)) return;
+        }
+        const shape = p.circle ? simplifyCircle(p, worldScale) : simplifiedAt(provider, index, z, tileSize);
+        if (!shape) return;
         if (p.line) {
-            if (!(p.strokeWidth > 0) || !isVisibleColor(p.stroke)) continue;
+            if (!(p.strokeWidth > 0) || !isVisibleColor(p.stroke)) return;
             const width = p.strokeWidth * r;
             if (shape.dot) {
                 // A line shorter than a pixel: a round dot as wide as the line, at least a pixel.
@@ -551,25 +921,30 @@ async function renderShapeTile(provider, x, y, z, tileSize, pixelRatio = 1) {
                 ctx.stroke(line);
             }
             drew = true;
-            continue;
+            return;
         }
         const fillVisible = isVisibleColor(p.fill);
         const strokeVisible = p.strokeWidth > 0 && isVisibleColor(p.stroke) && (shape.dot != null || shape.outlined);
         if (shape.dot) {
             ctx.fillStyle = fillVisible ? p.fill : p.stroke;
-            if (!fillVisible && !strokeVisible) continue;
+            if (!fillVisible && !strokeVisible) return;
             ctx.fillRect((shape.dot[0] - originX) * r, (shape.dot[1] - originY) * r, r, r);
             drew = true;
-            continue;
+            return;
         }
         const ringPath = (ring, path) => {
             path.moveTo((ring[0] - originX) * r, (ring[1] - originY) * r);
             for (let i = 2; i < ring.length; i += 2) path.lineTo((ring[i] - originX) * r, (ring[i + 1] - originY) * r);
             path.closePath();
         };
+        // A circle round on screen: one arc, filled and stroked like a ring.
+        const arcPath = (arc, path) => {
+            path.arc((arc[0] - originX) * r, (arc[1] - originY) * r, arc[2] * r, 0, 2 * Math.PI);
+        };
         if (fillVisible) {
             const path = new Path2D();
-            for (const ring of shape.rings) ringPath(ring, path);
+            if (shape.arc) arcPath(shape.arc, path);
+            else for (const ring of shape.rings) ringPath(ring, path);
             ctx.fillStyle = p.fill;
             ctx.fill(path, 'nonzero');
             drew = true;
@@ -577,13 +952,21 @@ async function renderShapeTile(provider, x, y, z, tileSize, pixelRatio = 1) {
         if (strokeVisible) {
             // Outline only, as the map SDKs draw it.
             const outline = new Path2D();
-            ringPath(shape.rings[0], outline);
+            if (shape.arc) arcPath(shape.arc, outline);
+            else ringPath(shape.rings[0], outline);
             ctx.strokeStyle = p.stroke;
             ctx.lineWidth = p.strokeWidth * r;
             ctx.stroke(outline);
             drew = true;
         }
+    };
+    for await (const { start, end, at } of shapeBlocks(provider, candidates, bounds, isStale)) {
+        for (let i = start; i < end; i++) {
+            const index = candidates[i], p = at(index);
+            if (p) drawCandidate(p, index);
+        }
     }
+    if (isStale()) return { kind: 'failed' };
     if (!drew) return { kind: 'empty' };
     const blob = await canvas.convertToBlob({ type: 'image/png' });
     if (!blob || blob.size === 0) return { kind: 'failed' };
@@ -601,6 +984,15 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('message', (event) => {
     const msg = event.data;
     if (!msg || !msg.type) return;
+    const runCircleOperation = (operation) => {
+        event.waitUntil(enqueueCircleOperation(msg.routeId, operation).then(
+            ok => event.ports?.[0]?.postMessage({ ok }),
+            error => {
+                console.warn('[tile-sw] circle geometry:', error);
+                event.ports?.[0]?.postMessage({ ok: false });
+            },
+        ));
+    };
     if (msg.type === 'sw-register') {
         swProviders.set(msg.routeId, {
             items: msg.items,
@@ -639,10 +1031,38 @@ self.addEventListener('message', (event) => {
         if (event.ports && event.ports[0]) {
             event.ports[0].postMessage({ ok: true });
         }
+    } else if (msg.type.startsWith('sw-circle-file-')) {
+        runCircleOperation(() => handleCircleFileMessage(msg, event.source?.id ?? ''));
+    } else if (msg.type === 'sw-register-circles') {
+        runCircleOperation(async () => {
+            const previous = swShapeProviders.get(msg.routeId);
+            registerSwShapes(msg.routeId, msg.circles.map(decodeSwCircle));
+            await discardCircleFile(previous?.file);
+            return true;
+        });
+    } else if (msg.type === 'sw-update-circles') {
+        runCircleOperation(async () => {
+            const provider = swShapeProviders.get(msg.routeId);
+            const updates = msg.updates.map((u) => ({ index: u.index, shape: decodeSwCircle(u.circle) }));
+            if (provider?.file) await updateCircleFile(msg.routeId, provider, updates);
+            else updateSwShapes(msg.routeId, updates);
+            return !!provider;
+        });
     } else if (msg.type === 'sw-unregister') {
         swProviders.delete(msg.routeId);
         dropCachedTiles(msg.routeId);
-        if (swShapeProviders.delete(msg.routeId)) dropAllShapeTiles(msg.routeId);
+        if (msg.routeId.startsWith('circles-')) {
+            runCircleOperation(async () => {
+                const provider = swShapeProviders.get(msg.routeId);
+                const pending = pendingCircleFiles.get(msg.routeId);
+                pendingCircleFiles.delete(msg.routeId);
+                swShapeProviders.delete(msg.routeId);
+                dropAllShapeTiles(msg.routeId);
+                await discardCircleFile(provider?.file);
+                await discardCircleFile(pending);
+                return true;
+            });
+        } else if (swShapeProviders.delete(msg.routeId)) dropAllShapeTiles(msg.routeId);
         console.log('[tile-sw] sw-unregister:', msg.routeId);
     }
 });
@@ -1000,8 +1420,16 @@ self.addEventListener('fetch', (event) => {
             return;
         }
         const generation = shapeProvider.generation;
+        const isStale = () => event.request.signal?.aborted
+            || swShapeProviders.get(routeId) !== shapeProvider || shapeProvider.generation !== generation;
         event.respondWith(
-            renderShapeTile(shapeProvider, x, y, z, tileSize, pixelRatio)
+            (shapeProvider.file
+                ? enqueueCircleOperation(routeId, async () => {
+                    await circleOperations.get(routeId);
+                    if (isStale()) return { kind: 'failed' };
+                    return renderShapeTile(shapeProvider, x, y, z, tileSize, pixelRatio, isStale);
+                }, circleRenders)
+                : renderShapeTile(shapeProvider, x, y, z, tileSize, pixelRatio))
                 .then(async (outcome) => {
                     if (outcome.kind === 'empty') return emptyTileResponse();
                     if (outcome.kind === 'failed') return failedTileResponse();

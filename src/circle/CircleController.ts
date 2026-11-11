@@ -12,6 +12,10 @@ import { CircleAddParams, CircleChangeParams, CircleOverlayRenderer } from "./Ci
 import { CircleEvent, CircleState, OnCircleEventHandler } from "./CircleState";
 import { Mutex } from "../base/Mutex";
 import { notifyOverlaysAdded } from "../overlay/OverlayAdded";
+import type { CircleTiler } from "./CircleTiler";
+import { CircleTileSet } from "./CircleTileSet";
+
+const NO_IDS: ReadonlySet<string> = new Set();
 
 function fingerPrintsEqual(a: ReturnType<CircleState["fingerPrint"]>, b: ReturnType<CircleState["fingerPrint"]>): boolean {
     return (
@@ -36,7 +40,25 @@ export abstract class CircleController<ActualCircle>
     public readonly circleManager: CircleManagerInterface<ActualCircle>;
     public readonly renderer: CircleOverlayRenderer<ActualCircle>;
     public clickListener: OnCircleEventHandler | null;
+    /**
+     * Set by a provider that can show circle tiles (see {@link CircleTiler}).
+     * Circles it tiles stay in {@link circleManager}, for taps, with no native
+     * overlay: their entity's `circle` is null and the renderer never sees them.
+     */
+    public tiler: CircleTiler | null = null;
+    private nativeEntities(): CircleEntity<ActualCircle>[] {
+        return this.circleManager.nativeEntities?.() ?? this.circleManager.allEntities().filter(e => e.circle != null);
+    }
+
+    private unchanged(state: CircleState, entity: CircleEntity<ActualCircle>): boolean {
+        if (state === entity.state && state.revision !== undefined && entity.appliedRevision !== undefined) {
+            return state.revision === entity.appliedRevision || ((state.changedFields ?? 0x1ff) & 0x1ff) === 0;
+        }
+        return fingerPrintsEqual(state.fingerPrint(), entity.fingerPrint);
+    }
+    private tiledIds: ReadonlySet<string> = NO_IDS;
     private semaphore = new Mutex();
+    private currentCameraPosition: MapCameraPosition | null = null;
 
     constructor({
         circleManager,
@@ -75,7 +97,20 @@ export abstract class CircleController<ActualCircle>
         // Newly on the map; their onAdded runs once the add is done.
         const nowOnMap: CircleState[] = [];
         await this.semaphore.withLock(async () => {
-            const previous = new Set(this.circleManager.allEntities().map((e) => e.state.id));
+            const wasTiled = this.tiledIds;
+            const tiled = this.tiler ? await this.tiler.route(data) : NO_IDS;
+            const sharedTiles = this.circleManager.setTiledSource?.(this.tiler) ?? false;
+            this.tiledIds = tiled;
+            if (tiled.size > 0) data = data.filter((state) => !tiled.has(state.id));
+            // Only natively drawn circles are diffed against the renderer.
+            const previous = new Set(
+                this.nativeEntities()
+                    .map((e) => e.state.id)
+                    .filter((id) => !wasTiled.has(id)),
+            );
+            // On the map before this add, natively or in tiles. Moving between
+            // the two is not an add.
+            const nativeBefore = tiled.size > 0 ? new Set(previous) : previous;
             const added: CircleAddParams[] = [];
             const updated: CircleChangeParams<ActualCircle>[] = [];
             const removed: CircleEntity<ActualCircle>[] = [];
@@ -84,7 +119,7 @@ export abstract class CircleController<ActualCircle>
                 if (previous.has(state.id)) {
                     const prevEntity = this.circleManager.getEntity(state.id)!;
                     previous.delete(state.id);
-                    if (fingerPrintsEqual(state.fingerPrint(), prevEntity.fingerPrint)) {
+                    if (this.unchanged(state, prevEntity)) {
                         // Rendered output is unchanged; adopt the latest state
                         // object (it may carry newer event handlers) without a
                         // renderer round-trip. Recreating the actual overlay on
@@ -101,6 +136,7 @@ export abstract class CircleController<ActualCircle>
                 }
             }
 
+            // Natively drawn ones that left the list, or moved into the tiles.
             for (const remainId of previous) {
                 const e = this.circleManager.removeEntity(remainId);
                 if (e) removed.push(e);
@@ -115,7 +151,7 @@ export abstract class CircleController<ActualCircle>
                         this.circleManager.registerEntity(
                             createCircleEntity({ circle, state: added[i].state }),
                         );
-                        nowOnMap.push(added[i].state);
+                        if (!wasTiled.has(added[i].state.id)) nowOnMap.push(added[i].state);
                     }
                 });
             }
@@ -131,6 +167,25 @@ export abstract class CircleController<ActualCircle>
                 });
             }
 
+            // Tiled circles: kept for taps, nothing native. Those that left the
+            // tiles and the list are forgotten; those that left the tiles for
+            // native drawing were added above.
+            const nativeIds = wasTiled.size > 0 ? new Set(data.map((state) => state.id)) : NO_IDS;
+            for (const id of wasTiled) {
+                if (!tiled.has(id) && !nativeIds.has(id) && this.circleManager.hasEntity(id)) {
+                    this.circleManager.removeEntity(id);
+                }
+            }
+            if (tiled.size > 0) {
+                for (const state of this.tiler!.tiledStates()) {
+                    // The tiles' template reached the map in route() (onTemplate).
+                    if (!wasTiled.has(state.id) && !nativeBefore.has(state.id)) nowOnMap.push(state);
+                    if (!sharedTiles) this.circleManager.registerEntity(
+                        createCircleEntity({ circle: null as unknown as ActualCircle, state }),
+                    );
+                }
+            }
+
             await this.renderer.onPostProcess();
         });
         notifyOverlaysAdded(nowOnMap);
@@ -140,10 +195,31 @@ export abstract class CircleController<ActualCircle>
         await this.semaphore.withLock(async () => {
             const prevEntity = this.circleManager.getEntity(state.id);
             if (!prevEntity) return;
+            if (this.tiledIds.has(state.id)) {
+                if (CircleTileSet.canTile(state)) {
+                    this.circleManager.registerEntity(createCircleEntity({ circle: prevEntity.circle, state }));
+                    this.tiler?.update(state);
+                    return;
+                }
+                // No longer drawable in a tile (over a pole or the antimeridian, or
+                // no radius): the map SDK draws it from now on. Still on the map, so
+                // this is not an add. Whether the rest stay in tiles is left to the
+                // next add(), which decides tiling for the whole list.
+                const tiled = new Set(this.tiledIds);
+                tiled.delete(state.id);
+                this.tiledIds = tiled;
+                this.tiler?.remove(state.id);
+                const circles = await this.renderer.onAdd([{ state }]);
+                if (circles[0] != null) {
+                    this.circleManager.registerEntity(createCircleEntity({ circle: circles[0], state }));
+                } else {
+                    this.circleManager.removeEntity(state.id);
+                }
+                await this.renderer.onPostProcess();
+                return;
+            }
 
-            const currentFinger = state.fingerPrint();
-            const prevFinger = prevEntity.fingerPrint;
-            if (fingerPrintsEqual(currentFinger, prevFinger)) return;
+            if (this.unchanged(state, prevEntity)) return;
 
             const params: CircleChangeParams<ActualCircle> = {
                 current: createCircleEntity({ circle: prevEntity.circle, state }),
@@ -163,7 +239,10 @@ export abstract class CircleController<ActualCircle>
 
     async clear(): Promise<void> {
         await this.semaphore.withLock(async () => {
-            await this.renderer.onRemove(this.circleManager.allEntities());
+            const tiled = this.tiledIds;
+            this.tiledIds = NO_IDS;
+            await this.tiler?.clear();
+            await this.renderer.onRemove(this.nativeEntities().filter((e) => !tiled.has(e.state.id)));
             // manager を空にしてから onPostProcess を呼ぶ。GL 系の描画担当は remove では何もせず、
             // onPostProcess で manager の全部を描き直すので、逆の順だと clear() 後も地図に残る。
             this.circleManager.clear();
@@ -172,10 +251,13 @@ export abstract class CircleController<ActualCircle>
     }
 
     find(position: GeoPoint): CircleEntity<ActualCircle> | null {
-        return this.circleManager.find(position);
+        // The camera's zoom turns the outline's CSS pixels into metres.
+        return this.circleManager.find(position, this.currentCameraPosition);
     }
 
-    async onCameraChanged(_mapCameraPosition: MapCameraPosition): Promise<void> {}
+    async onCameraChanged(mapCameraPosition: MapCameraPosition): Promise<void> {
+        this.currentCameraPosition = mapCameraPosition;
+    }
 
     destroy(): void {
         // No native resources to clean up for circles

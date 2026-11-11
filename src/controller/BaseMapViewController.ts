@@ -19,6 +19,8 @@ import type { RasterLayerMounting } from '../map/MapViewStyle';
 import type { RasterLayerState } from '../raster/RasterLayerState';
 import type { PolylineTilingOptions } from '../polyline/PolylineTilingOptions';
 import type { PolylineTiler } from '../polyline/PolylineTiler';
+import type { CircleTilingOptions } from '../circle/CircleTilingOptions';
+import type { CircleTiler } from '../circle/CircleTiler';
 
 // 統一ズーム（Google 準拠）での許容誤差。これ未満の差では補正しない。
 const ZOOM_EPS = 1e-3;
@@ -160,6 +162,17 @@ export abstract class BaseMapViewController {
   setPolylineTilingOptions(options: PolylineTilingOptions): void {
     const controller = this.primaryOverlayController('polyline') as
       | (SlottedOverlayController & { tiler?: PolylineTiler | null })
+      | null;
+    if (controller?.tiler) controller.tiler.options = options;
+  }
+
+  /**
+   * Replaces the circle tiling options of this map's circle controller.
+   * See `MapViewControllerInterface.setCircleTilingOptions`.
+   */
+  setCircleTilingOptions(options: CircleTilingOptions): void {
+    const controller = this.primaryOverlayController('circle') as
+      | (SlottedOverlayController & { tiler?: CircleTiler | null })
       | null;
     if (controller?.tiler) controller.tiler.options = options;
   }

@@ -2,6 +2,10 @@ import { Settings } from "../settings/Settings";
 
 type Observable = { subscribe: (fn: (fp: unknown) => void) => () => void };
 type WithObservable = { asObservable?: () => Observable };
+type SharedMutations<S> = {
+    accepts(state: S): boolean;
+    subscribe(listener: (state: S) => void): () => void;
+};
 
 // android-sdk OverlayCollector の debounceBatch と同じ閾値。
 // add / remove それぞれ「無入力 5ms」でバーストを確定し、件数が閾値に達したら即フラッシュする。
@@ -26,6 +30,7 @@ export class OverlayCollector<S extends { id: string }> {
     private readonly map = new Map<string, S>();
     private readonly subs = new Set<(map: ReadonlyMap<string, S>) => void>();
     private updateHandler: ((state: S) => void) | null = null;
+    private stopSharedUpdates: (() => void) | null = null;
     private readonly updateSubs = new Map<string, () => void>();
     private batchDepth = 0;
     private batchDirty = false;
@@ -36,6 +41,8 @@ export class OverlayCollector<S extends { id: string }> {
 
     private readonly pendingUpdates = new Map<string, S>();
     private updateTimer: ReturnType<typeof setTimeout> | null = null;
+
+    constructor(private readonly sharedMutations?: SharedMutations<S>) {}
 
     /**
      * `<Marker>` を1つマウントするたびに1回ずつ走っていた composition を、
@@ -162,11 +169,16 @@ export class OverlayCollector<S extends { id: string }> {
      * changes are delivered to subscribe() listeners, not to this handler.
      */
     setUpdateHandler(handler: ((state: S) => void) | null): void {
+        this.stopSharedUpdates?.();
+        this.stopSharedUpdates = null;
         this.updateSubs.forEach(unsub => unsub());
         this.updateSubs.clear();
         this.cancelPendingUpdates();
         this.updateHandler = handler;
         if (handler) {
+            this.stopSharedUpdates = this.sharedMutations?.subscribe(state => {
+                if (this.map.get(state.id) === state) this.stateChanged(state);
+            }) ?? null;
             for (const state of this.map.values()) {
                 this.startUpdateSub(state);
             }
@@ -188,7 +200,7 @@ export class OverlayCollector<S extends { id: string }> {
     }
 
     private startUpdateSub(state: S): void {
-        if (!this.updateHandler) return;
+        if (!this.updateHandler || this.sharedMutations?.accepts(state)) return;
         const observable = (state as unknown as WithObservable).asObservable?.();
         if (!observable) return;
         // A state's subject replays its current value to a new subscriber, and
@@ -208,14 +220,18 @@ export class OverlayCollector<S extends { id: string }> {
         let replaying = true;
         const unsub = observable.subscribe(() => {
             if (replaying) return;
-            if (this.batchDepth > 0) {
-                this.batchDirty = true;
-                return;
-            }
-            this.scheduleUpdate(state);
+            this.stateChanged(state);
         });
         replaying = false;
         this.updateSubs.set(state.id, unsub);
+    }
+
+    private stateChanged(state: S): void {
+        if (this.batchDepth > 0) {
+            this.batchDirty = true;
+            return;
+        }
+        this.scheduleUpdate(state);
     }
 
     /**

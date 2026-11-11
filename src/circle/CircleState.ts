@@ -52,6 +52,8 @@ export interface CircleState {
      * it redraws nothing.
      */
     onAdded: OnCircleAddedHandler | null;
+    readonly revision?: number;
+    readonly changedFields?: number;
     fingerPrint(): CircleFingerPrint;
     copy(opts?: CircleStateCopyParams): CircleState;
     equals(other: unknown): boolean;
@@ -74,23 +76,11 @@ export interface CircleStateCopyParams {
     id?: string | null;
 }
 
-const fingerPrintEquals = (a: CircleFingerPrint, b: CircleFingerPrint): boolean =>
-    a.id === b.id &&
-    a.center === b.center &&
-    a.radiusMeters === b.radiusMeters &&
-    a.clickable === b.clickable &&
-    a.geodesic === b.geodesic &&
-    a.strokeColor === b.strokeColor &&
-    a.strokeWidth === b.strokeWidth &&
-    a.fillColor === b.fillColor &&
-    a.zIndex === b.zIndex &&
-    a.extra === b.extra;
-
 function circleId(hashCodes: number[]): number {
     return hashCodes.reduce((result, hc) => (31 * result + hc) | 0, 0);
 }
 
-export function createCircleState(params: {
+type CircleStateParams = {
     center: GeoPoint;
     radiusMeters: number;
     geodesic?: boolean;
@@ -103,53 +93,116 @@ export function createCircleState(params: {
     onClick?: OnCircleEventHandler | null;
     onAdded?: OnCircleAddedHandler | null;
     id?: string | null;
-}): CircleState {
-    let center = params.center;
-    let radiusMeters = params.radiusMeters;
-    let geodesic = params.geodesic ?? true;
-    let clickable = params.clickable ?? true;
-    let strokeColor = params.strokeColor ?? "#FF0000";
-    let strokeWidth = params.strokeWidth ?? 1;
-    let fillColor = params.fillColor ?? "rgba(255,255,255,0.5)";
-    let extra = params.extra ?? null;
-    let zIndex = params.zIndex ?? null;
-    let onClick = params.onClick ?? null;
-    let onAdded = params.onAdded ?? null;
+};
 
-    const id =
-        params.id ??
-        circleId([
-            hashGeoPoint(center),
-            hashNum(radiusMeters),
-            hashBool(clickable),
-            hashBool(geodesic),
-            extra == null ? 0 : hashObj(extra),
-            hashObj(strokeColor),
-            hashNum(strokeWidth),
-            hashObj(fillColor),
-            zIndex == null ? 0 : zIndex,
+const circleMutationListeners = new Set<(state: CircleState) => void>();
+
+/** Shared update channel for collectors. Custom CircleState implementations use their own observable. @internal */
+export const circleMutations = {
+    accepts: (state: CircleState): boolean => state instanceof CircleStateValue,
+    subscribe(listener: (state: CircleState) => void): () => void {
+        circleMutationListeners.add(listener);
+        return () => { circleMutationListeners.delete(listener); };
+    },
+};
+
+class CircleStateValue implements CircleState {
+    declare private readonly values: {
+        id: string;
+        center: GeoPoint;
+        radiusMeters: number;
+        geodesic: boolean;
+        clickable: boolean;
+        strokeColor: string;
+        strokeWidth: number;
+        fillColor: string;
+        extra: Serializable | null;
+        zIndex: number | null;
+        onClick: OnCircleEventHandler | null;
+        onAdded: OnCircleAddedHandler | null;
+        revision: number;
+        changedFields: number;
+        subject?: ReturnType<typeof createSubject<number>>;
+    };
+
+    constructor(params: CircleStateParams) {
+        const values = {
+            center: params.center,
+            radiusMeters: params.radiusMeters,
+            geodesic: params.geodesic ?? true,
+            clickable: params.clickable ?? true,
+            strokeColor: params.strokeColor ?? "#FF0000",
+            strokeWidth: params.strokeWidth ?? 1,
+            fillColor: params.fillColor ?? "rgba(255,255,255,0.5)",
+            extra: params.extra ?? null,
+            zIndex: params.zIndex ?? null,
+            onClick: params.onClick ?? null,
+            onAdded: params.onAdded ?? null,
+            revision: 0,
+            changedFields: 0,
+        };
+        const id = params.id ?? circleId([
+            hashGeoPoint(values.center),
+            hashNum(values.radiusMeters),
+            hashBool(values.clickable),
+            hashBool(values.geodesic),
+            values.extra == null ? 0 : hashObj(values.extra),
+            hashObj(values.strokeColor),
+            hashNum(values.strokeWidth),
+            hashObj(values.fillColor),
+            values.zIndex ?? 0,
         ]).toString();
+        Object.defineProperty(this, "values", { value: { ...values, id } });
+        Object.defineProperties(this, circlePublicProperties);
+    }
 
-    const subject = createSubject<CircleFingerPrint>(fingerPrintEquals);
+    private change<K extends keyof CircleStateValue["values"]>(key: K, value: CircleStateValue["values"][K], mask: number): void {
+        if (this.values[key] === value) return;
+        this.values[key] = value;
+        this.values.revision++;
+        this.values.changedFields |= mask;
+        for (const listener of circleMutationListeners) listener(this);
+        this.values.subject?.next(this.values.revision);
+    }
 
-    const emit = () => subject.next(fingerPrint());
+    get id() { return this.values.id; }
+    get revision() { return this.values.revision; }
+    get changedFields() { return this.values.changedFields; }
+    get center() { return this.values.center; }
+    set center(v: GeoPoint) { this.change("center", v, 1); }
+    get radiusMeters() { return this.values.radiusMeters; }
+    set radiusMeters(v: number) { this.change("radiusMeters", v, 2); }
+    get geodesic() { return this.values.geodesic; }
+    set geodesic(v: boolean) { this.change("geodesic", v, 4); }
+    get clickable() { return this.values.clickable; }
+    set clickable(v: boolean) { this.change("clickable", v, 8); }
+    get strokeColor() { return this.values.strokeColor; }
+    set strokeColor(v: string) { this.change("strokeColor", v, 16); }
+    get strokeWidth() { return this.values.strokeWidth; }
+    set strokeWidth(v: number) { this.change("strokeWidth", v, 32); }
+    get fillColor() { return this.values.fillColor; }
+    set fillColor(v: string) { this.change("fillColor", v, 64); }
+    get extra() { return this.values.extra; }
+    set extra(v: Serializable | null) { this.change("extra", v, 128); }
+    get zIndex() { return this.values.zIndex; }
+    set zIndex(v: number | null) { this.change("zIndex", v, 256); }
+    get onClick() { return this.values.onClick; }
+    set onClick(v: OnCircleEventHandler | null) { this.values.onClick = v; }
+    get onAdded() { return this.values.onAdded; }
+    set onAdded(v: OnCircleAddedHandler | null) { this.values.onAdded = v; }
 
-    function fingerPrint(): CircleFingerPrint {
+    fingerPrint(): CircleFingerPrint {
+        const { id, center, radiusMeters, clickable, geodesic, strokeColor, strokeWidth, fillColor, zIndex, extra } = this.values;
         return {
-            id: hashObj(id),
-            center: hashGeoPoint(center),
-            radiusMeters: hashNum(radiusMeters),
-            clickable: hashBool(clickable),
-            geodesic: hashBool(geodesic),
-            strokeColor: hashObj(strokeColor),
-            strokeWidth: hashNum(strokeWidth),
-            fillColor: hashObj(fillColor),
-            zIndex: zIndex == null ? 0 : zIndex,
+            id: hashObj(id), center: hashGeoPoint(center), radiusMeters: hashNum(radiusMeters),
+            clickable: hashBool(clickable), geodesic: hashBool(geodesic), strokeColor: hashObj(strokeColor),
+            strokeWidth: hashNum(strokeWidth), fillColor: hashObj(fillColor), zIndex: zIndex ?? 0,
             extra: extra == null ? 0 : hashObj(extra),
         };
     }
 
-    const hashCode = (): number => {
+    hashCode(): number {
+        const { center, clickable, geodesic, radiusMeters, strokeColor, strokeWidth, fillColor, zIndex, extra } = this.values;
         let result = extra == null ? 0 : hashObj(extra);
         result = combineHash(result, hashNum(center.latitude));
         result = combineHash(result, hashNum(center.longitude));
@@ -159,63 +212,65 @@ export function createCircleState(params: {
         result = combineHash(result, hashObj(strokeColor));
         result = combineHash(result, hashNum(strokeWidth));
         result = combineHash(result, hashObj(fillColor));
-        result = combineHash(result, zIndex == null ? 0 : zIndex);
-        return result | 0;
-    };
+        return combineHash(result, zIndex ?? 0) | 0;
+    }
 
-    const copy = (opts: CircleStateCopyParams = {}): CircleState =>
-        createCircleState({
-            id: "id" in opts ? opts.id ?? null : id,
-            center: opts.center ?? center,
-            radiusMeters: opts.radiusMeters ?? radiusMeters,
-            geodesic: opts.geodesic ?? geodesic,
-            clickable: opts.clickable ?? clickable,
-            strokeColor: opts.strokeColor ?? strokeColor,
-            strokeWidth: opts.strokeWidth ?? strokeWidth,
-            fillColor: opts.fillColor ?? fillColor,
-            extra: "extra" in opts ? opts.extra ?? null : extra,
-            zIndex: "zIndex" in opts ? opts.zIndex ?? null : zIndex,
-            onClick: "onClick" in opts ? opts.onClick ?? null : onClick,
-            onAdded: "onAdded" in opts ? opts.onAdded ?? null : onAdded,
+    copy(opts: CircleStateCopyParams = {}): CircleState {
+        return createCircleState({
+            id: "id" in opts ? opts.id ?? null : this.id,
+            center: opts.center ?? this.center,
+            radiusMeters: opts.radiusMeters ?? this.radiusMeters,
+            geodesic: opts.geodesic ?? this.geodesic,
+            clickable: opts.clickable ?? this.clickable,
+            strokeColor: opts.strokeColor ?? this.strokeColor,
+            strokeWidth: opts.strokeWidth ?? this.strokeWidth,
+            fillColor: opts.fillColor ?? this.fillColor,
+            extra: "extra" in opts ? opts.extra ?? null : this.extra,
+            zIndex: "zIndex" in opts ? opts.zIndex ?? null : this.zIndex,
+            onClick: "onClick" in opts ? opts.onClick ?? null : this.onClick,
+            onAdded: "onAdded" in opts ? opts.onAdded ?? null : this.onAdded,
         });
+    }
 
-    const equals = (other: unknown): boolean => {
+    equals(other: unknown): boolean {
         const o = other as { hashCode?: () => number } | null | undefined;
-        return typeof o?.hashCode === "function" && hashCode() === o.hashCode();
-    };
+        return typeof o?.hashCode === "function" && this.hashCode() === o.hashCode();
+    }
 
-    const state: CircleState = {
-        get id() { return id; },
-        get center() { return center; },
-        set center(v: GeoPoint) { center = v; emit(); },
-        get radiusMeters() { return radiusMeters; },
-        set radiusMeters(v: number) { radiusMeters = v; emit(); },
-        get geodesic() { return geodesic; },
-        set geodesic(v: boolean) { geodesic = v; emit(); },
-        get clickable() { return clickable; },
-        set clickable(v: boolean) { clickable = v; emit(); },
-        get strokeColor() { return strokeColor; },
-        set strokeColor(v: string) { strokeColor = v; emit(); },
-        get strokeWidth() { return strokeWidth; },
-        set strokeWidth(v: number) { strokeWidth = v; emit(); },
-        get fillColor() { return fillColor; },
-        set fillColor(v: string) { fillColor = v; emit(); },
-        get extra() { return extra; },
-        set extra(v: Serializable | null) { extra = v; emit(); },
-        get zIndex() { return zIndex; },
-        set zIndex(v: number | null) { zIndex = v; emit(); },
-        get onClick() { return onClick; },
-        set onClick(v: OnCircleEventHandler | null) { onClick = v; emit(); },
-        get onAdded() { return onAdded; },
-        // No emit: onAdded is not part of the fingerprint, so changing it redraws nothing.
-        set onAdded(v: OnCircleAddedHandler | null) { onAdded = v; },
-        fingerPrint,
-        copy,
-        equals,
-        hashCode,
-        asObservable: () => ({ subscribe: subject.subscribe }),
-    };
+    asObservable() {
+        return {
+            subscribe: (fn: (fp: CircleFingerPrint) => void) => {
+                if (!this.values.subject) {
+                    this.values.subject = createSubject<number>((a, b) => a === b);
+                    this.values.subject.next(this.revision);
+                }
+                return this.values.subject.subscribe(() => fn(this.fingerPrint()));
+            },
+        };
+    }
+}
 
-    emit();
-    return state;
+// Share accessors across circles while keeping the factory's own enumerable fields.
+const circlePublicProperties = Object.fromEntries(
+    Object.entries(Object.getOwnPropertyDescriptors(CircleStateValue.prototype))
+        .filter(([name]) => name !== "constructor" && name !== "change")
+        .map(([name, descriptor]) => {
+            if (typeof descriptor.value !== "function") return [name, { ...descriptor, enumerable: true }];
+            const storeMethod = (state: CircleStateValue, value: unknown) =>
+                Object.defineProperty(state, name, { value, enumerable: true, writable: true, configurable: true });
+            return [name, {
+                enumerable: true,
+                configurable: true,
+                get(this: CircleStateValue) {
+                    const method = descriptor.value.bind(this);
+                    storeMethod(this, method);
+                    return method;
+                },
+                set(this: CircleStateValue, value: unknown) { storeMethod(this, value); },
+            }];
+        }),
+);
+
+export function createCircleState(params: CircleStateParams): CircleState {
+    return new CircleStateValue(params);
 }
