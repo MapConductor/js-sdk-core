@@ -41,6 +41,23 @@ export interface SWPolyline {
     readonly strokeWidth: number;
 }
 
+/**
+ * One circle as the tile service worker draws it: the ring of points
+ * `radiusMeters` from the centre (on the sphere when `geodesic`, else on the
+ * centre latitude's local plane), the same circle the map SDKs are given
+ * (`circleToRing`), filled and outlined `strokeWidth` CSS pixels wide. The
+ * longitude is in [-180, 180]. A radius of 0 draws nothing.
+ */
+export interface SWCircle {
+    readonly latitude: number;
+    readonly longitude: number;
+    readonly radiusMeters: number;
+    readonly geodesic: boolean;
+    readonly fill: string;
+    readonly stroke: string;
+    readonly strokeWidth: number;
+}
+
 export class LocalTileServer {
     private readonly providers = new Map<string, TileProvider>();
     private static instance: LocalTileServer | null = null;
@@ -196,6 +213,43 @@ export class LocalTileServer {
         return this.postToSWAndWait({ type: 'sw-update-polylines', routeId, updates });
     }
 
+    /**
+     * Hand the service worker the circles it draws for `routeId`
+     * (see `CircleTileSet`). Resolves once it has them; false when there is
+     * no controlling service worker.
+     */
+    sendSWCirclesAndWait(routeId: string, circles: readonly SWCircle[]): Promise<boolean> {
+        return this.postToSWAndWait({ type: 'sw-register-circles', routeId, circles });
+    }
+
+    /** Stream one acknowledged block at a time, without cloning a whole population. @internal */
+    async sendSWCircleBlocks(routeId: string, count: number, encodeAt: (index: number) => SWCircle): Promise<boolean> {
+        const token = Math.random().toString(36).slice(2);
+        const blockSize = 4096;
+        let committed = false;
+        try {
+            if (!(await this.postToSWAndWait({ type: 'sw-circle-file-begin', routeId, token, count, blockSize }))) return false;
+            for (let start = 0; start < count; start += blockSize) {
+                const circles = Array.from({ length: Math.min(blockSize, count - start) }, (_, i) => encodeAt(start + i));
+                if (!(await this.postToSWAndWait({ type: 'sw-circle-file-block', routeId, token, start, circles }))) return false;
+            }
+            committed = await this.postToSWAndWait({ type: 'sw-circle-file-commit', routeId, token });
+            return committed;
+        } finally {
+            if (!committed) this.postToSW({ type: 'sw-circle-file-abort', routeId, token });
+        }
+    }
+
+    /** @internal */
+    activateSWCircles(routeId: string, mask: Uint8Array): Promise<boolean> {
+        return this.postToSWAndWait({ type: 'sw-circle-file-activate', routeId, mask });
+    }
+
+    /** Replace some of a route's circles in place; `index` is their position in the registered list. */
+    sendSWCircleUpdates(routeId: string, updates: readonly { index: number; circle: SWCircle }[]): Promise<boolean> {
+        return this.postToSWAndWait({ type: 'sw-update-circles', routeId, updates });
+    }
+
     private postToSWAndWait(message: object): Promise<boolean> {
         if (typeof navigator === 'undefined' || !navigator.serviceWorker?.controller) {
             return Promise.resolve(false);
@@ -205,11 +259,13 @@ export class LocalTileServer {
             const channel = new MessageChannel();
             // Polygons are megabytes, and the worker decodes them before
             // answering; a slow answer is not a missing one.
-            const fallback = setTimeout(() => resolve(false), 30_000);
-            channel.port1.onmessage = () => {
+            const finish = (ok: boolean) => {
                 clearTimeout(fallback);
-                resolve(true);
+                channel.port1.close?.();
+                resolve(ok);
             };
+            const fallback = setTimeout(() => finish(false), 30_000);
+            channel.port1.onmessage = (event) => finish(event.data?.ok !== false);
             controller.postMessage(message, [channel.port2]);
         });
     }

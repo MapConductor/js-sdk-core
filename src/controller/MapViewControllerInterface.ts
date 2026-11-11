@@ -6,6 +6,7 @@ import type { OnCameraMoveHandler, OnMapEventHandler } from '../map/MapViewBase'
 import type { MapUISettings } from '../settings/MapUISettings';
 import type { MapCameraPosition } from '../types/MapCamera';
 import type { PolylineTilingOptions } from '../polyline/PolylineTilingOptions';
+import type { CircleTilingOptions } from '../circle/CircleTilingOptions';
 
 // Matches Android: typealias OnMapInitializedHandler = () -> Unit
 export type OnMapInitializedHandler = () => void;
@@ -80,6 +81,17 @@ export interface MapViewControllerInterface {
    * `BaseMapViewController` が実装を提供する。
    */
   setPolylineTilingOptions?(options: PolylineTilingOptions): void;
+
+  /**
+   * Replaces when this map draws its circles as tiles (the provider's
+   * `circleTilingOptions` set it when the map was created). It takes effect
+   * the next time the circles are handed to the map, which decides again for
+   * the whole list; circles that then move between tiles and native drawing
+   * stay on the map, and their `onAdded` is not called again. Nothing happens
+   * on a map whose provider does not tile circles.
+   * `BaseMapViewController` が実装を提供する。
+   */
+  setCircleTilingOptions?(options: CircleTilingOptions): void;
 
   /**
    * 範囲が収まるようにカメラを合わせる。

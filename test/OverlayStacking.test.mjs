@@ -118,3 +118,20 @@ test('the polyline tiles (sub -1) are over the circles, under the native polylin
     map.add('polyline-tiles', overlayStackBeforeId(map.order, (x) => keys[x] ?? null, keys['polyline-tiles']));
     assert.deepEqual(map.order.slice(BASEMAP.length), ['polygon-tiles', 'polygon', 'circle', 'polyline-tiles', 'polyline', 'marker']);
 });
+
+test('the circle tiles (circle, sub -1) are over the polygons, under the native circles and the polyline tiles', () => {
+    const order = ['polygon-tiles', 'polygon', 'circle', 'polyline-tiles', 'polyline', 'marker'];
+    const keys = {
+        'polygon-tiles': { kind: 'polygon', sub: -1 },
+        polygon: { kind: 'polygon', sub: 0 },
+        circle: { kind: 'circle', sub: 0 },
+        'polyline-tiles': { kind: 'polyline', sub: -1 },
+        polyline: { kind: 'polyline', sub: 0 },
+        marker: { kind: 'marker' },
+        'circle-tiles': { kind: 'circle', sub: -1 },
+    };
+    const map = glMap(BASEMAP);
+    for (const id of order) map.add(id, overlayStackBeforeId(map.order, (x) => keys[x] ?? null, keys[id]));
+    map.add('circle-tiles', overlayStackBeforeId(map.order, (x) => keys[x] ?? null, keys['circle-tiles']));
+    assert.deepEqual(map.order.slice(BASEMAP.length), ['polygon-tiles', 'polygon', 'circle-tiles', 'circle', 'polyline-tiles', 'polyline', 'marker']);
+});

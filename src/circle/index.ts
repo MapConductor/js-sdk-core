@@ -6,3 +6,6 @@ export * from "./CircleManager";
 export * from "./CircleOverlay";
 export * from "./CircleOverlayRenderer";
 export * from "./CircleState";
+export * from "./CircleTilingOptions";
+export * from "./CircleTileSet";
+export * from "./CircleTiler";
