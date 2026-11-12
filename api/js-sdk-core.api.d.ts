@@ -141,17 +141,47 @@ interface VisibleRegion {
 }
 
 /**
- * Padding applied to the map edges.
+ * Padding applied to the map edges, in CSS pixels.
+ *
+ * Each side may be left out when a camera is built
+ * (`createMapCameraPosition({ paddings: { top: 300 } })`). A side that was left
+ * out reads 0, and its `is…Specified` flag is `false`, the same way an unset
+ * zoom reads 0 with `isZoomSpecified` false. When the camera is applied with
+ * `MapViewState.moveCameraTo`, every unset side is taken from the current
+ * camera's paddings ({@link MapCameraPosition.resolvedOnto}); a side that was
+ * given is used as is, 0 included.
+ *
+ * The flags are absent on a fully given value: an object with no
+ * `is…Specified` property has all four sides specified.
  */
 interface MapPaddings {
     top: number;
     left: number;
     bottom: number;
     right: number;
+    /** `false` when `top` was left out. Absent means it was given. */
+    readonly isTopSpecified?: boolean;
+    /** `false` when `left` was left out. Absent means it was given. */
+    readonly isLeftSpecified?: boolean;
+    /** `false` when `bottom` was left out. Absent means it was given. */
+    readonly isBottomSpecified?: boolean;
+    /** `false` when `right` was left out. Absent means it was given. */
+    readonly isRightSpecified?: boolean;
 }
 declare namespace MapPaddings {
     const Zeros: MapPaddings;
-    const from: (paddings: MapPaddings) => MapPaddings;
+    /**
+     * Copies `paddings` into a {@link MapPaddings}. A side that is missing (or
+     * flagged unset) reads 0 and keeps its `is…Specified` flag `false`.
+     */
+    const from: (paddings: Partial<MapPaddings>) => MapPaddings;
+    /** True when all four sides were given. */
+    const isFullySpecified: (paddings: Partial<MapPaddings>) => boolean;
+    /**
+     * Fills each unset side of `paddings` from `current` (0 when `current` is
+     * null). The result has all four sides specified.
+     */
+    const resolvedOnto: (paddings: Partial<MapPaddings>, current: MapPaddings | null | undefined) => MapPaddings;
 }
 type MapPaddingsInterface = MapPaddings;
 interface MapCameraPositionCopyParams {
@@ -160,7 +190,8 @@ interface MapCameraPositionCopyParams {
     bearing?: number | null;
     tilt?: number | null;
     visibleRegion?: VisibleRegion | null;
-    paddings?: MapPaddings | null;
+    /** Sides left out stay unset (see {@link MapPaddings}). */
+    paddings?: Partial<MapPaddings> | null;
     fov?: number | null;
 }
 /**
@@ -181,12 +212,19 @@ type MapCameraPositionInterface = {
     zoom?: number;
     bearing?: number;
     tilt?: number;
-    paddings?: MapPaddings | null;
+    paddings?: Partial<MapPaddings> | null;
     visibleRegion?: VisibleRegion | null;
     fov?: number | null;
 };
 /**
- * Creates a default camera position.
+ * Creates a camera position.
+ *
+ * `zoom`, `bearing` and `tilt` may be left out, and so may each side of
+ * `paddings`: an unset value reads 0 here and is taken from the current camera
+ * when the camera is applied with `MapViewState.moveCameraTo`
+ * (`createMapCameraPosition({ position, paddings: { top: 300 } })` keeps the
+ * current left, bottom and right). Leaving `paddings` out altogether means no
+ * padding ({@link MapPaddings.Zeros}), as before.
  */
 declare function createMapCameraPosition({ position, zoom: givenZoom, bearing: givenBearing, tilt: givenTilt, paddings, visibleRegion, fov, }: MapCameraPositionInterface): MapCameraPosition;
 /**
@@ -214,6 +252,11 @@ interface MapCameraPosition {
     /** Kotlin-compatible tilt in degrees. */
     tilt: number;
     visibleRegion: VisibleRegion | null;
+    /**
+     * Edge padding: the target is placed at the centre of the area left after it.
+     * A side left out when the camera was built reads 0 and is taken from the
+     * current camera by {@link resolvedOnto} (see {@link MapPaddings}).
+     */
     paddings: MapPaddings | null;
     /**
      * Vertical field of view of the map's camera, in degrees, as currently
@@ -243,8 +286,9 @@ interface MapCameraPosition {
     /** Keeps a property unset unless `partial` gives it. */
     copy(partial?: MapCameraPositionCopyParams): MapCameraPosition;
     /**
-     * Returns this camera with the unset `zoom` / `bearing` / `tilt` filled in
-     * from `current`. A property that was given is used as is, 0 included.
+     * Returns this camera with the unset `zoom` / `bearing` / `tilt` and the
+     * unset sides of `paddings` filled in from `current`. A property that was
+     * given is used as is, 0 included.
      */
     resolvedOnto(current: MapCameraPosition): MapCameraPosition;
 }
