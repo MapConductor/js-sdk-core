@@ -1,6 +1,6 @@
 import { AbstractZoomAltitudeConverter } from '../zoom/AbstractZoomAltitudeConverter';
 import { computeOffset } from '../spherical/Spherical';
-import type { GeoPoint, GeoPointInterface } from '../features/GeoPoint';
+import { createGeoPoint, type GeoPoint, type GeoPointInterface } from '../features/GeoPoint';
 import { MapPaddings, type MapCameraPosition } from '../types/MapCamera';
 import { toNativeHeading } from './CameraBearing';
 
@@ -83,6 +83,8 @@ function shift(origin: GeoPointInterface, forward: number, right: number, headin
     const east = forward * Math.sin(h) + right * Math.cos(h);
     const north = forward * Math.cos(h) - right * Math.sin(h);
     const distance = Math.hypot(east, north);
+    // No shift: hand the point back untouched (computeOffset would add float noise).
+    if (distance === 0) return createGeoPoint({ latitude: origin.latitude, longitude: origin.longitude, altitude: origin.altitude });
     return computeOffset({
         origin: origin as GeoPoint,
         distance,
