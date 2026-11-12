@@ -67,10 +67,10 @@ function loadWorker({ client }) {
 }
 
 /** 1 枚分の fetch を投げ、返ってきた Response を待つ。 */
-function fetchTile(onFetch, pathname = '/__tiles/route/256/10/1/2.png') {
+function fetchTile(onFetch, pathname = '/__tiles/route/256/10/1/2.png', headers = new Headers()) {
     return new Promise((resolve, reject) => {
         onFetch({
-            request: { url: `https://example.test${pathname}` },
+            request: { url: `https://example.test${pathname}`, headers },
             clientId: 'client-1',
             respondWith: (value) => Promise.resolve(value).then(resolve, reject),
         });
@@ -133,4 +133,29 @@ test('描けたタイルはその中身が返る', async () => {
     assert.equal(response.status, 200);
     const body = new Uint8Array(await response.arrayBuffer());
     assert.deepEqual([...body], [...png]);
+});
+
+// ページ側の図形タイル（ShapeTileSet.fetchTile）は、ワーカーが描くタイルを自分で fetch し直す。
+// 再起動して図形を忘れたワーカーがそれをまたページへ回すと、ページとワーカーが同じタイルを
+// 延々と投げ合い、数分でブラウザがメモリを使い果たした（1 分に数万件の要求）。
+test('ページからの読み直しは、知らない経路ならページへ戻さず missing で返る', async () => {
+    let asked = 0;
+    const page = pageAnswering({ result: null, outcome: 'empty' });
+    const worker = loadWorker({ client: { ...page, postMessage: (...a) => { asked++; page.postMessage(...a); } } });
+    const response = await fetchTile(worker.onFetch, undefined, new Headers({ 'X-MC-Tile-Relay': '1' }));
+    worker.close();
+    assert.equal(asked, 0, 'ページへ回すとページがまた fetch してループになる');
+    assert.equal(response.status, 503, '空として答えると地図がその穴を覚えてしまう');
+    assert.equal(response.headers.get('x-mc-tile-route'), 'missing');
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+});
+
+test('地図からの要求は、知らない経路でも今まで通りページへ回る', async () => {
+    let asked = 0;
+    const page = pageAnswering({ result: null, outcome: 'empty' });
+    const worker = loadWorker({ client: { ...page, postMessage: (...a) => { asked++; page.postMessage(...a); } } });
+    const response = await fetchTile(worker.onFetch);
+    worker.close();
+    assert.equal(asked, 1);
+    assert.equal(response.status, 200);
 });
