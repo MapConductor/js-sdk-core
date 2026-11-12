@@ -1,7 +1,7 @@
 import { AbstractZoomAltitudeConverter } from '../zoom/AbstractZoomAltitudeConverter';
 import { computeOffset } from '../spherical/Spherical';
 import type { GeoPoint, GeoPointInterface } from '../features/GeoPoint';
-import type { MapPaddings } from '../types/MapCamera';
+import { MapPaddings, type MapCameraPosition } from '../types/MapCamera';
 import { toNativeHeading } from './CameraBearing';
 
 /**
@@ -112,4 +112,57 @@ export function paddedCameraCenter(target: GeoPointInterface, params: CameraPadd
 export function paddedCameraTarget(center: GeoPointInterface, params: CameraPaddingsParams): GeoPoint {
     const { forward, right } = paddedCenterGroundOffset(center.latitude, params);
     return shift(center, forward, right, toNativeHeading(params.bearing));
+}
+
+function hasPaddings(paddings: MapPaddings | null | undefined): paddings is MapPaddings {
+    return paddings != null && (paddings.top !== 0 || paddings.left !== 0 || paddings.bottom !== 0 || paddings.right !== 0);
+}
+
+/**
+ * For an engine without native camera padding: the camera to send, with its
+ * `position` moved so the requested target is drawn at the padded area's
+ * center. `zoom` is the zoom the engine will actually render (some providers
+ * snap it). Unchanged when there is no padding.
+ * @internal
+ */
+export function cameraWithPaddedCenter(
+    position: MapCameraPosition,
+    fov: number | null,
+    viewport: CameraPaddingsViewport,
+    zoom: number = position.zoom,
+): MapCameraPosition {
+    if (!hasPaddings(position.paddings)) return position;
+    const center = paddedCameraCenter(position.position, {
+        zoom,
+        tilt: position.tilt,
+        bearing: position.bearing,
+        paddings: position.paddings,
+        fov,
+        viewport,
+    });
+    return position.copy({ position: center });
+}
+
+/**
+ * The inverse of {@link cameraWithPaddedCenter} for reading the camera back:
+ * `camera.position` (the engine's center) becomes the point drawn at the
+ * padded area's center, and `paddings` / `fov` are filled in.
+ * @internal
+ */
+export function cameraFromPaddedCenter(
+    camera: MapCameraPosition,
+    paddings: MapPaddings | null,
+    fov: number | null,
+    viewport: CameraPaddingsViewport,
+): MapCameraPosition {
+    if (!hasPaddings(paddings)) return camera.copy({ paddings: MapPaddings.Zeros, fov });
+    const target = paddedCameraTarget(camera.position, {
+        zoom: camera.zoom,
+        tilt: camera.tilt,
+        bearing: camera.bearing,
+        paddings,
+        fov,
+        viewport,
+    });
+    return camera.copy({ position: target, paddings, fov });
 }

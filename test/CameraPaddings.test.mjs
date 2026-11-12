@@ -5,6 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+    cameraFromPaddedCenter,
+    cameraWithPaddedCenter,
     computeDistanceBetween,
     computeHeading,
     createMapCameraPosition,
@@ -97,4 +99,19 @@ test('fov: unset by default, kept by copy, not part of equals, cleared by an exp
     assert.equal(withFov.copy({ fov: null }).fov, null);
     assert.ok(withFov.equals(camera));
     assert.equal(createMapCameraPosition({ position: tokyo }).resolvedOnto(withFov).fov, null);
+});
+
+test('camera helpers: send the shifted center, read the target back with paddings and fov', () => {
+    const requested = createMapCameraPosition({ position: tokyo, zoom: 15, tilt: 45, bearing: 30, paddings: top300 });
+    const sent = cameraWithPaddedCenter(requested, 36.87, viewport);
+    assert.ok(computeDistanceBetween(sent.position, tokyo) > 10);
+    assert.equal(sent.zoom, 15);
+    const read = cameraFromPaddedCenter(sent.copy({ paddings: null }), top300, 36.87, viewport);
+    assert.ok(computeDistanceBetween(read.position, tokyo) < 0.5);
+    assert.deepEqual(read.paddings, top300);
+    assert.equal(read.fov, 36.87);
+    // No padding: unchanged, and the read-back still carries the fov.
+    const plain = createMapCameraPosition({ position: tokyo, zoom: 15 });
+    assert.equal(cameraWithPaddedCenter(plain, 36.87, viewport), plain);
+    assert.equal(cameraFromPaddedCenter(plain, null, 0, viewport).fov, 0);
 });
