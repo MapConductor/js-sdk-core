@@ -201,15 +201,20 @@ export abstract class MapViewState<ActualMapDesignType extends MapDesignTypeInte
       return;
     }
 
+    // 楽観的な書き込みは、コントローラへ渡す「前」にする。即時移動（jumpTo など）は
+    // 移動完了のイベントを同期的に発火し、エンジンから読み直した本当のカメラ
+    // （visibleRegion・fov 付き）をここへ書き込む。後に書くと、それを要求した
+    // カメラ（GeoPoint 版なら移動前の visibleRegion を抱えたままのコピー）で
+    // 上書きしてしまい、position は移動先なのに visibleRegion は移動前のまま残った。
+    if (this.optimisticCameraUpdate) {
+      this._cameraPosition = next;
+      this._cameraPositionChangeListener?.(next);
+    }
+
     if (!durationMillis || durationMillis === 0) {
       void controller.moveCamera(next);
     } else {
       void controller.animateCamera(next, durationMillis);
-    }
-
-    if (this.optimisticCameraUpdate) {
-      this._cameraPosition = next;
-      this._cameraPositionChangeListener?.(next);
     }
   }
 
