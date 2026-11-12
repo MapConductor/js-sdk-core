@@ -21,3 +21,4 @@ export * from './VectorStyleMutationSupport';
 export * from './MapViewStyleHost';
 export * from './MapViewStyle';
 export * from './applyStyleMutations';
+export * from './CameraPaddings';
