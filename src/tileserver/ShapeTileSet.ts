@@ -157,6 +157,8 @@ export class ShapeTileSet<S extends ShapeTileState, W> {
     private version = 0;
     private registered = false;
     private registration = 0;
+    /** Registering the shapes again after the worker lost them; one at a time. */
+    private recovering: Promise<void> | null = null;
     private pending = new Map<string, S>();
     /** Tap index of the registered shapes, for codecs with `tapExtentOf`. */
     private tapIndex: ShapeTapIndex | null = null;
@@ -346,12 +348,36 @@ export class ShapeTileSet<S extends ShapeTileState, W> {
 
     private async fetchTile(request: TileRequest): Promise<Uint8Array | null> {
         const ratio = tilePixelRatioSuffix(request.pixelRatio);
+        const version = this.version;
         const response = await fetch(
-            `${this.server.baseUrl}/${this.routeId}/${TILE_SIZE}/${this.version}/${request.z}/${request.x}/${request.y}${ratio}.png`,
+            `${this.server.baseUrl}/${this.routeId}/${TILE_SIZE}/${version}/${request.z}/${request.x}/${request.y}${ratio}.png`,
+            // Tells the worker this read comes from the page, so a route it has
+            // lost is answered as missing instead of being handed back here.
+            { headers: { 'X-MC-Tile-Relay': '1' } },
         );
+        // The worker was restarted and forgot the shapes: give them to it again,
+        // unless they were registered since (a late answer from before that).
+        if (response.headers.get('X-MC-Tile-Route') === 'missing' && version === this.version) this.recoverRoute();
         // A 503 is a tile the worker could not draw now; throwing says "failed", not "empty".
         if (!response.ok) throw new Error(`${this.codec.routePrefix} tile ${response.status}`);
         return new Uint8Array(await response.arrayBuffer());
+    }
+
+    /**
+     * Registers the current shapes again, for a worker that was stopped and
+     * restarted (browsers stop idle service workers) and so no longer has
+     * them. The new template makes the map ask for the tiles it could not get.
+     */
+    private recoverRoute(): void {
+        if (this.recovering || !this.registered) return;
+        const states = this.sourceStates.filter((state): state is S => state !== null);
+        this.recovering = this.setShapes(states)
+            .then((template) => {
+                if (template) this.onTemplateChanged?.(template);
+            }, () => {})
+            .finally(() => {
+                this.recovering = null;
+            });
     }
 
     private async flush(): Promise<void> {

@@ -1368,6 +1368,25 @@ function pngResponse(body) {
     });
 }
 
+/**
+ * The page's own read of a tile it handed here (`ShapeTileSet.fetchTile`) for
+ * a route this worker no longer has: a restarted worker forgets the shapes it
+ * was given. Sending it back to the page would have the page fetch it again,
+ * and the two would pass the tile back and forth without end (tens of
+ * thousands of requests a minute, until the browser runs out of memory).
+ * Answer it as missing instead, so the page registers the shapes again.
+ */
+function routeMissingResponse() {
+    return new Response('tile route missing', {
+        status: 503,
+        headers: {
+            'Content-Type': 'text/plain',
+            'Cache-Control': 'no-store',
+            'X-MC-Tile-Route': 'missing',
+        },
+    });
+}
+
 function postMessageRender(client, pathname) {
     return new Promise((resolve) => {
         const channel = new MessageChannel();
@@ -1448,6 +1467,10 @@ self.addEventListener('fetch', (event) => {
         return;
     }
     const swProvider = swProviders.get(routeId);
+    if (!swProvider && event.request.headers?.get('X-MC-Tile-Relay')) {
+        event.respondWith(routeMissingResponse());
+        return;
+    }
     const offscreenOk = canRenderOffscreen();
     console.log('[tile-sw] fetch z=' + z + ' x=' + x + ' y=' + y, 'swProvider:', !!swProvider, 'offscreen:', offscreenOk, 'clientId:', event.clientId);
 
