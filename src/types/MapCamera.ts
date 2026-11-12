@@ -36,6 +36,7 @@ export interface MapCameraPositionCopyParams {
   tilt?: number | null;
   visibleRegion?: VisibleRegion | null;
   paddings?: MapPaddings | null;
+  fov?: number | null;
 }
 
 /**
@@ -64,6 +65,19 @@ export interface MapCameraPosition {
   tilt: number;
   visibleRegion: VisibleRegion | null;
   paddings: MapPaddings | null;
+  /**
+   * Vertical field of view of the map's camera, in degrees, as currently
+   * rendered for this viewport.
+   *
+   * - `0`: tilt is drawn without perspective (the map plane is squashed, as the
+   *   providers that emulate tilt with a CSS transform do).
+   * - `null`: unknown, or the map cannot tilt.
+   *
+   * Read-only, like {@link visibleRegion}: the map fills it in when it reports
+   * its camera, and it is ignored when moving the camera. Each provider reports
+   * its own engine's value; there is no common default.
+   */
+  fov: number | null;
   /**
    * Whether `zoom` / `bearing` / `tilt` were given.
    *
@@ -114,6 +128,7 @@ export type MapCameraPositionInterface = {
   tilt?: number,
   paddings?: MapPaddings | null,
   visibleRegion?: VisibleRegion | null,
+  fov?: number | null,
 };
 
 /**
@@ -126,6 +141,7 @@ export function createMapCameraPosition({
   tilt: givenTilt,
   paddings = MapPaddings.Zeros,
   visibleRegion = null,
+  fov = null,
 }: MapCameraPositionInterface): MapCameraPosition {
   const isZoomSpecified = givenZoom != null;
   const isBearingSpecified = givenBearing != null;
@@ -153,6 +169,7 @@ export function createMapCameraPosition({
       return visibleRegion;
     },
     paddings: normalizedPaddings,
+    fov,
     isZoomSpecified,
     isBearingSpecified,
     isTiltSpecified,
@@ -173,6 +190,7 @@ export function createMapCameraPosition({
         tilt: partial.tilt ?? givenTilt,
         paddings: partial.paddings ?? normalizedPaddings,
         visibleRegion: partial.visibleRegion ?? visibleRegion,
+        fov: partial.fov !== undefined ? partial.fov : fov,
       });
     },
     resolvedOnto(current: MapCameraPosition): MapCameraPosition {
@@ -186,6 +204,7 @@ export function createMapCameraPosition({
         tilt: isTiltSpecified ? tilt : current.tilt,
         paddings: normalizedPaddings,
         visibleRegion,
+        fov,
       });
     },
   };
@@ -215,6 +234,7 @@ export namespace MapCameraPosition {
       tilt: camera.isTiltSpecified === false ? undefined : other.tilt,
       paddings: other.paddings,
       visibleRegion: other.visibleRegion,
+      fov: other.fov,
     });
   }
 }
