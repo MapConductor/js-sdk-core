@@ -2,13 +2,47 @@ import { GeoPoint, GeoPointInterface, createGeoPoint, fromGeoPoint } from '../fe
 import { VisibleRegion } from './VisibleRegion';
 
 /**
- * Padding applied to the map edges.
+ * Padding applied to the map edges, in CSS pixels.
+ *
+ * Each side may be left out when a camera is built
+ * (`createMapCameraPosition({ paddings: { top: 300 } })`). A side that was left
+ * out reads 0, and its `is…Specified` flag is `false`, the same way an unset
+ * zoom reads 0 with `isZoomSpecified` false. When the camera is applied with
+ * `MapViewState.moveCameraTo`, every unset side is taken from the current
+ * camera's paddings ({@link MapCameraPosition.resolvedOnto}); a side that was
+ * given is used as is, 0 included.
+ *
+ * The flags are absent on a fully given value: an object with no
+ * `is…Specified` property has all four sides specified.
  */
 export interface MapPaddings {
   top: number;
   left: number;
   bottom: number;
   right: number;
+  /** `false` when `top` was left out. Absent means it was given. */
+  readonly isTopSpecified?: boolean;
+  /** `false` when `left` was left out. Absent means it was given. */
+  readonly isLeftSpecified?: boolean;
+  /** `false` when `bottom` was left out. Absent means it was given. */
+  readonly isBottomSpecified?: boolean;
+  /** `false` when `right` was left out. Absent means it was given. */
+  readonly isRightSpecified?: boolean;
+}
+
+type PaddingSide = 'top' | 'left' | 'bottom' | 'right';
+
+const PADDING_SIDES: readonly PaddingSide[] = ['top', 'left', 'bottom', 'right'];
+
+const SPECIFIED_FLAG = {
+  top: 'isTopSpecified',
+  left: 'isLeftSpecified',
+  bottom: 'isBottomSpecified',
+  right: 'isRightSpecified',
+} as const;
+
+function isSideSpecified(paddings: Partial<MapPaddings>, side: PaddingSide): boolean {
+  return paddings[side] != null && paddings[SPECIFIED_FLAG[side]] !== false;
 }
 
 export namespace MapPaddings {
@@ -19,11 +53,43 @@ export namespace MapPaddings {
     right: 0,
   };
 
-  export const from = (paddings: MapPaddings): MapPaddings => ({
-    top: paddings.top,
-    left: paddings.left,
-    bottom: paddings.bottom,
-    right: paddings.right,
+  /**
+   * Copies `paddings` into a {@link MapPaddings}. A side that is missing (or
+   * flagged unset) reads 0 and keeps its `is…Specified` flag `false`.
+   */
+  export const from = (paddings: Partial<MapPaddings>): MapPaddings => {
+    const result: { -readonly [K in keyof MapPaddings]: MapPaddings[K] } = {
+      top: 0,
+      left: 0,
+      bottom: 0,
+      right: 0,
+    };
+    for (const side of PADDING_SIDES) {
+      if (isSideSpecified(paddings, side)) {
+        result[side] = paddings[side] as number;
+      } else {
+        result[SPECIFIED_FLAG[side]] = false;
+      }
+    }
+    return result;
+  };
+
+  /** True when all four sides were given. */
+  export const isFullySpecified = (paddings: Partial<MapPaddings>): boolean =>
+    PADDING_SIDES.every((side) => isSideSpecified(paddings, side));
+
+  /**
+   * Fills each unset side of `paddings` from `current` (0 when `current` is
+   * null). The result has all four sides specified.
+   */
+  export const resolvedOnto = (
+    paddings: Partial<MapPaddings>,
+    current: MapPaddings | null | undefined,
+  ): MapPaddings => ({
+    top: isSideSpecified(paddings, 'top') ? (paddings.top as number) : current?.top ?? 0,
+    left: isSideSpecified(paddings, 'left') ? (paddings.left as number) : current?.left ?? 0,
+    bottom: isSideSpecified(paddings, 'bottom') ? (paddings.bottom as number) : current?.bottom ?? 0,
+    right: isSideSpecified(paddings, 'right') ? (paddings.right as number) : current?.right ?? 0,
   });
 }
 
@@ -35,7 +101,8 @@ export interface MapCameraPositionCopyParams {
   bearing?: number | null;
   tilt?: number | null;
   visibleRegion?: VisibleRegion | null;
-  paddings?: MapPaddings | null;
+  /** Sides left out stay unset (see {@link MapPaddings}). */
+  paddings?: Partial<MapPaddings> | null;
   fov?: number | null;
 }
 
@@ -64,6 +131,11 @@ export interface MapCameraPosition {
   /** Kotlin-compatible tilt in degrees. */
   tilt: number;
   visibleRegion: VisibleRegion | null;
+  /**
+   * Edge padding: the target is placed at the centre of the area left after it.
+   * A side left out when the camera was built reads 0 and is taken from the
+   * current camera by {@link resolvedOnto} (see {@link MapPaddings}).
+   */
   paddings: MapPaddings | null;
   /**
    * Vertical field of view of the map's camera, in degrees, as currently
@@ -93,8 +165,9 @@ export interface MapCameraPosition {
   /** Keeps a property unset unless `partial` gives it. */
   copy(partial?: MapCameraPositionCopyParams): MapCameraPosition;
   /**
-   * Returns this camera with the unset `zoom` / `bearing` / `tilt` filled in
-   * from `current`. A property that was given is used as is, 0 included.
+   * Returns this camera with the unset `zoom` / `bearing` / `tilt` and the
+   * unset sides of `paddings` filled in from `current`. A property that was
+   * given is used as is, 0 included.
    */
   resolvedOnto(current: MapCameraPosition): MapCameraPosition;
 }
@@ -126,13 +199,20 @@ export type MapCameraPositionInterface = {
   zoom?: number,
   bearing?: number,
   tilt?: number,
-  paddings?: MapPaddings | null,
+  paddings?: Partial<MapPaddings> | null,
   visibleRegion?: VisibleRegion | null,
   fov?: number | null,
 };
 
 /**
- * Creates a default camera position.
+ * Creates a camera position.
+ *
+ * `zoom`, `bearing` and `tilt` may be left out, and so may each side of
+ * `paddings`: an unset value reads 0 here and is taken from the current camera
+ * when the camera is applied with `MapViewState.moveCameraTo`
+ * (`createMapCameraPosition({ position, paddings: { top: 300 } })` keeps the
+ * current left, bottom and right). Leaving `paddings` out altogether means no
+ * padding ({@link MapPaddings.Zeros}), as before.
  */
 export function createMapCameraPosition({
   position,
@@ -194,7 +274,8 @@ export function createMapCameraPosition({
       });
     },
     resolvedOnto(current: MapCameraPosition): MapCameraPosition {
-      if (isZoomSpecified && isBearingSpecified && isTiltSpecified) {
+      const paddingsSpecified = normalizedPaddings == null || MapPaddings.isFullySpecified(normalizedPaddings);
+      if (isZoomSpecified && isBearingSpecified && isTiltSpecified && paddingsSpecified) {
         return this;
       }
       return createMapCameraPosition({
@@ -202,7 +283,9 @@ export function createMapCameraPosition({
         zoom: isZoomSpecified ? zoom : current.zoom,
         bearing: isBearingSpecified ? bearing : current.bearing,
         tilt: isTiltSpecified ? tilt : current.tilt,
-        paddings: normalizedPaddings,
+        paddings: paddingsSpecified
+          ? normalizedPaddings
+          : MapPaddings.resolvedOnto(normalizedPaddings as MapPaddings, current.paddings),
         visibleRegion,
         fov,
       });
