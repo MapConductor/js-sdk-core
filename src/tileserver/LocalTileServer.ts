@@ -222,15 +222,25 @@ export class LocalTileServer {
         return this.postToSWAndWait({ type: 'sw-register-circles', routeId, circles });
     }
 
-    /** Stream one acknowledged block at a time, without cloning a whole population. @internal */
-    async sendSWCircleBlocks(routeId: string, count: number, encodeAt: (index: number) => SWCircle): Promise<boolean> {
+    /**
+     * Stream one acknowledged block at a time, without cloning a whole population.
+     * `order` (stored position -> index) stores them in another order than the
+     * indices, which stay what activation, updates and the draw order use.
+     * @internal
+     */
+    async sendSWCircleBlocks(
+        routeId: string, count: number, encodeAt: (index: number) => SWCircle, order?: Uint32Array,
+    ): Promise<boolean> {
         const token = Math.random().toString(36).slice(2);
         const blockSize = 4096;
         let committed = false;
         try {
-            if (!(await this.postToSWAndWait({ type: 'sw-circle-file-begin', routeId, token, count, blockSize }))) return false;
+            if (!(await this.postToSWAndWait({ type: 'sw-circle-file-begin', routeId, token, count, blockSize, order }))) return false;
             for (let start = 0; start < count; start += blockSize) {
-                const circles = Array.from({ length: Math.min(blockSize, count - start) }, (_, i) => encodeAt(start + i));
+                const circles = Array.from(
+                    { length: Math.min(blockSize, count - start) },
+                    (_, i) => encodeAt(order ? order[start + i] : start + i),
+                );
                 if (!(await this.postToSWAndWait({ type: 'sw-circle-file-block', routeId, token, start, circles }))) return false;
             }
             committed = await this.postToSWAndWait({ type: 'sw-circle-file-commit', routeId, token });

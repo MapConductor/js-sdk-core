@@ -519,6 +519,18 @@ async function readCircleShapes(file, block) {
     return Array.from({ length: records.length / CIRCLE_RECORD_WIDTH }, (_, i) => unpackCircle(file, records, i));
 }
 
+function positionsOf(order) {
+    const positions = new Uint32Array(order.length);
+    for (let p = 0; p < order.length; p++) positions[order[p]] = p;
+    return positions;
+}
+
+/** Where a candidate (a stored position) comes in the draw order. */
+function drawRank(provider, position) {
+    const order = provider.file?.order;
+    return order ? order[position] : position;
+}
+
 async function discardCircleFile(file) {
     if (file) await caches.delete(file.name);
 }
@@ -529,7 +541,8 @@ async function handleCircleFileMessage(msg, clientId) {
     if (msg.type === 'sw-circle-file-activate') {
         const provider = swShapeProviders.get(routeId);
         if (!provider?.file || msg.mask.length !== provider.file.count) return false;
-        provider.active = msg.mask;
+        const { order } = provider.file;
+        provider.active = order ? Uint8Array.from(order, index => msg.mask[index]) : msg.mask;
         provider.generation++;
         dropAllShapeTiles(routeId);
         return true;
@@ -544,10 +557,17 @@ async function handleCircleFileMessage(msg, clientId) {
             }
         }
         const name = circleCachePrefix + clientId + ':' + routeId + ':' + token;
+        // The blocks come in this order: one that cannot be used would mix up every index.
+        const order = msg.order ?? null;
+        if (order && (Object.prototype.toString.call(order) !== '[object Uint32Array]' || order.length !== msg.count)) return false;
         pendingCircleFiles.set(routeId, {
             token, name, cache: await caches.open(name), blockSize: msg.blockSize, count: msg.count,
             written: 0, blocks: new Map(), colors: [], colorIndices: new Map(),
             index: buildShapeIndex([]), maxStrokePx: 0,
+            // Stored by place (stored position -> index), so a tile reads the few
+            // blocks round it. Indices are what the page uses: the activation
+            // mask, updates, and the draw order. Null: stored in index order.
+            order, positionOf: order ? positionsOf(order) : null,
         });
         return true;
     }
@@ -589,9 +609,10 @@ async function updateCircleFile(routeId, provider, updates) {
     const byBlock = new Map();
     for (const update of updates) {
         if (update.index < 0 || update.index >= file.count) continue;
-        const block = Math.floor(update.index / file.blockSize);
+        const position = file.positionOf ? file.positionOf[update.index] : update.index;
+        const block = Math.floor(position / file.blockSize);
         if (!byBlock.has(block)) byBlock.set(block, []);
-        byBlock.get(block).push(update);
+        byBlock.get(block).push({ index: position, shape: update.shape });
     }
     provider.generation++;
     let moved = false;
@@ -1021,6 +1042,14 @@ function filePalette(file) {
     return file.glPalette;
 }
 
+/** The first `count` records of `data` (`width` floats each), sorted by `ranks`. */
+function inDrawOrder(data, ranks, count, width) {
+    const sorted = Uint32Array.from({ length: count }, (_, i) => i).sort((a, b) => ranks[a] - ranks[b]);
+    const out = new Float32Array(count * width);
+    for (let i = 0; i < count; i++) out.set(data.subarray(sorted[i] * width, sorted[i] * width + width), i * width);
+    return out;
+}
+
 /**
  * A tile of a geometry-file circle set, drawn on the GPU. Null when it cannot
  * be (no WebGL2, or a circle bent into its 128-gon): the 2D canvas draws it then.
@@ -1037,13 +1066,19 @@ async function renderCircleFileTileGl(provider, candidates, bounds, x, y, z, til
     // The instance drawing each pixel's dot so far; a later circle in that pixel blanks it.
     const dotAt = new Int32Array(tileSize * tileSize).fill(-1);
     let data = new Float32Array(Math.min(candidates.length, 65536) * GL_CIRCLE_FLOATS);
+    // Each instance's place in the draw order: blocks are read by place, not in that order.
+    let ranks = new Uint32Array(data.length / GL_CIRCLE_FLOATS);
     let count = 0;
-    const push = (px, py, a, b, fill, stroke, kind) => {
+    const push = (px, py, a, b, fill, stroke, kind, rank) => {
         if ((count + 1) * GL_CIRCLE_FLOATS > data.length) {
             const grown = new Float32Array(data.length * 2);
             grown.set(data);
             data = grown;
+            const grownRanks = new Uint32Array(ranks.length * 2);
+            grownRanks.set(ranks);
+            ranks = grownRanks;
         }
+        ranks[count] = rank;
         const o = count * GL_CIRCLE_FLOATS;
         data[o] = px; data[o + 1] = py; data[o + 2] = a; data[o + 3] = b;
         if (fill) { data[o + 4] = fill[0]; data[o + 5] = fill[1]; data[o + 6] = fill[2]; data[o + 7] = fill[3]; }
@@ -1079,21 +1114,27 @@ async function renderCircleFileTileGl(provider, candidates, bounds, x, y, z, til
                 const sx = dx - originX, sy = dy - originY;
                 if (sx < 0 || sx >= tileSize || sy < 0 || sy >= tileSize) continue;
                 const slot = sy * tileSize + sx;
+                const rank = drawRank(provider, candidates[k]);
                 const previous = dotAt[slot];
-                if (previous >= 0) data.fill(0, previous * GL_CIRCLE_FLOATS + 4, previous * GL_CIRCLE_FLOATS + 12);
-                dotAt[slot] = push(sx * r, sy * r, r, r, fill ?? stroke, null, 1);
+                if (previous >= 0) {
+                    // The pixel keeps the circle drawn last.
+                    if (ranks[previous] > rank) continue;
+                    data.fill(0, previous * GL_CIRCLE_FLOATS + 4, previous * GL_CIRCLE_FLOATS + 12);
+                }
+                dotAt[slot] = push(sx * r, sy * r, r, r, fill ?? stroke, null, 1, rank);
                 continue;
             }
             // Bent by the projection: its 128-gon, which the 2D canvas draws.
             if (Math.max(Math.abs(ryN - rx), Math.abs(ryS - rx)) > CIRCLE_ARC_TOLERANCE_PX) return null;
             const outlined = stroke && 2 * radius >= MIN_OUTLINED_PX ? stroke : null;
             if (!fill && !outlined) continue;
-            push((cx - originX) * r, (cy - originY) * r, rx * r, outlined ? strokeWidth * r : 0, fill, outlined, 0);
+            push((cx - originX) * r, (cy - originY) * r, rx * r, outlined ? strokeWidth * r : 0, fill, outlined, 0, drawRank(provider, candidates[k]));
         }
         start = end;
     }
     if (isStale()) return { kind: 'failed' };
     if (count === 0) return { kind: 'empty' };
+    if (file.order) data = inDrawOrder(data, ranks, count, GL_CIRCLE_FLOATS);
     const pixels = tileSize * r;
     // One canvas for the worker: tiles take turns at it, between their block reads.
     const run = glQueue.then(async () => {
@@ -1150,7 +1191,10 @@ async function renderShapeTile(provider, x, y, z, tileSize, pixelRatio = 1, isSt
             if (!p?.circle) continue;
             if (!(isVisibleColor(p.fill) || (p.strokeWidth > 0 && isVisibleColor(p.stroke)))) continue;
             const slot = circleDotSlot(p, worldScale, originX, originY, tileSize);
-            if (slot >= 0) lastCircleDot[slot] = index + 1;
+            if (slot < 0) continue;
+            // The pixel keeps the circle drawn last.
+            const held = lastCircleDot[slot];
+            if (held === 0 || drawRank(provider, held - 1) < drawRank(provider, index)) lastCircleDot[slot] = index + 1;
         }
     }
     let drew = false;
@@ -1220,11 +1264,26 @@ async function renderShapeTile(provider, x, y, z, tileSize, pixelRatio = 1, isSt
             drew = true;
         }
     };
+    // Stored by place: gather what draws, then draw it in the draw order.
+    const deferred = provider.file?.order ? [] : null;
     for await (const { start, end, at } of shapeBlocks(provider, candidates, bounds, isStale)) {
         for (let i = start; i < end; i++) {
             const index = candidates[i], p = at(index);
-            if (p) drawCandidate(p, index);
+            if (!p) continue;
+            if (!deferred) {
+                drawCandidate(p, index);
+                continue;
+            }
+            if (lastCircleDot) {
+                const slot = circleDotSlot(p, worldScale, originX, originY, tileSize);
+                if (slot === -1 || (slot >= 0 && lastCircleDot[slot] !== index + 1)) continue;
+            }
+            deferred.push({ p, index, rank: drawRank(provider, index) });
         }
+    }
+    if (deferred) {
+        deferred.sort((a, b) => a.rank - b.rank);
+        for (const { p, index } of deferred) drawCandidate(p, index);
     }
     if (isStale()) return { kind: 'failed' };
     if (!drew) return { kind: 'empty' };
