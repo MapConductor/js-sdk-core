@@ -22,6 +22,15 @@
 export function notifyOverlaysAdded<S extends { onAdded: ((state: S) => void) | null }>(
     states: readonly S[],
 ): void {
+    if (states.length > 0) {
+        for (const listener of addedListeners) {
+            try {
+                listener(states);
+            } catch (error) {
+                reportCallbackError(error);
+            }
+        }
+    }
     for (const state of states) {
         const onAdded = state.onAdded;
         if (onAdded == null) continue;
@@ -31,6 +40,25 @@ export function notifyOverlaysAdded<S extends { onAdded: ((state: S) => void) | 
             reportCallbackError(error);
         }
     }
+}
+
+const addedListeners = new Set<(states: readonly object[]) => void>();
+
+/**
+ * Hears every add that {@link notifyOverlaysAdded} reports, on every map, with
+ * the same state objects: what a collection (`<Markers>`, `<Circles>`, ...) needs
+ * to tell when the states it handed over are all on the map. Returns the
+ * unsubscribe function.
+ *
+ * For the framework layer, not for apps.
+ *
+ * @internal
+ */
+export function subscribeOverlaysAdded(listener: (states: readonly object[]) => void): () => void {
+    addedListeners.add(listener);
+    return () => {
+        addedListeners.delete(listener);
+    };
 }
 
 function reportCallbackError(error: unknown): void {
