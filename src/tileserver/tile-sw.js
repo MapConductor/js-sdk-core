@@ -864,6 +864,262 @@ function simplifiedAt(provider, index, z, tileSize) {
 }
 
 /** A tile of a shape route: `{ kind: 'tile', blob }`, `{ kind: 'empty' }` or `{ kind: 'failed' }`. */
+// ── Circle tiles on the GPU ─────────────────────────────────────────────────
+//
+// A nationwide circle set (the geometry file) is drawn with WebGL2 instead of
+// the 2D canvas: one instance per circle, its fill and outline from the
+// distance to the centre, as ios-sdk-core's MetalShapeRasterizer and
+// android-sdk-core's GlShapeRasterizer draw them.
+//
+// What made these tiles slow was mostly not the drawing. The 2D path read
+// every block of the file twice (once to pick the circle each pixel keeps,
+// once to draw), through a cache of 8 blocks that a nationwide tile overflows,
+// and built an object, a Path2D and a colour string per circle. Here each block
+// is read once and the circles are read from it as numbers: a dot that a later
+// circle replaces in the same pixel is blanked in place, which keeps the order.
+//
+// The 2D canvas still draws a tile with a circle bent into its 128-gon, every
+// polygon and polyline tile, and everything where WebGL2 is not available.
+// `useGl = false` (from the worker's console) draws every tile on the 2D canvas,
+// to compare the two.
+
+let useGl = true;
+let glCircleState = null;
+let glQueue = Promise.resolve();
+
+const GL_CIRCLE_FLOATS = 13;
+
+const GL_CIRCLE_VERTEX = `#version 300 es
+layout(location = 0) in vec2 corner;
+layout(location = 1) in vec4 geometry;
+layout(location = 2) in vec4 fillColor;
+layout(location = 3) in vec4 strokeColor;
+layout(location = 4) in float kind;
+uniform float extent;
+out vec2 pixel;
+flat out vec4 vGeometry;
+flat out vec4 vFill;
+flat out vec4 vStroke;
+flat out float vKind;
+void main() {
+    vec2 lo;
+    vec2 hi;
+    if (kind > 0.5) {
+        lo = geometry.xy;
+        hi = lo + geometry.zw;
+    } else {
+        float reach = geometry.z + geometry.w * 0.5 + 1.0;
+        lo = geometry.xy - reach;
+        hi = geometry.xy + reach;
+    }
+    vec2 px = mix(lo, hi, corner);
+    vec2 unit = px / extent;
+    // The canvas's top row is NDC +1: tile pixel y = 0.
+    gl_Position = vec4(unit.x * 2.0 - 1.0, 1.0 - unit.y * 2.0, 0.0, 1.0);
+    pixel = px;
+    vGeometry = geometry;
+    vFill = fillColor;
+    vStroke = strokeColor;
+    vKind = kind;
+}`;
+
+const GL_CIRCLE_FRAGMENT = `#version 300 es
+precision highp float;
+in vec2 pixel;
+flat in vec4 vGeometry;
+flat in vec4 vFill;
+flat in vec4 vStroke;
+flat in float vKind;
+out vec4 color;
+void main() {
+    if (vKind > 0.5) {
+        color = vFill;
+        return;
+    }
+    float d = length(pixel - vGeometry.xy);
+    float radius = vGeometry.z;
+    float halfWidth = vGeometry.w * 0.5;
+    float fillCoverage = clamp(radius - d + 0.5, 0.0, 1.0);
+    float strokeCoverage = clamp(radius + halfWidth - d + 0.5, 0.0, 1.0) - clamp(radius - halfWidth - d + 0.5, 0.0, 1.0);
+    vec4 fill = vFill * fillCoverage;
+    vec4 stroke = vStroke * strokeCoverage;
+    color = stroke + fill * (1.0 - stroke.a);
+}`;
+
+/** The worker's one WebGL2 canvas and program, made on first use; null where there is none. */
+function glCircles() {
+    if (!useGl) return null;
+    if (glCircleState && !glCircleState.gl.isContextLost()) return glCircleState;
+    glCircleState = null;
+    try {
+        if (typeof OffscreenCanvas === 'undefined') { useGl = false; return null; }
+        const canvas = new OffscreenCanvas(256, 256);
+        const gl = canvas.getContext('webgl2', { premultipliedAlpha: true, preserveDrawingBuffer: true, antialias: false, alpha: true });
+        if (!gl) { useGl = false; return null; }
+        const shader = (type, source) => {
+            const s = gl.createShader(type);
+            gl.shaderSource(s, source);
+            gl.compileShader(s);
+            if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+            return s;
+        };
+        const program = gl.createProgram();
+        gl.attachShader(program, shader(gl.VERTEX_SHADER, GL_CIRCLE_VERTEX));
+        gl.attachShader(program, shader(gl.FRAGMENT_SHADER, GL_CIRCLE_FRAGMENT));
+        gl.linkProgram(program);
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+        const corners = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, corners);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1]), gl.STATIC_DRAW);
+        const instances = gl.createBuffer();
+        const vao = gl.createVertexArray();
+        gl.bindVertexArray(vao);
+        gl.bindBuffer(gl.ARRAY_BUFFER, corners);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 8, 0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, instances);
+        const stride = GL_CIRCLE_FLOATS * 4;
+        [[1, 4, 0], [2, 4, 16], [3, 4, 32], [4, 1, 48]].forEach(([location, size, offset]) => {
+            gl.enableVertexAttribArray(location);
+            gl.vertexAttribPointer(location, size, gl.FLOAT, false, stride, offset);
+            gl.vertexAttribDivisor(location, 1);
+        });
+        gl.bindVertexArray(null);
+        glCircleState = { canvas, gl, program, vao, instances, extentAt: gl.getUniformLocation(program, 'extent') };
+        return glCircleState;
+    } catch (error) {
+        console.warn('[tile-sw] WebGL2 circle tiles unavailable; drawing them on the 2D canvas:', error);
+        useGl = false;
+        return null;
+    }
+}
+
+/** A CSS colour as premultiplied RGBA in [0, 1], or null when it draws nothing. */
+function premultipliedColor(color) {
+    if (!isVisibleColor(color)) return null;
+    const ctx = premultipliedColor.ctx ??= new OffscreenCanvas(1, 1).getContext('2d');
+    ctx.fillStyle = '#000000';
+    ctx.fillStyle = color;
+    const normal = String(ctx.fillStyle);
+    let r, g, b, a = 1;
+    const hex = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(normal);
+    const rgba = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/i.exec(normal);
+    if (hex) {
+        r = parseInt(hex[1], 16); g = parseInt(hex[2], 16); b = parseInt(hex[3], 16);
+    } else if (rgba) {
+        r = +rgba[1]; g = +rgba[2]; b = +rgba[3]; a = rgba[4] === undefined ? 1 : +rgba[4];
+    } else {
+        return null;
+    }
+    if (!(a > 0)) return null;
+    return [r / 255 * a, g / 255 * a, b / 255 * a, a];
+}
+
+/** The file's palette as premultiplied RGBA, made once per file. */
+function filePalette(file) {
+    if (!file.glPalette || file.glPalette.length !== file.colors.length) file.glPalette = file.colors.map(premultipliedColor);
+    return file.glPalette;
+}
+
+/**
+ * A tile of a geometry-file circle set, drawn on the GPU. Null when it cannot
+ * be (no WebGL2, or a circle bent into its 128-gon): the 2D canvas draws it then.
+ * The same choices as renderShapeTile's 2D path -- the circle a pixel keeps,
+ * Dot or Arc, outlined or not -- in one read of each block.
+ */
+async function renderCircleFileTileGl(provider, candidates, bounds, x, y, z, tileSize, r, isStale) {
+    const state = glCircles();
+    if (!state) return null;
+    const file = provider.file;
+    const palette = filePalette(file);
+    const scale = tileSize * 2 ** z;
+    const originX = x * tileSize, originY = y * tileSize;
+    // The instance drawing each pixel's dot so far; a later circle in that pixel blanks it.
+    const dotAt = new Int32Array(tileSize * tileSize).fill(-1);
+    let data = new Float32Array(Math.min(candidates.length, 65536) * GL_CIRCLE_FLOATS);
+    let count = 0;
+    const push = (px, py, a, b, fill, stroke, kind) => {
+        if ((count + 1) * GL_CIRCLE_FLOATS > data.length) {
+            const grown = new Float32Array(data.length * 2);
+            grown.set(data);
+            data = grown;
+        }
+        const o = count * GL_CIRCLE_FLOATS;
+        data[o] = px; data[o + 1] = py; data[o + 2] = a; data[o + 3] = b;
+        if (fill) { data[o + 4] = fill[0]; data[o + 5] = fill[1]; data[o + 6] = fill[2]; data[o + 7] = fill[3]; }
+        else data.fill(0, o + 4, o + 8);
+        if (stroke) { data[o + 8] = stroke[0]; data[o + 9] = stroke[1]; data[o + 10] = stroke[2]; data[o + 11] = stroke[3]; }
+        else data.fill(0, o + 8, o + 12);
+        data[o + 12] = kind;
+        return count++;
+    };
+    const { blockSize } = file;
+    for (let start = 0; start < candidates.length;) {
+        if (isStale()) return { kind: 'failed' };
+        const block = Math.floor(candidates[start] / blockSize);
+        const offset = block * blockSize;
+        let end = start + 1;
+        while (end < candidates.length && candidates[end] < offset + blockSize) end++;
+        const records = await readCircleBlock(file, block);
+        for (let k = start; k < end; k++) {
+            const i = (candidates[k] - offset) * CIRCLE_RECORD_WIDTH;
+            if (!(records[i] > 0)) continue;
+            const west = records[i + 6], north = records[i + 7], east = records[i + 8], south = records[i + 9];
+            if (west > bounds[2] || east < bounds[0] || north > bounds[3] || south < bounds[1]) continue;
+            const strokeWidth = records[i + 10];
+            const fill = palette[records[i + 11]];
+            const stroke = strokeWidth > 0 ? palette[records[i + 12]] : null;
+            if (!fill && !stroke) continue;
+            const cxw = records[i + 4], cyw = records[i + 5];
+            const cx = cxw * scale, cy = cyw * scale;
+            const rx = (east - cxw) * scale, ryN = (cyw - north) * scale, ryS = (south - cyw) * scale;
+            const radius = Math.max(rx, ryN, ryS);
+            if (radius < 0.5) {
+                const dx = Math.floor(cx), dy = Math.floor(cy);
+                const sx = dx - originX, sy = dy - originY;
+                if (sx < 0 || sx >= tileSize || sy < 0 || sy >= tileSize) continue;
+                const slot = sy * tileSize + sx;
+                const previous = dotAt[slot];
+                if (previous >= 0) data.fill(0, previous * GL_CIRCLE_FLOATS + 4, previous * GL_CIRCLE_FLOATS + 12);
+                dotAt[slot] = push(sx * r, sy * r, r, r, fill ?? stroke, null, 1);
+                continue;
+            }
+            // Bent by the projection: its 128-gon, which the 2D canvas draws.
+            if (Math.max(Math.abs(ryN - rx), Math.abs(ryS - rx)) > CIRCLE_ARC_TOLERANCE_PX) return null;
+            const outlined = stroke && 2 * radius >= MIN_OUTLINED_PX ? stroke : null;
+            if (!fill && !outlined) continue;
+            push((cx - originX) * r, (cy - originY) * r, rx * r, outlined ? strokeWidth * r : 0, fill, outlined, 0);
+        }
+        start = end;
+    }
+    if (isStale()) return { kind: 'failed' };
+    if (count === 0) return { kind: 'empty' };
+    const pixels = tileSize * r;
+    // One canvas for the worker: tiles take turns at it, between their block reads.
+    const run = glQueue.then(async () => {
+        const { canvas, gl, program, vao, instances, extentAt } = state;
+        if (canvas.width !== pixels) { canvas.width = pixels; canvas.height = pixels; }
+        gl.viewport(0, 0, pixels, pixels);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.enable(gl.BLEND);
+        gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+        gl.useProgram(program);
+        gl.uniform1f(extentAt, pixels);
+        gl.bindBuffer(gl.ARRAY_BUFFER, instances);
+        gl.bufferData(gl.ARRAY_BUFFER, data.subarray(0, count * GL_CIRCLE_FLOATS), gl.STREAM_DRAW);
+        gl.bindVertexArray(vao);
+        gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, count);
+        gl.bindVertexArray(null);
+        if (gl.isContextLost()) return null;
+        return canvas.convertToBlob({ type: 'image/png' });
+    });
+    glQueue = run.catch(() => {});
+    const blob = await run;
+    if (!blob || blob.size === 0) return null;
+    return { kind: 'tile', blob };
+}
+
 async function renderShapeTile(provider, x, y, z, tileSize, pixelRatio = 1, isStale = () => false) {
     const scale = tileSize * 2 ** z;
     const originX = x * tileSize, originY = y * tileSize;
@@ -874,6 +1130,10 @@ async function renderShapeTile(provider, x, y, z, tileSize, pixelRatio = 1, isSt
     ];
     const candidates = queryShapes(provider, ...bounds);
     if (candidates.length === 0) return { kind: 'empty' };
+    if (provider.file) {
+        const drawn = await renderCircleFileTileGl(provider, candidates, bounds, x, y, z, tileSize, pixelRatio, isStale);
+        if (drawn) return drawn;
+    }
 
     const r = pixelRatio;
     const canvas = new OffscreenCanvas(tileSize * r, tileSize * r);
