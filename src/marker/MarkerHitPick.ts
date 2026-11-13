@@ -86,6 +86,11 @@ export function pickMarkerIndex(touch: Offset, rects: MarkerHitRect[], tolerance
     return hit ? hit.item.index : null;
 }
 
+/** The scale is measured over at least this many pixels (see {@link markerSearchBounds}). */
+const MIN_MEASURED_PX = 4;
+/** The widest step tried when measuring the scale: a 1° step covers any zoom that shows markers. */
+const MAX_EPSILON_DEG = 1;
+
 /**
  * 候補を集める範囲。タップ点から画面上 {@link MARKER_HIT_SEARCH_RADIUS_PX} 以内に先端があるマーカーを含む。
  *
@@ -100,12 +105,24 @@ export function markerSearchBounds(
     project: (position: GeoPointInterface) => Offset | null,
     searchRadiusPx: number = MARKER_HIT_SEARCH_RADIUS_PX,
 ): GeoRectBounds | null {
-    const epsilon = 1e-4;
-    const north = project(createGeoPoint({ latitude: position.latitude + epsilon, longitude: position.longitude }));
-    const east = project(createGeoPoint({ latitude: position.latitude, longitude: position.longitude + epsilon }));
-    if (!north || !east) return null;
-    const pxPerDegLat = Math.hypot(north.x - touchScreen.x, north.y - touchScreen.y) / epsilon;
-    const pxPerDegLon = Math.hypot(east.x - touchScreen.x, east.y - touchScreen.y) / epsilon;
+    // The scale round the tap, from points a little north and east of it. Some
+    // projections round to whole pixels (ArcGIS's 3D SceneView): zoomed out, 1e-4°
+    // is under a pixel and both points land on the tap, so widen the step until
+    // they move far enough to measure.
+    let epsilon = 1e-4;
+    let pxPerDegLat: number;
+    let pxPerDegLon: number;
+    for (;;) {
+        const north = project(createGeoPoint({ latitude: position.latitude + epsilon, longitude: position.longitude }));
+        const east = project(createGeoPoint({ latitude: position.latitude, longitude: position.longitude + epsilon }));
+        if (!north || !east) return null;
+        const dLat = Math.hypot(north.x - touchScreen.x, north.y - touchScreen.y);
+        const dLon = Math.hypot(east.x - touchScreen.x, east.y - touchScreen.y);
+        pxPerDegLat = dLat / epsilon;
+        pxPerDegLon = dLon / epsilon;
+        if ((dLat >= MIN_MEASURED_PX && dLon >= MIN_MEASURED_PX) || epsilon >= MAX_EPSILON_DEG) break;
+        epsilon *= 10;
+    }
     if (!(pxPerDegLat > 0) || !(pxPerDegLon > 0)) return null;
     const halfLat = searchRadiusPx / pxPerDegLat;
     const halfLon = searchRadiusPx / pxPerDegLon;
