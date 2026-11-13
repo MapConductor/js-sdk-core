@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { pickMarkerIndex, preferMarkerHit } from '../dist/index.mjs';
+import { createGeoPoint, markerSearchBounds, pickMarkerIndex, preferMarkerHit } from '../dist/index.mjs';
 
 const rect = (x, y, { width = 48, height = 48, anchorX = 0.5 } = {}) => ({
     anchorScreen: { x, y },
@@ -40,4 +40,19 @@ test('別々に探した結果も同じ規則でまとめる（真下 > 近接�
     assert.equal(preferMarkerHit(near, exact).item, 'tiled');
     assert.equal(preferMarkerHit(near, { ...near, item: 'closer', distance: 1 }).item, 'closer');
     assert.equal(preferMarkerHit(null, near).item, 'regular');
+});
+
+test('画素に丸める投影（ArcGIS の 3D SceneView）でも探索範囲を作れる。引いた縮尺で 1e-4° は 1 px 未満', () => {
+  const worldPx = 512 * 2 ** 9; // zoom 9: 728 px a degree
+  const project = (p) => {
+    const x = ((p.longitude + 180) / 360) * worldPx;
+    const s = Math.sin((p.latitude * Math.PI) / 180);
+    const y = (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * worldPx;
+    return { x: Math.round(x), y: Math.round(y) };
+  };
+  const tap = createGeoPoint({ latitude: 21.31, longitude: -157.86 });
+  const bounds = markerSearchBounds(tap, project(tap), project, 512);
+  assert.ok(bounds, 'bounds were not made');
+  const halfLon = (bounds.northEast.longitude - bounds.southWest.longitude) / 2;
+  assert.ok(halfLon > 0.63 && halfLon < 0.77, `half width ${halfLon}`); // 512 px is about 0.70°
 });
