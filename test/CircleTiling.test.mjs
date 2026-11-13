@@ -57,6 +57,7 @@ class Canvas {
 const worker = readFileSync(new URL('../dist/tile-sw.js', import.meta.url), 'utf8');
 const handlers = {};
 const geometryCaches = new Map();
+const blockReads = { count: 0 };
 const caches = {
   async keys() { return [...geometryCaches.keys()]; },
   async delete(name) { return geometryCaches.delete(name); },
@@ -65,7 +66,7 @@ const caches = {
     geometryCaches.set(name, blocks);
     return {
       async put(key, response) { blocks.set(key, await response.arrayBuffer()); },
-      async match(key) { return blocks.has(key) ? new Response(blocks.get(key)) : undefined; },
+      async match(key) { blockReads.count++; return blocks.has(key) ? new Response(blocks.get(key)) : undefined; },
     };
   },
 };
@@ -367,6 +368,45 @@ test('large circle registration streams blocks and preserves drawing, updates an
     await workerIdle;
   }
   assert.equal(geometryCaches.size, 0);
+});
+
+test('large sets are stored by place: a tile reads only the blocks round it, and draws in list order', async () => {
+  // Every fourth circle here, the rest far away: in list order the ones here span
+  // all three stored blocks; stored by place they share one.
+  const here = (i) => i % 4 === 0;
+  const colors = ['#0000ff', '#ff0000'];
+  const states = Array.from({ length: 12_288 }, (_, i) => here(i)
+    ? circleAt(String(i), OX + 100.25, OY + 100.25, 0.2, { fillColor: colors[(i / 4) % 2] })
+    : circleAt(String(i), OX + 5_000_000 + (i % 1000) * 300, OY - 3_000_000, 0.2));
+  // Two large ones over the dots: the later in the list is on top.
+  states.push(
+    circleAt('under', OX + 100, OY + 100, 20, { fillColor: 'rgba(1,1,1,1)', strokeWidth: 0 }),
+    circleAt('over', OX + 105, OY + 100, 20, { fillColor: 'rgba(2,2,2,1)', strokeWidth: 0 }),
+  );
+  const { tiler, template } = await tiled(states);
+  try {
+    blockReads.count = 0;
+    const tile = await fetchTile(template(), Z, TX, TY);
+    assert.equal(blockReads.count, 1, 'one stored block for the tile');
+    // List order: the dot pixel keeps the last dot here (12284), the large ones follow it.
+    assert.deepEqual(tile.draws.map((d) => d.color), [colors[(12_284 / 4) % 2], 'rgba(1,1,1,1)', 'rgba(2,2,2,1)']);
+    assert.equal(rasterize(tile).get('105,100'), 'rgba(2,2,2,1)');
+
+    // Indices stay the list's: the activation mask takes out 12284 and 'over'...
+    await tiler.route(states.filter((s) => s.id !== '12284' && s.id !== 'over'));
+    const without = await fetchTile(template(), Z, TX, TY);
+    assert.deepEqual(without.draws.map((d) => d.color), [colors[(12_280 / 4) % 2], 'rgba(1,1,1,1)']);
+    // ...and an update reaches the circle it names.
+    const s12280 = states.find((s) => s.id === '12280');
+    s12280.fillColor = 'rgba(3,3,3,1)';
+    tiler.update(s12280);
+    await settle();
+    await workerIdle;
+    assert.equal((await fetchTile(template(), Z, TX, TY)).draws[0].color, 'rgba(3,3,3,1)');
+  } finally {
+    await tiler.clear();
+    await workerIdle;
+  }
 });
 
 test('canTile: 半径 0・非有限、極にかかる、日付変更線をまたぐ円はタイルにしない', () => {

@@ -37,7 +37,20 @@ export interface ShapeTileCodec<S extends ShapeTileState, W> {
     /** Its place in the draw order; `state.zIndex` (0 when null) if not given. */
     zIndexOf?(state: S): number;
     register(server: LocalTileServer, routeId: string, shapes: readonly W[]): Promise<boolean>;
-    registerLarge?(server: LocalTileServer, routeId: string, count: number, encodeAt: (index: number) => W): Promise<boolean>;
+    /**
+     * Streams a large set in blocks. `order`, when given, is the order to store
+     * them in (stored position -> index): see ``spatialKeyOf``.
+     */
+    registerLarge?(
+        server: LocalTileServer, routeId: string, count: number, encodeAt: (index: number) => W, order?: Uint32Array,
+    ): Promise<boolean>;
+    /**
+     * Where the state is, as a number nearby states share (a cell of a grid in
+     * a space-filling order). A large set is stored in this order, so that a
+     * tile reads the few stored blocks round it instead of most of the set.
+     * The draw order stays the list order.
+     */
+    spatialKeyOf?(state: S): number;
     activate?(server: LocalTileServer, routeId: string, mask: Uint8Array): Promise<boolean>;
     revision?(state: S): number | undefined;
     /**
@@ -215,8 +228,10 @@ export class ShapeTileSet<S extends ShapeTileState, W> {
             if (tapIndex && tapExtentOf) tapIndex.add(index, tapExtentOf(shape));
             return shape;
         };
-        const ok = this.codec.registerLarge && ordered.length > 2_000
-            ? await this.codec.registerLarge(this.server, this.routeId, ordered.length, encodeAt)
+        const large = this.codec.registerLarge && ordered.length > 2_000;
+        const order = large && this.codec.spatialKeyOf ? spatialOrder(ordered, this.codec.spatialKeyOf) : undefined;
+        const ok = large && this.codec.registerLarge
+            ? await this.codec.registerLarge(this.server, this.routeId, ordered.length, encodeAt, order)
             : await this.codec.register(this.server, this.routeId, ordered.map((_, index) => encodeAt(index)));
         if (!ok || registration !== this.registration) return null;
         // Some providers (Leaflet, Google Maps, deck.gl, ...) read `/__tiles/`
@@ -546,6 +561,46 @@ export const POLYLINE_TILE_CODEC: ShapeTileCodec<PolylineState, SWPolyline> = {
         server.sendSWPolylineUpdates(routeId, updates.map(({ index, shape }) => ({ index, polyline: shape }))),
 };
 
+/**
+ * The indices of `states` sorted by `keyOf` (24-bit keys), ties in list order.
+ * Two stable 12-bit counting passes: a comparison sort of the national-scale
+ * sets (700,000 states) takes most of a second on a phone.
+ * @internal
+ */
+export function spatialOrder<S>(states: readonly S[], keyOf: (state: S) => number): Uint32Array {
+    const n = states.length;
+    const keys = new Uint32Array(n);
+    for (let i = 0; i < n; i++) keys[i] = keyOf(states[i]) & 0xffffff;
+    let from: Uint32Array = new Uint32Array(n);
+    for (let i = 0; i < n; i++) from[i] = i;
+    let to: Uint32Array = new Uint32Array(n);
+    const counts = new Uint32Array(4096);
+    for (const shift of [0, 12]) {
+        counts.fill(0);
+        for (let i = 0; i < n; i++) counts[(keys[from[i]] >>> shift) & 4095]++;
+        for (let b = 0, sum = 0; b < 4096; b++) { const c = counts[b]; counts[b] = sum; sum += c; }
+        for (let i = 0; i < n; i++) to[counts[(keys[from[i]] >>> shift) & 4095]++] = from[i];
+        [from, to] = [to, from];
+    }
+    return from;
+}
+
+/**
+ * The z12 cell of a point in Z-order (Morton), 24 bits: cells next to each
+ * other mostly get keys next to each other.
+ * @internal
+ */
+export function mortonCellKey(latitude: number, longitude: number): number {
+    const x = (longitude + 180) / 360;
+    const sin = Math.sin((Math.max(-85, Math.min(85, latitude)) * Math.PI) / 180);
+    const y = 0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI);
+    const cx = Math.max(0, Math.min(4095, Math.floor(x * 4096)));
+    const cy = Math.max(0, Math.min(4095, Math.floor(y * 4096)));
+    let key = 0;
+    for (let bit = 0; bit < 12; bit++) key |= (((cx >>> bit) & 1) << (2 * bit)) | (((cy >>> bit) & 1) << (2 * bit + 1));
+    return key >>> 0;
+}
+
 /** @internal */
 export const CIRCLE_TILE_CODEC: ShapeTileCodec<CircleState, SWCircle> = {
     routePrefix: 'circles',
@@ -564,7 +619,8 @@ export const CIRCLE_TILE_CODEC: ShapeTileCodec<CircleState, SWCircle> = {
     // The automatic zIndex of a circle without one, as the circle renderers and the tap use.
     zIndexOf: effectiveCircleZIndex,
     register: (server, routeId, shapes) => server.sendSWCirclesAndWait(routeId, shapes),
-    registerLarge: (server, routeId, count, encodeAt) => server.sendSWCircleBlocks(routeId, count, encodeAt),
+    registerLarge: (server, routeId, count, encodeAt, order) => server.sendSWCircleBlocks(routeId, count, encodeAt, order),
+    spatialKeyOf: (state) => mortonCellKey(state.center.latitude, normalizeLngDegrees(state.center.longitude)),
     activate: (server, routeId, mask) => server.activateSWCircles(routeId, mask),
     revision: (state) => state.revision,
     update: (server, routeId, updates) =>
