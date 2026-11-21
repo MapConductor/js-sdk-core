@@ -1741,6 +1741,39 @@ async function mainThreadRender(pathname, clientId) {
     return postMessageRender(client, pathname);
 }
 
+/*
+ * Shape tiles being drawn, by route, told to the pages: a page counts its
+ * collection busy while its tiles are drawn (onAddStart / onAddEnd), and only
+ * this worker sees the tiles a map reads straight from /__tiles/. Only the
+ * changes are told, numbered so that a page can drop one that arrives late.
+ */
+const shapeRenderCounts = new Map();
+let shapeActivitySeq = 0;
+
+function tellShapeActivity(routeId, busy) {
+    const seq = ++shapeActivitySeq;
+    if (typeof self.clients?.matchAll !== 'function') return;
+    self.clients.matchAll({ type: 'window' }).then((clients) => {
+        for (const client of clients) client.postMessage({ type: 'mc-shape-activity', routeId, busy, seq });
+    }).catch(() => {});
+}
+
+function beginShapeRender(routeId) {
+    const count = (shapeRenderCounts.get(routeId) ?? 0) + 1;
+    shapeRenderCounts.set(routeId, count);
+    if (count === 1) tellShapeActivity(routeId, true);
+}
+
+function endShapeRender(routeId) {
+    const count = (shapeRenderCounts.get(routeId) ?? 1) - 1;
+    if (count > 0) {
+        shapeRenderCounts.set(routeId, count);
+        return;
+    }
+    shapeRenderCounts.delete(routeId);
+    tellShapeActivity(routeId, false);
+}
+
 self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
     if (!url.pathname.startsWith('/__tiles/')) return;
@@ -1760,6 +1793,7 @@ self.addEventListener('fetch', (event) => {
         const generation = shapeProvider.generation;
         const isStale = () => event.request.signal?.aborted
             || swShapeProviders.get(routeId) !== shapeProvider || shapeProvider.generation !== generation;
+        beginShapeRender(routeId);
         event.respondWith(
             (shapeProvider.file
                 ? enqueueCircleOperation(routeId, async () => {
@@ -1781,7 +1815,8 @@ self.addEventListener('fetch', (event) => {
                 .catch((err) => {
                     console.warn('[tile-sw] shape tile failed:', err);
                     return failedTileResponse();
-                }),
+                })
+                .finally(() => endShapeRender(routeId)),
         );
         return;
     }

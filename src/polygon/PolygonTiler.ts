@@ -1,4 +1,5 @@
 import { createRasterLayerState, type RasterLayerState } from '../raster/RasterLayerState';
+import type { TileActivity } from '../tileserver/TileActivity';
 import { RasterLayerSource } from '../raster/RasterLayerSource';
 import type { PolygonState } from './PolygonState';
 import { PolygonTileSet } from './PolygonTileSet';
@@ -36,6 +37,9 @@ export class PolygonTiler {
     onTemplate: ((template: string | null, tileSize: number) => void | Promise<void>) | null = null;
 
     private readonly shapes: ShapeTiler<PolygonState, SWPolygon>;
+
+    /** Busy while this tiler takes a list or its tiles are drawn. @internal */
+    get activity(): TileActivity { return this.shapes.activity; }
 
     constructor(readonly options: PolygonTilingOptions = PolygonTilingOptions.Default) {
         this.shapes = new ShapeTiler<PolygonState, SWPolygon>(

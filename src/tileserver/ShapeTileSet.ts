@@ -1,4 +1,5 @@
 import { LocalTileServer, type SWCircle, type SWPolygon, type SWPolyline } from './LocalTileServer';
+import { TileActivity } from './TileActivity';
 import { tilePixelRatio, tilePixelRatioSuffix } from './TilePixelRatio';
 import type { TileRequest } from './TileRequest';
 import type { GeoPoint } from '../features/GeoPoint';
@@ -153,6 +154,15 @@ export class ShapeTileSet<S extends ShapeTileState, W> {
     onTemplateChanged: ((template: string) => void) | null = null;
 
     private readonly server = LocalTileServer.startServer();
+
+    /**
+     * Busy while tiles of this set are drawn -- by the service worker, or for
+     * the page ({@link fetchTile}) -- and while {@link ShapeTiler} hands it a list.
+     *
+     * @internal
+     */
+    readonly activity = new TileActivity();
+    private workerDrawing = false;
     private readonly pixelRatio = tilePixelRatio();
     private indexById = new Map<string, number>();
     private sourceStates: (S | null)[] = [];
@@ -182,6 +192,12 @@ export class ShapeTileSet<S extends ShapeTileState, W> {
 
     constructor(private readonly codec: ShapeTileCodec<S, W>) {
         this.routeId = `${codec.routePrefix}-${Math.random().toString(36).slice(2, 10)}`;
+        LocalTileServer.onShapeActivity(this.routeId, (busy) => {
+            if (busy === this.workerDrawing) return;
+            this.workerDrawing = busy;
+            if (busy) this.activity.begin();
+            else this.activity.end();
+        });
     }
 
     /**
@@ -361,7 +377,11 @@ export class ShapeTileSet<S extends ShapeTileState, W> {
         if (this.flushTimer == null) this.flushTimer = setTimeout(() => void this.flush(), UPDATE_COALESCE_MS);
     }
 
-    private async fetchTile(request: TileRequest): Promise<Uint8Array | null> {
+    private fetchTile(request: TileRequest): Promise<Uint8Array | null> {
+        return this.activity.during(() => this.relayTile(request));
+    }
+
+    private async relayTile(request: TileRequest): Promise<Uint8Array | null> {
         const ratio = tilePixelRatioSuffix(request.pixelRatio);
         const version = this.version;
         const response = await fetch(
@@ -438,7 +458,14 @@ export class ShapeTiler<S extends ShapeTileState, W> {
         tileSet.onTemplateChanged = (template) => void this.onTemplate?.(template, tileSet.tileSize);
     }
 
+    /** @internal */
+    get activity(): TileActivity { return this.tileSet.activity; }
+
     async route(data: readonly S[]): Promise<ReadonlySet<string>> {
+        return this.tileSet.activity.during(() => this.routeWork(data));
+    }
+
+    private async routeWork(data: readonly S[]): Promise<ReadonlySet<string>> {
         const tileable = data.filter((state) => this.canTile(state));
         // Null without a service worker that can draw them: draw natively then.
         const template = this.shouldUseTiles(tileable) ? await this.tileSet.setShapes(tileable) : null;

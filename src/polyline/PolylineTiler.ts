@@ -1,4 +1,5 @@
 import { createRasterLayerState, type RasterLayerState } from '../raster/RasterLayerState';
+import type { TileActivity } from '../tileserver/TileActivity';
 import { RasterLayerSource } from '../raster/RasterLayerSource';
 import type { SWPolyline } from '../tileserver/LocalTileServer';
 import { POLYLINE_TILE_CODEC, ShapeTiler, ShapeTileSet } from '../tileserver/ShapeTileSet';
@@ -37,6 +38,9 @@ export class PolylineTiler {
     onTemplate: ((template: string | null, tileSize: number) => void | Promise<void>) | null = null;
 
     private readonly shapes: ShapeTiler<PolylineState, SWPolyline>;
+
+    /** Busy while this tiler takes a list or its tiles are drawn. @internal */
+    get activity(): TileActivity { return this.shapes.activity; }
 
     /**
      * @param options When to tile. It may be replaced later: the next {@link route}
