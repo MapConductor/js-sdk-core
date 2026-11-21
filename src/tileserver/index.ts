@@ -6,3 +6,4 @@ export * from "./TilePixelRatio";
 export * from "./TileServerRegistry";
 export * from "./TileWorkerHandler";
 export * from "./WorkerProtocol";
+export * from './TileActivity';

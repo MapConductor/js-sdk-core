@@ -381,6 +381,41 @@ export class LocalTileServer {
         });
     }
 
+    /** @internal */
+    private static readonly shapeActivity = new Map<string, { busy: boolean; seq: number; listeners: Set<(busy: boolean) => void> }>();
+
+    /**
+     * Calls `listener` whenever the service worker starts or stops drawing
+     * tiles of the shape route `routeId` (true while at least one is drawn).
+     * Returns the unsubscribe.
+     *
+     * @internal
+     */
+    static onShapeActivity(routeId: string, listener: (busy: boolean) => void): () => void {
+        let entry = LocalTileServer.shapeActivity.get(routeId);
+        if (!entry) {
+            entry = { busy: false, seq: 0, listeners: new Set() };
+            LocalTileServer.shapeActivity.set(routeId, entry);
+        }
+        entry.listeners.add(listener);
+        return () => {
+            entry!.listeners.delete(listener);
+            if (entry!.listeners.size === 0) LocalTileServer.shapeActivity.delete(routeId);
+        };
+    }
+
+    /** @internal */
+    private static shapeActivityChanged(routeId: string, busy: boolean, seq: number): void {
+        const entry = LocalTileServer.shapeActivity.get(routeId);
+        // Numbered by the worker: a change that arrives after a later one is old.
+        // A restarted worker numbers from 1 again.
+        if (!entry || (seq <= entry.seq && seq !== 1)) return;
+        entry.seq = seq;
+        if (entry.busy === busy) return;
+        entry.busy = busy;
+        for (const listener of [...entry.listeners]) listener(busy);
+    }
+
     /**
      * Register a Service Worker that intercepts `/__tiles/` requests and routes them
      * to `handleFetch()` on the main thread.
@@ -401,6 +436,11 @@ export class LocalTileServer {
 
         navigator.serviceWorker.addEventListener('message', (event: MessageEvent) => {
             const { type, pathname } = event.data as { type: string; pathname: string };
+            if (type === 'mc-shape-activity') {
+                const { routeId, busy, seq } = event.data as { routeId: string; busy: boolean; seq: number };
+                LocalTileServer.shapeActivityChanged(routeId, busy, seq);
+                return;
+            }
             if (type !== 'tile-request') return;
 
             // pathname: /__tiles/{routeId}/{tileSize}/{cacheKey?}/{z}/{x}/{y}{@2x?}.png

@@ -1,4 +1,5 @@
 import { createGeoPoint, type GeoPoint } from '../features/GeoPoint';
+import type { TileActivity } from '../tileserver/TileActivity';
 import { isEmptyCameraRestriction, type CameraRestriction } from '../map/CameraRestriction';
 import type { OnCameraMoveHandler, OnMapEventHandler } from '../map/MapViewBase';
 import type { MapCameraPosition } from '../types/MapCamera';
@@ -164,6 +165,17 @@ export abstract class BaseMapViewController {
       | (SlottedOverlayController & { tiler?: PolylineTiler | null })
       | null;
     if (controller?.tiler) controller.tiler.options = options;
+  }
+
+  /**
+   * Whether this map's tiler of `kind` is busy -- taking a list or drawing tiles --
+   * for the collections' onAddStart / onAddEnd; null for a kind without tiles.
+   *
+   * @internal
+   */
+  overlayTileActivity(kind: OverlayKind): TileActivity | null {
+    const controller = this.primaryOverlayController(kind) as { tiler?: { activity?: TileActivity } | null } | null;
+    return controller?.tiler?.activity ?? null;
   }
 
   /**
