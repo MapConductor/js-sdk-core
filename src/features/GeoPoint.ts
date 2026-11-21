@@ -79,45 +79,46 @@ const isGeoPoint = (position: GeoPointInterface): position is GeoPoint => {
     );
 };
 
-/**
- * Creates a GeoPoint from latitude and longitude
- */
-export function createGeoPoint(params: {
-    latitude: number,
-    longitude: number,
-    altitude?: number | null,
-}): GeoPoint {
-    const altitude = params.altitude === undefined ? 0 : params.altitude;
+// Methods live on the prototype: a closure per method per point made each point
+// ~520 bytes, and 720k circle centers alone took ~370 MB of heap.
+class GeoPointValue implements GeoPoint {
+    latitude: number;
+    longitude: number;
+    altitude: number | null;
+
+    constructor(latitude: number, longitude: number, altitude: number | null) {
+        this.latitude = latitude;
+        this.longitude = longitude;
+        this.altitude = altitude;
+    }
 
     /**
      * Validates if a GeoPoint has valid coordinates
      */
-    const isValid = () => (
-        params.latitude >= -90 &&
-        params.latitude <= 90 &&
-        params.longitude >= -180 &&
-        params.longitude <= 180
-    );
+    isValid(): boolean {
+        return (
+            this.latitude >= -90 &&
+            this.latitude <= 90 &&
+            this.longitude >= -180 &&
+            this.longitude <= 180
+        );
+    }
 
     /**
      * Normalizes a GeoPoint to ensure coordinates are within valid ranges
      */
-    const normalize = (): GeoPoint => {
-        const normalizedLatitude = Math.max(-90, Math.min(90, params.latitude));
-        const normalizedLongitude = ((((params.longitude + 180) % 360) + 360) % 360) - 180;
-        return createGeoPoint({
-            latitude: normalizedLatitude,
-            longitude :normalizedLongitude,
-            altitude: altitude ?? 0,
-        });
-    };
+    normalize(): GeoPoint {
+        const normalizedLatitude = Math.max(-90, Math.min(90, this.latitude));
+        const normalizedLongitude = ((((this.longitude + 180) % 360) + 360) % 360) - 180;
+        return new GeoPointValue(normalizedLatitude, normalizedLongitude, this.altitude ?? 0);
+    }
 
     /**
      * Wraps a GeoPoint around the poles and date line
      */
-    const wrap = (): GeoPoint => {
-        let wrappedLatitude = params.latitude;
-        let wrappedLongitude = params.longitude;
+    wrap(): GeoPoint {
+        let wrappedLatitude = this.latitude;
+        let wrappedLongitude = this.longitude;
 
         // Handle latitude overflow/underflow
         if (wrappedLatitude > 90) {
@@ -133,51 +134,50 @@ export function createGeoPoint(params: {
         // Normalize longitude to [-180, 180] range
         wrappedLongitude = ((((wrappedLongitude + 180) % 360) + 360) % 360) - 180;
 
-        return createGeoPoint({
-            latitude: wrappedLatitude,
-            longitude: wrappedLongitude,
-            altitude: altitude ?? 0,
-        });
-    };
+        return new GeoPointValue(wrappedLatitude, wrappedLongitude, this.altitude ?? 0);
+    }
 
     /**
      * Checks if two GeoPoints are approximately equal within a tolerance
      */
-    const equals = (other: GeoPoint, tolerance: number = 1e-7): boolean => {
+    equals(other: GeoPoint, tolerance: number = 1e-7): boolean {
         return (
-            Math.abs(params.latitude - other.latitude) < tolerance &&
-            Math.abs(params.longitude - other.longitude) < tolerance &&
-            Math.abs((altitude ?? 0) - (other.altitude ?? 0)) < tolerance
+            Math.abs(this.latitude - other.latitude) < tolerance &&
+            Math.abs(this.longitude - other.longitude) < tolerance &&
+            Math.abs((this.altitude ?? 0) - (other.altitude ?? 0)) < tolerance
         );
     }
 
     // android-sdk / ios-sdk と一致: 各座標を ×1e7 して truncate した整数の
     // Java Long.hashCode()（切り捨て + 上位ビット fold）を *31 で畳み込む。
-    const hashCode = (): number => {
-        let result = longHashCode(params.latitude * 1e7);
-        result = combineHash(result, longHashCode(params.longitude * 1e7));
-        result = combineHash(result, longHashCode((altitude ?? 0) * 1e7));
+    hashCode(): number {
+        let result = longHashCode(this.latitude * 1e7);
+        result = combineHash(result, longHashCode(this.longitude * 1e7));
+        result = combineHash(result, longHashCode((this.altitude ?? 0) * 1e7));
         return result;
-    };
+    }
 
-    const toUrlValue = (precision: number = 6): string => {
+    toUrlValue(precision: number = 6): string {
         return [
-            truncToPrecision(params.latitude, precision).toFixed(precision),
-            truncToPrecision(params.longitude, precision).toFixed(precision),
+            truncToPrecision(this.latitude, precision).toFixed(precision),
+            truncToPrecision(this.longitude, precision).toFixed(precision),
         ].join(",");
-    };
+    }
+}
 
-    return {
-        latitude: params.latitude,
-        longitude: params.longitude,
-        altitude,
-        equals,
-        hashCode,
-        isValid,
-        normalize,
-        toUrlValue,
-        wrap,
-    };
+/**
+ * Creates a GeoPoint from latitude and longitude
+ */
+export function createGeoPoint(params: {
+    latitude: number,
+    longitude: number,
+    altitude?: number | null,
+}): GeoPoint {
+    return new GeoPointValue(
+        params.latitude,
+        params.longitude,
+        params.altitude === undefined ? 0 : params.altitude,
+    );
 }
 
 export namespace GeoPoint {

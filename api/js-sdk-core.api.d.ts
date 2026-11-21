@@ -67,7 +67,7 @@ declare namespace GeoPoint {
  * GroundImage.kt）。TypeScript の `*Event` は素の interface でコンストラクタを持てないため、
  * 代わりにイベントを配送する直前にこの関数を通すことで同じ保証を得る。
  *
- * `clicked.wrap()` を直接呼ばないこと: `GeoPoint.wrap` はファクトリのクロージャに束縛された
+ * `clicked.wrap()` を直接呼ばないこと: `GeoPoint.wrap` は `createGeoPoint` が作るオブジェクトの
  * メソッドで、プロバイダが組み立てるプレーンオブジェクトには存在しない
  * （`GeoPointInterface.wrap` は optional）。`fromGeoPoint` で正規の GeoPoint に
  * 引き上げてから wrap する。android-sdk の `GeoPoint.from(it.wrap())` に対応する。
