@@ -114,7 +114,7 @@ const fingerPrintEquals = (a: PolygonFingerPrint, b: PolygonFingerPrint): boolea
     a.holes === b.holes &&
     a.extra === b.extra;
 
-export function createPolygonState(params: {
+type PolygonStateParams = {
     points: GeoPoint[];
     holes?: GeoPoint[][];
     id?: string | null;
@@ -127,120 +127,215 @@ export function createPolygonState(params: {
     extra?: Serializable | null;
     onClick?: OnPolygonEventHandler | null;
     onAdded?: OnPolygonAddedHandler | null;
-}): PolygonState {
-    let points = params.points;
+};
+
+const polygonMutationListeners = new Set<(state: PolygonState) => void>();
+
+/** Shared update channel for collectors. Custom PolygonState implementations use their own observable. @internal */
+export const polygonMutations = {
+    accepts: (state: PolygonState): boolean => state instanceof PolygonStateValue,
+    subscribe(listener: (state: PolygonState) => void): () => void {
+        polygonMutationListeners.add(listener);
+        return () => { polygonMutationListeners.delete(listener); };
+    },
+};
+
+type FingerPrintSubject = ReturnType<typeof createSubject<PolygonFingerPrint>>;
+
+/**
+ * Prototype-based PolygonState, like MarkerState and CircleState. The factory it
+ * replaces built an object literal of getters, setters and closures per polygon,
+ * about 3.5 KB each before any points, and a subject that collectors on the shared
+ * channel never read.
+ */
+class PolygonStateValue implements PolygonState {
+    readonly id: string;
+
+    private _points: GeoPoint[];
+    // The points hash last reported. Compared with the hash of what is assigned, so
+    // an array edited in place and assigned again is still seen as a change.
+    private _pointsHash: number;
     // 穴のユニオンはここでは行わない。android-sdk と同じく「コンポーネント層でのみ」適用する
     // （PolygonComponent.kt: holes.size > 1 のときだけ state.unionHolesInPlace()）。
     // ctor / copy() / setter でも union すると、unionHolesInPlace 1回の呼び出しで
     // 最大4回 unionHoleRings が走る（unionHoleRings は CW に巻き直すため再入力で再処理になる）。
-    let holes = params.holes ?? [];
-    let strokeColor = params.strokeColor ?? "#000000";
-    let strokeWidth = params.strokeWidth ?? 1;
-    let fillColor = params.fillColor ?? "transparent";
-    let geodesic = params.geodesic ?? false;
-    let clickable = params.clickable ?? true;
-    let zIndex = params.zIndex ?? 0;
-    let extra = params.extra ?? null;
-    let onClick = params.onClick ?? null;
-    let onAdded = params.onAdded ?? null;
+    private _holes: GeoPoint[][];
+    private _holesHash: number;
+    private _strokeColor: string;
+    private _strokeWidth: number;
+    private _fillColor: string;
+    private _geodesic: boolean;
+    private _clickable: boolean;
+    private _zIndex: number;
+    private _extra: Serializable | null;
+    private _onClick: OnPolygonEventHandler | null;
+    private _onAdded: OnPolygonAddedHandler | null;
 
-    const id =
-        params.id ??
-        polygonId([
-            listHashCode(points),
-            nestedListHashCode(holes),
-            hashObj(strokeColor),
-            hashNum(strokeWidth),
-            hashObj(fillColor),
-            hashBool(geodesic),
-            hashBool(clickable),
-            extra == null ? 0 : hashObj(extra),
-        ]).toString();
+    // Created on the first asObservable() call.
+    private _subject: FingerPrintSubject | null = null;
 
-    const subject = createSubject<PolygonFingerPrint>(fingerPrintEquals);
-    const emit = () => subject.next(fingerPrint());
+    constructor(params: PolygonStateParams) {
+        this._points = params.points;
+        this._pointsHash = listHashCode(this._points);
+        this._holes = params.holes ?? [];
+        this._holesHash = nestedListHashCode(this._holes);
+        this._strokeColor = params.strokeColor ?? "#000000";
+        this._strokeWidth = params.strokeWidth ?? 1;
+        this._fillColor = params.fillColor ?? "transparent";
+        this._geodesic = params.geodesic ?? false;
+        this._clickable = params.clickable ?? true;
+        this._zIndex = params.zIndex ?? 0;
+        this._extra = params.extra ?? null;
+        this._onClick = params.onClick ?? null;
+        this._onAdded = params.onAdded ?? null;
+        this.id =
+            params.id ??
+            polygonId([
+                this._pointsHash,
+                this._holesHash,
+                hashObj(this._strokeColor),
+                hashNum(this._strokeWidth),
+                hashObj(this._fillColor),
+                hashBool(this._geodesic),
+                hashBool(this._clickable),
+                this._extra == null ? 0 : hashObj(this._extra),
+            ]).toString();
+    }
 
-    function fingerPrint(): PolygonFingerPrint {
+    // A write that leaves the fingerprint as it was reports nothing, as the
+    // subject's distinctUntilChanged did when every write emitted.
+    private changed(): void {
+        for (const listener of polygonMutationListeners) listener(this);
+        this._subject?.next(this.fingerPrint());
+    }
+
+    get points() { return this._points; }
+    set points(v: GeoPoint[]) {
+        const hash = listHashCode(v);
+        this._points = v;
+        if (hash === this._pointsHash) return;
+        this._pointsHash = hash;
+        this.changed();
+    }
+    get holes() { return this._holes; }
+    set holes(v: GeoPoint[][]) {
+        const hash = nestedListHashCode(v);
+        this._holes = v;
+        if (hash === this._holesHash) return;
+        this._holesHash = hash;
+        this.changed();
+    }
+    get strokeColor() { return this._strokeColor; }
+    set strokeColor(v: string) {
+        if (v === this._strokeColor) return;
+        this._strokeColor = v;
+        this.changed();
+    }
+    get strokeWidth() { return this._strokeWidth; }
+    set strokeWidth(v: number) {
+        if (v === this._strokeWidth) return;
+        this._strokeWidth = v;
+        this.changed();
+    }
+    get fillColor() { return this._fillColor; }
+    set fillColor(v: string) {
+        if (v === this._fillColor) return;
+        this._fillColor = v;
+        this.changed();
+    }
+    get geodesic() { return this._geodesic; }
+    set geodesic(v: boolean) {
+        if (v === this._geodesic) return;
+        this._geodesic = v;
+        this.changed();
+    }
+    get clickable() { return this._clickable; }
+    set clickable(v: boolean) {
+        if (v === this._clickable) return;
+        this._clickable = v;
+        this.changed();
+    }
+    get zIndex() { return this._zIndex; }
+    set zIndex(v: number) {
+        if (v === this._zIndex) return;
+        this._zIndex = v;
+        this.changed();
+    }
+    get extra() { return this._extra; }
+    set extra(v: Serializable | null) {
+        const unchanged = (v == null ? 0 : hashObj(v)) === (this._extra == null ? 0 : hashObj(this._extra));
+        this._extra = v;
+        if (!unchanged) this.changed();
+    }
+    // onClick and onAdded are not part of the fingerprint: changing them redraws nothing.
+    get onClick() { return this._onClick; }
+    set onClick(v: OnPolygonEventHandler | null) { this._onClick = v; }
+    get onAdded() { return this._onAdded; }
+    set onAdded(v: OnPolygonAddedHandler | null) { this._onAdded = v; }
+
+    fingerPrint(): PolygonFingerPrint {
         return {
-            id: hashObj(id),
-            strokeColor: hashObj(strokeColor),
-            strokeWidth: hashNum(strokeWidth),
-            fillColor: hashObj(fillColor),
-            geodesic: hashBool(geodesic),
-            clickable: hashBool(clickable),
-            zIndex,
-            points: listHashCode(points),
-            holes: nestedListHashCode(holes),
-            extra: extra == null ? 0 : hashObj(extra),
+            id: hashObj(this.id),
+            strokeColor: hashObj(this._strokeColor),
+            strokeWidth: hashNum(this._strokeWidth),
+            fillColor: hashObj(this._fillColor),
+            geodesic: hashBool(this._geodesic),
+            clickable: hashBool(this._clickable),
+            zIndex: this._zIndex,
+            points: listHashCode(this._points),
+            holes: nestedListHashCode(this._holes),
+            extra: this._extra == null ? 0 : hashObj(this._extra),
         };
     }
 
-    const hashCode = (): number => {
-        let result = extra == null ? 0 : hashObj(extra);
-        result = combineHash(result, hashObj(strokeColor));
-        result = combineHash(result, hashNum(strokeWidth));
-        result = combineHash(result, hashObj(fillColor));
-        result = combineHash(result, hashBool(geodesic));
-        result = combineHash(result, hashBool(clickable));
-        result = combineHash(result, zIndex);
-        result = combineHash(result, listHashCode(points));
-        result = combineHash(result, nestedListHashCode(holes));
+    hashCode(): number {
+        let result = this._extra == null ? 0 : hashObj(this._extra);
+        result = combineHash(result, hashObj(this._strokeColor));
+        result = combineHash(result, hashNum(this._strokeWidth));
+        result = combineHash(result, hashObj(this._fillColor));
+        result = combineHash(result, hashBool(this._geodesic));
+        result = combineHash(result, hashBool(this._clickable));
+        result = combineHash(result, this._zIndex);
+        result = combineHash(result, listHashCode(this._points));
+        result = combineHash(result, nestedListHashCode(this._holes));
         return result | 0;
-    };
+    }
 
-    const copy = (opts: PolygonStateCopyParams = {}): PolygonState =>
-        createPolygonState({
-            id: "id" in opts ? opts.id ?? null : id,
-            points: opts.points ?? points,
-            holes: "holes" in opts ? opts.holes ?? [] : holes,
-            strokeColor: opts.strokeColor ?? strokeColor,
-            strokeWidth: opts.strokeWidth ?? strokeWidth,
-            fillColor: opts.fillColor ?? fillColor,
-            geodesic: opts.geodesic ?? geodesic,
-            clickable: opts.clickable ?? clickable,
-            zIndex: opts.zIndex ?? zIndex,
-            extra: "extra" in opts ? opts.extra ?? null : extra,
-            onClick: "onClick" in opts ? opts.onClick ?? null : onClick,
-            onAdded: "onAdded" in opts ? opts.onAdded ?? null : onAdded,
+    copy(opts: PolygonStateCopyParams = {}): PolygonState {
+        return createPolygonState({
+            id: "id" in opts ? opts.id ?? null : this.id,
+            points: opts.points ?? this._points,
+            holes: "holes" in opts ? opts.holes ?? [] : this._holes,
+            strokeColor: opts.strokeColor ?? this._strokeColor,
+            strokeWidth: opts.strokeWidth ?? this._strokeWidth,
+            fillColor: opts.fillColor ?? this._fillColor,
+            geodesic: opts.geodesic ?? this._geodesic,
+            clickable: opts.clickable ?? this._clickable,
+            zIndex: opts.zIndex ?? this._zIndex,
+            extra: "extra" in opts ? opts.extra ?? null : this._extra,
+            onClick: "onClick" in opts ? opts.onClick ?? null : this._onClick,
+            onAdded: "onAdded" in opts ? opts.onAdded ?? null : this._onAdded,
         });
+    }
 
-    const equals = (other: unknown): boolean => {
+    equals(other: unknown): boolean {
         const o = other as { hashCode?: () => number } | null | undefined;
-        return typeof o?.hashCode === "function" && hashCode() === o.hashCode();
-    };
+        return typeof o?.hashCode === "function" && this.hashCode() === o.hashCode();
+    }
 
-    const state: PolygonState = {
-        get id() { return id; },
-        get points() { return points; },
-        set points(v: GeoPoint[]) { points = v; emit(); },
-        get holes() { return holes; },
-        set holes(v: GeoPoint[][]) { holes = v; emit(); },
-        get strokeColor() { return strokeColor; },
-        set strokeColor(v: string) { strokeColor = v; emit(); },
-        get strokeWidth() { return strokeWidth; },
-        set strokeWidth(v: number) { strokeWidth = v; emit(); },
-        get fillColor() { return fillColor; },
-        set fillColor(v: string) { fillColor = v; emit(); },
-        get geodesic() { return geodesic; },
-        set geodesic(v: boolean) { geodesic = v; emit(); },
-        get clickable() { return clickable; },
-        set clickable(v: boolean) { clickable = v; emit(); },
-        get zIndex() { return zIndex; },
-        set zIndex(v: number) { zIndex = v; emit(); },
-        get extra() { return extra; },
-        set extra(v: Serializable | null) { extra = v; emit(); },
-        get onClick() { return onClick; },
-        set onClick(v: OnPolygonEventHandler | null) { onClick = v; emit(); },
-        get onAdded() { return onAdded; },
-        // No emit: onAdded is not part of the fingerprint, so changing it redraws nothing.
-        set onAdded(v: OnPolygonAddedHandler | null) { onAdded = v; },
-        fingerPrint,
-        copy,
-        equals,
-        hashCode,
-        asObservable: () => ({ subscribe: subject.subscribe }),
-    };
+    asObservable() {
+        return {
+            subscribe: (fn: (fp: PolygonFingerPrint) => void) => {
+                if (!this._subject) {
+                    this._subject = createSubject<PolygonFingerPrint>(fingerPrintEquals);
+                    this._subject.next(this.fingerPrint());
+                }
+                return this._subject.subscribe(fn);
+            },
+        };
+    }
+}
 
-    emit();
-    return state;
+export function createPolygonState(params: PolygonStateParams): PolygonState {
+    return new PolygonStateValue(params);
 }
