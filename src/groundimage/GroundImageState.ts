@@ -147,9 +147,15 @@ export function createGroundImageState(params: {
         return result;
     };
 
+    /**
+     * 中身を引き継いだ新しい GroundImageState を返す。id は引き継がず、新しい中身から計算し直す
+     * （`id` を渡したときだけそれを使う）。描画側は id で区別するので、引き継ぐと copy で
+     * 増やした図形が元の図形を上書きして 1 つにしか見えなかった。
+     * 同じ図形として更新したいときは `copy({ id: state.id, ... })` と明示する。
+     */
     const copy = (opts: GroundImageStateCopyParams = {}): GroundImageState =>
         createGroundImageState({
-            id: "id" in opts ? opts.id ?? null : id,
+            id: opts.id ?? null,
             bounds: opts.bounds ?? bounds,
             imageUrl: opts.imageUrl ?? imageUrl,
             opacity: opts.opacity ?? opacity,

@@ -98,10 +98,11 @@ for (const [kind, create, mutations, shape] of [
     }
   });
 
-  test(`${kind}: copy keeps the id and values and is a separate state`, () => {
+  test(`${kind}: copy keeps the values, recomputes the id and is a separate state`, () => {
     const state = create({ id: kind, points: shape(), strokeColor: '#ff0000', zIndex: 2, extra: 'x' });
     const copied = state.copy({ strokeWidth: 9 });
-    assert.equal(copied.id, state.id);
+    assert.notEqual(copied.id, state.id);
+    assert.equal(state.copy({ id: state.id, strokeWidth: 9 }).id, state.id);
     assert.equal(copied.strokeColor, '#ff0000');
     assert.equal(copied.zIndex, 2);
     assert.equal(copied.extra, 'x');

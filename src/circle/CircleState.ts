@@ -215,9 +215,15 @@ class CircleStateValue implements CircleState {
         return combineHash(result, zIndex ?? 0) | 0;
     }
 
+    /**
+     * 中身を引き継いだ新しい CircleState を返す。id は引き継がず、新しい中身から計算し直す
+     * （`id` を渡したときだけそれを使う）。描画側は id で区別するので、引き継ぐと copy で
+     * 増やした図形が元の図形を上書きして 1 つにしか見えなかった。
+     * 同じ図形として更新したいときは `copy({ id: state.id, ... })` と明示する。
+     */
     copy(opts: CircleStateCopyParams = {}): CircleState {
         return createCircleState({
-            id: "id" in opts ? opts.id ?? null : this.id,
+            id: opts.id ?? null,
             center: opts.center ?? this.center,
             radiusMeters: opts.radiusMeters ?? this.radiusMeters,
             geodesic: opts.geodesic ?? this.geodesic,

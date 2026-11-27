@@ -58,7 +58,7 @@ export function unionHoleRings(holes: GeoPoint[][]): GeoPoint[][] {
 export function unionHoles(state: PolygonState): PolygonState {
     const normalizedHoles = unionHoleRings(state.holes);
     if (normalizedHoles === state.holes) return state;
-    return state.copy({ holes: normalizedHoles });
+    return state.copy({ id: state.id, holes: normalizedHoles });
 }
 
 /** Alias: in-place mutation variant. */

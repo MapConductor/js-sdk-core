@@ -618,7 +618,7 @@ test('tiled compositions allocate no persistent entities or fingerprints', async
     assert.equal(manager.getEntity('shared-123').state, states[123]);
     assert.equal(manager.find(states[123].center).state, states[123]);
     assert.equal(manager.nativeEntities().length, 0);
-    const replacement = states[25].copy({ radiusMeters: 8 });
+    const replacement = states[25].copy({ id: states[25].id, radiusMeters: 8 });
     await controller.update(replacement);
     assert.equal(manager.getEntity('shared-25').state, replacement);
     controller.tiler.remove('shared-123');
@@ -641,7 +641,7 @@ test('revision readers independently receive changes and accept equal replacemen
     assert.equal(a.native.changed.length, 1); assert.equal(b.native.changed.length, 1);
     await a.controller.update(state);
     assert.equal(a.native.changed.length, 1);
-    await a.controller.add([state.copy()]);
+    await a.controller.add([state.copy({ id: state.id })]);
     assert.equal(a.native.changed.length, 1);
   } finally { await a.controller.clear(); await b.controller.clear(); }
 });

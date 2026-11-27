@@ -336,12 +336,18 @@ class MarkerStateImpl implements MarkerState {
         });
     }
 
+    /**
+     * 中身を引き継いだ新しい MarkerState を返す。id は引き継がず、新しい中身から計算し直す
+     * （`id` を渡したときだけそれを使う）。同じ id のままだと描画側は「元のマーカーの更新」と
+     * 見なすので、copy で増やしたマーカーが元のマーカーを上書きして 1 個にしか見えなかった。
+     * 同じマーカーとして動かしたいときは `copy({ id: state.id, ... })` と明示する。
+     */
     copy(opts: MarkerStateCopyParams = {}): MarkerState {
         const has = (key: keyof MarkerStateCopyParams): boolean =>
             Object.prototype.hasOwnProperty.call(opts, key);
 
         return createMarkerState({
-            id: has("id") ? opts.id : this.id,
+            id: opts.id ?? null,
             position: has("position") ? opts.position! : this._position,
             extra: has("extra") ? opts.extra ?? null : this._extra,
             icon: has("icon") ? opts.icon ?? null : this._icon,
