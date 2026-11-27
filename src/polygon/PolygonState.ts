@@ -301,9 +301,15 @@ class PolygonStateValue implements PolygonState {
         return result | 0;
     }
 
+    /**
+     * 中身を引き継いだ新しい PolygonState を返す。id は引き継がず、新しい中身から計算し直す
+     * （`id` を渡したときだけそれを使う）。描画側は id で区別するので、引き継ぐと copy で
+     * 増やした図形が元の図形を上書きして 1 つにしか見えなかった。
+     * 同じ図形として更新したいときは `copy({ id: state.id, ... })` と明示する。
+     */
     copy(opts: PolygonStateCopyParams = {}): PolygonState {
         return createPolygonState({
-            id: "id" in opts ? opts.id ?? null : this.id,
+            id: opts.id ?? null,
             points: opts.points ?? this._points,
             holes: "holes" in opts ? opts.holes ?? [] : this._holes,
             strokeColor: opts.strokeColor ?? this._strokeColor,

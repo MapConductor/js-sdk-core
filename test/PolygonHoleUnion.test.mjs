@@ -62,6 +62,7 @@ for (const c of cases) {
             const state = createPolygonState({ points: toGeo(c.outer, c), holes });
             const unioned = unionHoles(state);
             assert.equal(unioned.points, state.points, 'the outline is left alone');
+            assert.equal(unioned.id, state.id, 'the same polygon, so the id is kept');
             result = unioned.holes;
         } else {
             result = unionHoleRings(holes);
